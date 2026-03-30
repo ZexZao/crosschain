@@ -1,7 +1,7 @@
 const { ethers } = require('ethers');
 const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
 const { createBaseXmsg, createRequestId } = require('../shared/xmsg');
-const { buildConsensusAggregate } = require('../consensus-aggregator');
+const { requestConsensusAggregate } = require('../consensus-aggregator/client');
 const {
   buildFabricEventProof,
   buildFabricFinalityInfo
@@ -14,7 +14,7 @@ function parseEventPayload(payloadBytes) {
   return JSON.parse(text);
 }
 
-function buildXmsgFromFabricEvent({
+async function buildXmsgFromFabricEvent({
   deployment,
   channelName,
   chaincodeId,
@@ -72,13 +72,14 @@ function buildXmsgFromFabricEvent({
   });
 
   const parsedEventProof = { ...eventProof };
-  const consensusProof = buildConsensusAggregate({
+  const consensusProof = await requestConsensusAggregate({
     channelName,
     blockNumber,
     blockHash: parsedEventProof.blockHash,
     eventRoot: parsedEventProof.eventRoot,
     requestID: base.requestID,
-    payloadHash: base.payloadHash
+    payloadHash: base.payloadHash,
+    txId
   });
   parsedEventProof.consensusProof = consensusProof;
 
@@ -114,7 +115,7 @@ function writeLatestXmsg(xmsg) {
   return xmsg;
 }
 
-function buildFromCapturedEvent(relPath = 'fabric-captured-event.json') {
+async function buildFromCapturedEvent(relPath = 'fabric-captured-event.json') {
   const captured = readJSON(relPath);
   const deployment = readJSON('deployment.json');
   if (!captured) {
@@ -123,7 +124,7 @@ function buildFromCapturedEvent(relPath = 'fabric-captured-event.json') {
   if (!deployment) {
     throw new Error('deployment.json not found; run deploy first');
   }
-  const xmsg = buildXmsgFromFabricEvent({
+  const xmsg = await buildXmsgFromFabricEvent({
     deployment,
     channelName: captured.channelName,
     chaincodeId: captured.chaincodeId,
@@ -147,8 +148,14 @@ function buildFromCapturedEvent(relPath = 'fabric-captured-event.json') {
 
 if (require.main === module) {
   const relPath = process.argv[2] || 'fabric-captured-event.json';
-  const xmsg = buildFromCapturedEvent(relPath);
-  console.log(JSON.stringify(xmsg, null, 2));
+  buildFromCapturedEvent(relPath)
+    .then((xmsg) => {
+      console.log(JSON.stringify(xmsg, null, 2));
+    })
+    .catch((error) => {
+      console.error(error.message || error);
+      process.exit(1);
+    });
 }
 
 module.exports = {

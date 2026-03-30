@@ -122,7 +122,7 @@ async function runMockListener(mockFile) {
   if (!deployment) {
     throw new Error('deployment.json not found; run deploy first');
   }
-  const xmsg = buildXmsgFromFabricEvent({ deployment, ...captured });
+  const xmsg = await buildXmsgFromFabricEvent({ deployment, ...captured });
   const xmsgWrittenAtMs = nowMs();
   xmsg.listenerTiming = {
     ...captured.listenerTiming,
@@ -166,7 +166,7 @@ async function runGatewayListener(options) {
     try {
       const captured = mapCapturedEvent(contractEvent, options);
       writeJSON('fabric-captured-event.json', captured);
-      const xmsg = buildXmsgFromFabricEvent({ deployment, ...captured });
+      const xmsg = await buildXmsgFromFabricEvent({ deployment, ...captured });
       const xmsgWrittenAtMs = nowMs();
       xmsg.listenerTiming = {
         ...captured.listenerTiming,

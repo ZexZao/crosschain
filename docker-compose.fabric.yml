@@ -71,6 +71,108 @@ services:
     depends_on:
       - orderer.example.com
 
+  peer1.org1.example.com:
+    image: hyperledger/fabric-peer:2.5.10
+    container_name: peer1.org1.example.com
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=crosschain_experiment_default
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=true
+      - CORE_PEER_PROFILE_ENABLED=true
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+      - CORE_PEER_ID=peer1.org1.example.com
+      - CORE_PEER_ADDRESS=peer1.org1.example.com:8051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:8051
+      - CORE_PEER_CHAINCODEADDRESS=peer1.org1.example.com:8052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:8052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.org1.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer1.org1.example.com:8051
+      - CORE_PEER_LOCALMSPID=Org1MSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+    working_dir: /root
+    command: peer node start
+    ports:
+      - "8051:8051"
+      - "8052:8052"
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ./fabric-network/runtime/organizations/peerOrganizations/org1.example.com/peers/peer1.org1.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./fabric-network/runtime/organizations/peerOrganizations/org1.example.com/peers/peer1.org1.example.com/tls:/etc/hyperledger/fabric/tls
+      - ./fabric-network/runtime/peer1.org1.example.com:/var/hyperledger/production
+    depends_on:
+      - orderer.example.com
+
+  peer2.org1.example.com:
+    image: hyperledger/fabric-peer:2.5.10
+    container_name: peer2.org1.example.com
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=crosschain_experiment_default
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=true
+      - CORE_PEER_PROFILE_ENABLED=true
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+      - CORE_PEER_ID=peer2.org1.example.com
+      - CORE_PEER_ADDRESS=peer2.org1.example.com:9051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:9051
+      - CORE_PEER_CHAINCODEADDRESS=peer2.org1.example.com:9052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:9052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.org1.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer2.org1.example.com:9051
+      - CORE_PEER_LOCALMSPID=Org1MSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+    working_dir: /root
+    command: peer node start
+    ports:
+      - "9051:9051"
+      - "9052:9052"
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ./fabric-network/runtime/organizations/peerOrganizations/org1.example.com/peers/peer2.org1.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./fabric-network/runtime/organizations/peerOrganizations/org1.example.com/peers/peer2.org1.example.com/tls:/etc/hyperledger/fabric/tls
+      - ./fabric-network/runtime/peer2.org1.example.com:/var/hyperledger/production
+    depends_on:
+      - orderer.example.com
+
+  peer3.org1.example.com:
+    image: hyperledger/fabric-peer:2.5.10
+    container_name: peer3.org1.example.com
+    environment:
+      - CORE_VM_ENDPOINT=unix:///host/var/run/docker.sock
+      - CORE_VM_DOCKER_HOSTCONFIG_NETWORKMODE=crosschain_experiment_default
+      - FABRIC_LOGGING_SPEC=INFO
+      - CORE_PEER_TLS_ENABLED=true
+      - CORE_PEER_PROFILE_ENABLED=true
+      - CORE_PEER_TLS_CERT_FILE=/etc/hyperledger/fabric/tls/server.crt
+      - CORE_PEER_TLS_KEY_FILE=/etc/hyperledger/fabric/tls/server.key
+      - CORE_PEER_TLS_ROOTCERT_FILE=/etc/hyperledger/fabric/tls/ca.crt
+      - CORE_PEER_ID=peer3.org1.example.com
+      - CORE_PEER_ADDRESS=peer3.org1.example.com:10051
+      - CORE_PEER_LISTENADDRESS=0.0.0.0:10051
+      - CORE_PEER_CHAINCODEADDRESS=peer3.org1.example.com:10052
+      - CORE_PEER_CHAINCODELISTENADDRESS=0.0.0.0:10052
+      - CORE_PEER_GOSSIP_BOOTSTRAP=peer0.org1.example.com:7051
+      - CORE_PEER_GOSSIP_EXTERNALENDPOINT=peer3.org1.example.com:10051
+      - CORE_PEER_LOCALMSPID=Org1MSP
+      - CORE_PEER_MSPCONFIGPATH=/etc/hyperledger/fabric/msp
+    working_dir: /root
+    command: peer node start
+    ports:
+      - "10051:10051"
+      - "10052:10052"
+    volumes:
+      - /var/run/docker.sock:/host/var/run/docker.sock
+      - ./fabric-network/runtime/organizations/peerOrganizations/org1.example.com/peers/peer3.org1.example.com/msp:/etc/hyperledger/fabric/msp
+      - ./fabric-network/runtime/organizations/peerOrganizations/org1.example.com/peers/peer3.org1.example.com/tls:/etc/hyperledger/fabric/tls
+      - ./fabric-network/runtime/peer3.org1.example.com:/var/hyperledger/production
+    depends_on:
+      - orderer.example.com
+
   fabric-tools:
     image: hyperledger/fabric-tools:2.5.10
     container_name: fabric-tools
@@ -88,6 +190,100 @@ services:
     volumes:
       - ./:/fabric-network
       - /var/run/docker.sock:/host/var/run/docker.sock
+  validator-node-1:
+    image: node:20
+    container_name: validator-node-1
+    working_dir: /app
+    environment:
+      - PORT=9101
+      - VALIDATOR_ID=validator-node-1
+      - VALIDATOR_LABEL=mychannel-validator-1
+      - FABRIC_CONNECTION_PROFILE=/app/fabric-network/connection-org1.docker.json
+      - FABRIC_WALLET_PATH=/app/fabric-network/wallet
+      - FABRIC_IDENTITY=appUser
+      - FABRIC_CHANNEL=mychannel
+      - FABRIC_TARGET_PEER=peer0.org1.example.com
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && node validator-node/server.js"
+    depends_on:
+      - peer0.org1.example.com
+
+  validator-node-2:
+    image: node:20
+    container_name: validator-node-2
+    working_dir: /app
+    environment:
+      - PORT=9102
+      - VALIDATOR_ID=validator-node-2
+      - VALIDATOR_LABEL=mychannel-validator-2
+      - FABRIC_CONNECTION_PROFILE=/app/fabric-network/connection-org1.docker.json
+      - FABRIC_WALLET_PATH=/app/fabric-network/wallet
+      - FABRIC_IDENTITY=appUser
+      - FABRIC_CHANNEL=mychannel
+      - FABRIC_TARGET_PEER=peer1.org1.example.com
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && node validator-node/server.js"
+    depends_on:
+      - peer1.org1.example.com
+
+  validator-node-3:
+    image: node:20
+    container_name: validator-node-3
+    working_dir: /app
+    environment:
+      - PORT=9103
+      - VALIDATOR_ID=validator-node-3
+      - VALIDATOR_LABEL=mychannel-validator-3
+      - FABRIC_CONNECTION_PROFILE=/app/fabric-network/connection-org1.docker.json
+      - FABRIC_WALLET_PATH=/app/fabric-network/wallet
+      - FABRIC_IDENTITY=appUser
+      - FABRIC_CHANNEL=mychannel
+      - FABRIC_TARGET_PEER=peer2.org1.example.com
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && node validator-node/server.js"
+    depends_on:
+      - peer2.org1.example.com
+
+  validator-node-4:
+    image: node:20
+    container_name: validator-node-4
+    working_dir: /app
+    environment:
+      - PORT=9104
+      - VALIDATOR_ID=validator-node-4
+      - VALIDATOR_LABEL=mychannel-validator-4
+      - FABRIC_CONNECTION_PROFILE=/app/fabric-network/connection-org1.docker.json
+      - FABRIC_WALLET_PATH=/app/fabric-network/wallet
+      - FABRIC_IDENTITY=appUser
+      - FABRIC_CHANNEL=mychannel
+      - FABRIC_TARGET_PEER=peer3.org1.example.com
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && node validator-node/server.js"
+    depends_on:
+      - peer3.org1.example.com
+
+  consensus-aggregator:
+    image: node:20
+    container_name: consensus-aggregator
+    working_dir: /app
+    environment:
+      - PORT=9200
+      - VALIDATOR_NODE_1_URL=http://validator-node-1:9101
+      - VALIDATOR_NODE_2_URL=http://validator-node-2:9102
+      - VALIDATOR_NODE_3_URL=http://validator-node-3:9103
+      - VALIDATOR_NODE_4_URL=http://validator-node-4:9104
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && node consensus-aggregator/server.js"
+    depends_on:
+      - validator-node-1
+      - validator-node-2
+      - validator-node-3
+      - validator-node-4
   fabric-listener:
     image: node:20
     container_name: fabric-listener
@@ -100,8 +296,13 @@ services:
       - FABRIC_CHAINCODE=xcall
       - FABRIC_EVENT_NAME=XCALL
       - FABRIC_AS_LOCALHOST=false
+      - CONSENSUS_AGGREGATOR_URL=http://consensus-aggregator:9200
     volumes:
       - ./:/app
     command: sh -c "npm install && node source-chain/fabric-listener.js"
     depends_on:
       - peer0.org1.example.com
+      - peer1.org1.example.com
+      - peer2.org1.example.com
+      - peer3.org1.example.com
+      - consensus-aggregator

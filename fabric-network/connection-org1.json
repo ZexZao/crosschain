@@ -15,7 +15,10 @@
     "Org1": {
       "mspid": "Org1MSP",
       "peers": [
-        "peer0.org1.example.com"
+        "peer0.org1.example.com",
+        "peer1.org1.example.com",
+        "peer2.org1.example.com",
+        "peer3.org1.example.com"
       ]
     }
   },
@@ -23,6 +26,24 @@
     "mychannel": {
       "peers": {
         "peer0.org1.example.com": {
+          "endorsingPeer": true,
+          "chaincodeQuery": true,
+          "ledgerQuery": true,
+          "eventSource": true
+        },
+        "peer1.org1.example.com": {
+          "endorsingPeer": true,
+          "chaincodeQuery": true,
+          "ledgerQuery": true,
+          "eventSource": true
+        },
+        "peer2.org1.example.com": {
+          "endorsingPeer": true,
+          "chaincodeQuery": true,
+          "ledgerQuery": true,
+          "eventSource": true
+        },
+        "peer3.org1.example.com": {
           "endorsingPeer": true,
           "chaincodeQuery": true,
           "ledgerQuery": true,
@@ -43,6 +64,36 @@
       "grpcOptions": {
         "ssl-target-name-override": "peer0.org1.example.com",
         "hostnameOverride": "peer0.org1.example.com"
+      }
+    },
+    "peer1.org1.example.com": {
+      "url": "grpcs://localhost:8051",
+      "tlsCACerts": {
+        "path": "fabric-network/runtime/organizations/peerOrganizations/org1.example.com/tlsca/tlsca.org1.example.com-cert.pem"
+      },
+      "grpcOptions": {
+        "ssl-target-name-override": "peer1.org1.example.com",
+        "hostnameOverride": "peer1.org1.example.com"
+      }
+    },
+    "peer2.org1.example.com": {
+      "url": "grpcs://localhost:9051",
+      "tlsCACerts": {
+        "path": "fabric-network/runtime/organizations/peerOrganizations/org1.example.com/tlsca/tlsca.org1.example.com-cert.pem"
+      },
+      "grpcOptions": {
+        "ssl-target-name-override": "peer2.org1.example.com",
+        "hostnameOverride": "peer2.org1.example.com"
+      }
+    },
+    "peer3.org1.example.com": {
+      "url": "grpcs://localhost:10051",
+      "tlsCACerts": {
+        "path": "fabric-network/runtime/organizations/peerOrganizations/org1.example.com/tlsca/tlsca.org1.example.com-cert.pem"
+      },
+      "grpcOptions": {
+        "ssl-target-name-override": "peer3.org1.example.com",
+        "hostnameOverride": "peer3.org1.example.com"
       }
     }
   }

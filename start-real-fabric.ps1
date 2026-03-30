@@ -67,8 +67,79 @@ function Wait-FabricListenerReady {
     throw 'Timed out waiting for fabric-listener to become ready'
 }
 
+function Wait-ConsensusServicesReady {
+    param(
+        [int]$TimeoutSeconds = 120
+    )
+
+    $services = @(
+        @{ Name = 'validator-node-1'; Pattern = 'validator-node validator-node-1 listening' },
+        @{ Name = 'validator-node-2'; Pattern = 'validator-node validator-node-2 listening' },
+        @{ Name = 'validator-node-3'; Pattern = 'validator-node validator-node-3 listening' },
+        @{ Name = 'validator-node-4'; Pattern = 'validator-node validator-node-4 listening' },
+        @{ Name = 'consensus-aggregator'; Pattern = 'consensus-aggregator listening on 9200' }
+    )
+
+    foreach ($service in $services) {
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            try {
+                $running = docker inspect -f "{{.State.Running}}" $service.Name 2>$null
+                if ($running -match 'true') {
+                    $logs = docker logs $service.Name --tail 30 2>$null
+                    if ($logs -match $service.Pattern) {
+                        break
+                    }
+                }
+            } catch {
+                # keep waiting
+            }
+            Start-Sleep -Seconds 2
+        }
+
+        if ((Get-Date) -ge $deadline) {
+            throw "Timed out waiting for $($service.Name) to become ready"
+        }
+    }
+}
+
+function Wait-FabricPeersReady {
+    param(
+        [int]$TimeoutSeconds = 180
+    )
+
+    $peers = @('peer0.org1.example.com', 'peer1.org1.example.com', 'peer2.org1.example.com', 'peer3.org1.example.com')
+    foreach ($peer in $peers) {
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            try {
+                $running = docker inspect -f "{{.State.Running}}" $peer 2>$null
+                if ($running -match 'true') {
+                    $peerLogs = docker logs $peer --tail 30 2>$null
+                    if ($peerLogs -match 'Started peer with ID=' -or $peerLogs -match 'Starting peer node') {
+                        break
+                    }
+                }
+            } catch {
+                # keep waiting
+            }
+            Start-Sleep -Seconds 2
+        }
+
+        if ((Get-Date) -ge $deadline) {
+            throw "Timed out waiting for $peer to become ready"
+        }
+    }
+}
+
 Write-Host 'Starting Fabric containers...'
-docker compose -f docker-compose.fabric.yml up -d fabric-ca.org1.example.com orderer.example.com peer0.org1.example.com fabric-listener
+docker compose -f docker-compose.fabric.yml up -d fabric-ca.org1.example.com orderer.example.com peer0.org1.example.com peer1.org1.example.com peer2.org1.example.com peer3.org1.example.com validator-node-1 validator-node-2 validator-node-3 validator-node-4 consensus-aggregator fabric-listener
+
+Write-Host 'Waiting for Fabric peers startup...'
+Wait-FabricPeersReady
+
+Write-Host 'Waiting for validator nodes and aggregator startup...'
+Wait-ConsensusServicesReady
 
 Write-Host 'Waiting for Fabric listener startup...'
 Wait-FabricListenerReady

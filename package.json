@@ -19,7 +19,7 @@
     "fabric:cc:invoke": "powershell -ExecutionPolicy Bypass -File fabric-network\\scripts\\invoke-xcall.ps1",
     "tee": "node tee-verifier/server.js",
     "relay": "node relayer/index.js",
-    "fabric:up": "docker compose -f docker-compose.fabric.yml up -d fabric-ca.org1.example.com orderer.example.com peer0.org1.example.com",
+    "fabric:up": "docker compose -f docker-compose.fabric.yml up -d fabric-ca.org1.example.com orderer.example.com peer0.org1.example.com peer1.org1.example.com peer2.org1.example.com peer3.org1.example.com validator-node-1 validator-node-2 validator-node-3 validator-node-4 consensus-aggregator",
     "fabric:channel": "powershell -ExecutionPolicy Bypass -File fabric-network\\scripts\\create-channel.ps1",
     "fabric:listen:docker": "docker compose -f docker-compose.fabric.yml up -d fabric-listener",
     "fabric:down": "docker compose -f docker-compose.fabric.yml down -v",
