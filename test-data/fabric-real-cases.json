@@ -1,0 +1,183 @@
+{
+  "dataset": "fabric-real-cases",
+  "version": 1,
+  "generatedAt": "2026-03-26T08:12:38.703Z",
+  "source": "Designed for real Fabric-mode end-to-end validation with the xcall chaincode",
+  "purpose": "Real Fabric event emission cases used to verify listener, proof-builder, TEE verification and target-chain execution",
+  "cases": [
+    {
+      "caseId": "FABRIC-001",
+      "businessType": "asset-lock",
+      "priority": "high",
+      "description": "Alliance-chain asset lock event emitted by Fabric chaincode and relayed to the target chain",
+      "expectedMode": "fabric-real",
+      "expectedTargetFields": {
+        "op": "asset_lock",
+        "recordId": "FABRIC-ASSET-0001",
+        "actor": "org1.userA",
+        "amount": "128.50"
+      },
+      "payload": {
+        "op": "asset_lock",
+        "assetId": "FABRIC-ASSET-0001",
+        "owner": "org1.userA",
+        "amount": "128.50",
+        "reason": "collateral_lock",
+        "dstChain": "evm-31337"
+      }
+    },
+    {
+      "caseId": "FABRIC-002",
+      "businessType": "mint-confirm",
+      "priority": "high",
+      "description": "Fabric chaincode emits a mint confirmation after escrow review",
+      "expectedMode": "fabric-real",
+      "expectedTargetFields": {
+        "op": "mint_confirm",
+        "recordId": "FABRIC-ESCROW-0002",
+        "actor": "0xAb5801a7D398351b8bE11C439e05C5B3259aec9B",
+        "amount": "980.00"
+      },
+      "payload": {
+        "op": "mint_confirm",
+        "escrowId": "FABRIC-ESCROW-0002",
+        "beneficiary": "0xAb5801a7D398351b8bE11C439e05C5B3259aec9B",
+        "amount": "980.00",
+        "notaryOrg": "org1-notary",
+        "assetType": "wrapped_invoice"
+      }
+    },
+    {
+      "caseId": "FABRIC-003",
+      "businessType": "trade-finance",
+      "priority": "medium",
+      "description": "Receivable attestation emitted by Fabric chaincode for supply-chain financing",
+      "expectedMode": "fabric-real",
+      "expectedTargetFields": {
+        "op": "receivable_attest",
+        "recordId": "FABRIC-AR-889102",
+        "actor": "med-device-supplier",
+        "amount": "285000.00"
+      },
+      "payload": {
+        "op": "receivable_attest",
+        "receivableId": "FABRIC-AR-889102",
+        "buyer": "city-hospital-group",
+        "supplier": "med-device-supplier",
+        "amount": "285000.00",
+        "currency": "CNY"
+      }
+    },
+    {
+      "caseId": "FABRIC-004",
+      "businessType": "logistics-sync",
+      "priority": "medium",
+      "description": "Cold-chain logistics state update emitted on the real Fabric channel",
+      "expectedMode": "fabric-real",
+      "expectedTargetFields": {
+        "op": "logistics_sync",
+        "recordId": "FABRIC-WB-20260326-04",
+        "actor": "iot-gateway-07",
+        "amount": "-18.6"
+      },
+      "payload": {
+        "op": "logistics_sync",
+        "waybillId": "FABRIC-WB-20260326-04",
+        "cargoType": "vaccine",
+        "reading": "-18.6",
+        "status": "arrived_hub",
+        "inspector": "iot-gateway-07"
+      }
+    },
+    {
+      "caseId": "FABRIC-005",
+      "businessType": "medical-consent",
+      "priority": "medium",
+      "description": "Medical consent grant emitted from Fabric and consumed by the target chain",
+      "expectedMode": "fabric-real",
+      "expectedTargetFields": {
+        "op": "medical_consent",
+        "recordId": "FABRIC-CONSENT-0005",
+        "actor": "hospital-b-chain",
+        "amount": "30"
+      },
+      "payload": {
+        "op": "medical_consent",
+        "consentId": "FABRIC-CONSENT-0005",
+        "patientId": "PATIENT-009932",
+        "grantee": "hospital-b-chain",
+        "durationDays": 30,
+        "scope": [
+          "imaging",
+          "lab-report"
+        ]
+      }
+    },
+    {
+      "caseId": "FABRIC-006",
+      "businessType": "oracle-update",
+      "priority": "high",
+      "description": "Market data update emitted by Fabric chaincode for oracle synchronization",
+      "expectedMode": "fabric-real",
+      "expectedTargetFields": {
+        "op": "oracle_update",
+        "recordId": "CNY_USD_REFERENCE",
+        "actor": "state-fx-lab",
+        "amount": "0.1387"
+      },
+      "payload": {
+        "op": "oracle_update",
+        "feed": "CNY_USD_REFERENCE",
+        "price": "0.1387",
+        "sourceAgency": "state-fx-lab",
+        "roundId": 18221,
+        "publishTime": "2026-03-26T15:00:00.000Z"
+      }
+    },
+    {
+      "caseId": "FABRIC-007",
+      "businessType": "multi-party-approval",
+      "priority": "high",
+      "description": "Approval workflow commit emitted by Fabric to trigger target-chain execution",
+      "expectedMode": "fabric-real",
+      "expectedTargetFields": {
+        "op": "approval_commit",
+        "recordId": "WF-FABRIC-APR-7007",
+        "actor": "bank-a,bank-b,notary-c",
+        "amount": "2"
+      },
+      "payload": {
+        "op": "approval_commit",
+        "workflowId": "WF-FABRIC-APR-7007",
+        "approvers": [
+          "bank-a",
+          "bank-b",
+          "notary-c"
+        ],
+        "threshold": 2,
+        "passed": true
+      }
+    },
+    {
+      "caseId": "FABRIC-008",
+      "businessType": "government-subsidy",
+      "priority": "medium",
+      "description": "Subsidy confirmation emitted by Fabric chaincode for target-chain settlement",
+      "expectedMode": "fabric-real",
+      "expectedTargetFields": {
+        "op": "subsidy_confirm",
+        "recordId": "FABRIC-SUB-AGRI-0008",
+        "actor": "cooperative-jiangsu-01",
+        "amount": "46250.00"
+      },
+      "payload": {
+        "op": "subsidy_confirm",
+        "applicationId": "FABRIC-SUB-AGRI-0008",
+        "applicant": "cooperative-jiangsu-01",
+        "region": "Jiangsu",
+        "cropType": "rice",
+        "subsidyAmount": "46250.00"
+      }
+    }
+  ]
+}

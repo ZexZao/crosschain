@@ -1,0 +1,43 @@
+{
+  "name": "crosschain-trusted-transport-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Minimal prototype for trusted cross-chain data transport experiments",
+  "scripts": {
+    "node": "hardhat node",
+    "compile": "hardhat compile",
+    "deploy": "hardhat run scripts/deploy.js --network localhost",
+    "data:generate": "node scripts/generate-test-datasets.js",
+    "source": "node source-chain/fabric-listener.js",
+    "source:sim": "node source-chain/fabric-sim.js",
+    "source:listen": "node source-chain/fabric-listener.js",
+    "proof:build": "node proof-builder/fabric-proof-builder.js",
+    "fabric:case": "node scripts/run-fabric-test-case.js",
+    "fabric:test": "node scripts/run-fabric-real-suite.js",
+    "fabric:wallet": "node scripts/export-fabric-wallet.js",
+    "fabric:cc:deploy": "powershell -ExecutionPolicy Bypass -File fabric-network\\scripts\\deploy-chaincode.ps1",
+    "fabric:cc:invoke": "powershell -ExecutionPolicy Bypass -File fabric-network\\scripts\\invoke-xcall.ps1",
+    "tee": "node tee-verifier/server.js",
+    "relay": "node relayer/index.js",
+    "fabric:up": "docker compose -f docker-compose.fabric.yml up -d fabric-ca.org1.example.com orderer.example.com peer0.org1.example.com",
+    "fabric:channel": "powershell -ExecutionPolicy Bypass -File fabric-network\\scripts\\create-channel.ps1",
+    "fabric:listen:docker": "docker compose -f docker-compose.fabric.yml up -d fabric-listener",
+    "fabric:down": "docker compose -f docker-compose.fabric.yml down -v",
+    "exp:normal": "node scripts/run-experiment.js normal",
+    "exp:tamper": "node scripts/run-experiment.js tamper",
+    "exp:replay": "node scripts/run-experiment.js replay",
+    "exp:forged": "node scripts/run-experiment.js forged",
+    "exp:rollback": "node scripts/run-experiment.js rollback"
+  },
+  "dependencies": {
+    "axios": "^1.8.1",
+    "express": "^4.21.2",
+    "ethers": "^6.13.5",
+    "fabric-network": "^2.2.20",
+    "fs-extra": "^11.3.0"
+  },
+  "devDependencies": {
+    "hardhat": "^2.22.18",
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0"
+  }
+}

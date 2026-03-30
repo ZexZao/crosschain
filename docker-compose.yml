@@ -1,0 +1,42 @@
+services:
+  evm-node:
+    image: node:20
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && npx hardhat node --hostname 0.0.0.0"
+    ports:
+      - "8545:8545"
+
+  tee-verifier:
+    image: node:20
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && node tee-verifier/server.js"
+    ports:
+      - "9000:9000"
+    depends_on:
+      - evm-node
+
+  deployer:
+    image: node:20
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && npx hardhat compile && npx hardhat run scripts/deploy.js --network localhost"
+    depends_on:
+      - evm-node
+
+  relayer:
+    image: node:20
+    working_dir: /app
+    environment:
+      - EVM_RPC=http://evm-node:8545
+      - TEE_URL=http://tee-verifier:9000
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && tail -f /dev/null"
+    depends_on:
+      - evm-node
+      - tee-verifier

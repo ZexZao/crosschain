@@ -1,0 +1,28 @@
+{
+  "channelName": "mychannel",
+  "chaincodeId": "xcall",
+  "eventName": "XCALL",
+  "rawPayload": {
+    "op": "asset_lock",
+    "assetId": "FABRIC-ASSET-0001",
+    "owner": "org1.userA",
+    "amount": "128.50",
+    "note": "sample captured event for proof-builder"
+  },
+  "txId": "f1b232c764f55a2d7c8cf7f1f9434c21f913f8a4982a0705d6ea4c1234567890",
+  "blockNumber": 12,
+  "nonce": 12,
+  "txEnvelopeBase64": "ZXhhbXBsZS10eC1lbnZlbG9wZQ==",
+  "blockHeader": {
+    "number": 12,
+    "previousHash": "prev-block-hash-demo",
+    "dataHash": "data-hash-demo"
+  },
+  "blockMetadataBase64": "ZXhhbXBsZS1ibG9jay1tZXRhZGF0YQ==",
+  "creatorMspId": "Org1MSP",
+  "creatorIdBase64": "Y3JlYXRvci1pZGVudGl0eQ==",
+  "endorsements": [],
+  "rwsetHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "ordererMspId": "OrdererMSP",
+  "txValidationCode": "VALID"
+}

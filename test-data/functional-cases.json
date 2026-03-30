@@ -1,0 +1,211 @@
+{
+  "dataset": "functional-cases",
+  "version": 1,
+  "generatedAt": "2026-03-26T08:12:38.682Z",
+  "source": "Adapted for the cross-chain trusted data transport experiment prototype",
+  "purpose": "Normal business requests used for correctness validation and demonstration in the paper prototype",
+  "cases": [
+    {
+      "caseId": "FUNC-001",
+      "businessType": "asset-lock",
+      "priority": "high",
+      "description": "Cross-chain asset lock request from alliance chain to EVM settlement chain",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "asset_lock",
+        "assetId": "ASSET-CB-20260325-0001",
+        "owner": "orgA.user001",
+        "amount": "1250.5000",
+        "unit": "TOKEN",
+        "dstChain": "evm-31337",
+        "reason": "cross_chain_collateral",
+        "requestTime": "2026-03-25T09:00:00.000Z"
+      }
+    },
+    {
+      "caseId": "FUNC-002",
+      "businessType": "asset-mint-confirm",
+      "priority": "high",
+      "description": "Mint confirmation after source-chain escrow verification",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "mint_confirm",
+        "escrowId": "ESCROW-20260325-1002",
+        "beneficiary": "0xAb5801a7D398351b8bE11C439e05C5B3259aec9B",
+        "amount": "980.00",
+        "assetType": "wrapped_invoice",
+        "notaryOrg": "alliance-notary-01",
+        "requestTime": "2026-03-25T09:05:00.000Z"
+      }
+    },
+    {
+      "caseId": "FUNC-003",
+      "businessType": "trade-finance",
+      "priority": "medium",
+      "description": "Supply-chain finance receivable confirmation data",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "receivable_attest",
+        "receivableId": "AR-PO-889102",
+        "buyer": "city-hospital-group",
+        "supplier": "med-device-supplier",
+        "amount": "285000.00",
+        "currency": "CNY",
+        "dueDate": "2026-04-30",
+        "invoiceHash": "sha256:25d1b0f778c95b6d0453d6d84612e5cc31f7cead8f4ed71f4dbe91a1732311c1"
+      }
+    },
+    {
+      "caseId": "FUNC-004",
+      "businessType": "logistics-sync",
+      "priority": "medium",
+      "description": "Cold-chain logistics status synchronization",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "logistics_sync",
+        "waybillId": "WB-CC-20260325-04",
+        "cargoType": "vaccine",
+        "currentTemperature": "-18.6",
+        "temperatureUnit": "C",
+        "location": "N31.2304,E121.4737",
+        "status": "arrived_hub",
+        "inspector": "iot-gateway-07"
+      }
+    },
+    {
+      "caseId": "FUNC-005",
+      "businessType": "identity-attestation",
+      "priority": "high",
+      "description": "Identity credential attestation forwarded to target chain contract",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "identity_attest",
+        "credentialId": "DID-CRED-77801",
+        "issuer": "university-ca",
+        "subject": "student-20201234",
+        "credentialType": "master-degree",
+        "validUntil": "2030-07-01",
+        "digest": "sha256:444332b78874af0bd7ce7d7f269c676ee1a706ce3779b64175d0dc4a44f30228"
+      }
+    },
+    {
+      "caseId": "FUNC-006",
+      "businessType": "medical-consent",
+      "priority": "medium",
+      "description": "Medical data authorization synchronization for consortium hospitals",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "medical_consent",
+        "consentId": "CONSENT-MED-20260325-006",
+        "patientId": "PATIENT-009932",
+        "scope": [
+          "imaging",
+          "lab-report"
+        ],
+        "grantee": "hospital-b-chain",
+        "durationDays": 30,
+        "auditHash": "sha256:52844d30f9ad1497b3d6bb4df5f0bbf41252e183114873746ca4f892618f67e7"
+      }
+    },
+    {
+      "caseId": "FUNC-007",
+      "businessType": "carbon-credit",
+      "priority": "medium",
+      "description": "Carbon credit retirement record submission",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "carbon_retire",
+        "creditBatch": "CCER-2025-SOLAR-0021",
+        "amount": "350.75",
+        "projectOwner": "green-grid-energy",
+        "verifier": "env-audit-lab",
+        "retireReason": "supply_chain_offset",
+        "settlementDate": "2026-03-25"
+      }
+    },
+    {
+      "caseId": "FUNC-008",
+      "businessType": "iot-alert",
+      "priority": "low",
+      "description": "Industrial IoT threshold alert for target-chain automation",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "iot_alert",
+        "deviceId": "SENSOR-PLANT-88",
+        "metric": "pressure",
+        "reading": "12.31",
+        "threshold": "10.00",
+        "level": "warning",
+        "observedAt": "2026-03-25T09:20:00.000Z"
+      }
+    },
+    {
+      "caseId": "FUNC-009",
+      "businessType": "government-subsidy",
+      "priority": "medium",
+      "description": "Subsidy eligibility confirmation for agricultural insurance",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "subsidy_confirm",
+        "applicationId": "SUB-AGRI-20260325-009",
+        "applicant": "cooperative-jiangsu-01",
+        "region": "Jiangsu",
+        "cropType": "rice",
+        "insuredAreaMu": 1850,
+        "subsidyAmount": "46250.00"
+      }
+    },
+    {
+      "caseId": "FUNC-010",
+      "businessType": "academic-certificate",
+      "priority": "low",
+      "description": "Academic certificate verification message",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "certificate_verify",
+        "certificateNo": "CERT-2026-000010",
+        "institution": "alliance-university",
+        "major": "blockchain engineering",
+        "graduateYear": 2026,
+        "status": "valid",
+        "documentDigest": "sha256:95a5af21e8842f0d4cefc883f27a7ca4d09ec5f53c6d5d51f0cf0d1ab8f8d8f2"
+      }
+    },
+    {
+      "caseId": "FUNC-011",
+      "businessType": "oracle-update",
+      "priority": "high",
+      "description": "Trusted oracle update request with signed market data digest",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "oracle_update",
+        "feed": "CNY_USD_REFERENCE",
+        "roundId": 18221,
+        "price": "0.1387",
+        "sourceAgency": "state-fx-lab",
+        "signedDigest": "sha256:b70a6fa70844ccf9d8f67aa1f2d7b53fed6ed1a5728f16c6f65d159aa0d76f7c",
+        "publishTime": "2026-03-25T09:30:00.000Z"
+      }
+    },
+    {
+      "caseId": "FUNC-012",
+      "businessType": "multi-party-approval",
+      "priority": "high",
+      "description": "Multi-party approval result used to trigger target-chain execution",
+      "expectedMode": "normal",
+      "payload": {
+        "op": "approval_commit",
+        "workflowId": "WF-CROSS-APR-9012",
+        "approvers": [
+          "bank-a",
+          "bank-b",
+          "notary-c"
+        ],
+        "threshold": 2,
+        "passed": true,
+        "summaryHash": "sha256:8fbe8df3b6074975d59f17ef21e5272a191f74b93cb93f9f824cf7f2a6bca4fa",
+        "finishedAt": "2026-03-25T09:35:00.000Z"
+      }
+    }
+  ]
+}

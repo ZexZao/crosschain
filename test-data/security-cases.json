@@ -1,0 +1,81 @@
+{
+  "dataset": "security-cases",
+  "version": 1,
+  "generatedAt": "2026-03-26T08:12:38.684Z",
+  "source": "Adapted from the trusted cross-chain transmission experiment design",
+  "purpose": "Attack and abnormal-state cases used for security validation",
+  "cases": [
+    {
+      "caseId": "SEC-001",
+      "mode": "tamper",
+      "referenceCaseId": "FUNC-001",
+      "attackType": "payload_tamper",
+      "description": "Modify payload while keeping the original payloadHash unchanged",
+      "expectedFailurePoint": "VerifierContract",
+      "expectedReason": "payload hash mismatch"
+    },
+    {
+      "caseId": "SEC-002",
+      "mode": "tamper",
+      "referenceCaseId": "FUNC-006",
+      "attackType": "medical_scope_tamper",
+      "description": "Expand authorized medical data scope after source-chain attestation",
+      "expectedFailurePoint": "VerifierContract",
+      "expectedReason": "payload hash mismatch"
+    },
+    {
+      "caseId": "SEC-003",
+      "mode": "replay",
+      "referenceCaseId": "FUNC-002",
+      "attackType": "request_replay",
+      "description": "Submit an already accepted requestID for a second time",
+      "expectedFailurePoint": "VerifierContract",
+      "expectedReason": "replay requestID"
+    },
+    {
+      "caseId": "SEC-004",
+      "mode": "replay",
+      "referenceCaseId": "FUNC-011",
+      "attackType": "oracle_replay",
+      "description": "Replay an old oracle update to test idempotent consumption",
+      "expectedFailurePoint": "VerifierContract",
+      "expectedReason": "replay requestID"
+    },
+    {
+      "caseId": "SEC-005",
+      "mode": "forged",
+      "referenceCaseId": "FUNC-003",
+      "attackType": "forged_event_proof",
+      "description": "Replace eventProof with forged data while reusing the original request context",
+      "expectedFailurePoint": "VerifierContract or TEE",
+      "expectedReason": "invalid tee signature"
+    },
+    {
+      "caseId": "SEC-006",
+      "mode": "forged",
+      "referenceCaseId": "FUNC-010",
+      "attackType": "certificate_proof_forgery",
+      "description": "Forge certificate verification proof to simulate malicious relayer tampering",
+      "expectedFailurePoint": "VerifierContract or TEE",
+      "expectedReason": "invalid tee signature"
+    },
+    {
+      "caseId": "SEC-007",
+      "mode": "rollback",
+      "referenceCaseId": "FUNC-004",
+      "attackType": "tee_state_rollback",
+      "description": "Rollback TEE counter and previous digest to break state continuity",
+      "expectedFailurePoint": "VerifierContract",
+      "expectedReason": "non-monotonic ctr or continuity broken"
+    },
+    {
+      "caseId": "SEC-008",
+      "mode": "rollback",
+      "referenceCaseId": "FUNC-012",
+      "attackType": "digest_chain_break",
+      "description": "Replay old TEE state for a later approval record",
+      "expectedFailurePoint": "VerifierContract",
+      "expectedReason": "non-monotonic ctr or continuity broken"
+    }
+  ]
+}
