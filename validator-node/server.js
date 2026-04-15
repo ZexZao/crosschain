@@ -21,6 +21,10 @@ app.use(express.json({ limit: '512kb' }));
 
 let gatewayPromise = null;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function buildScopedConnectionProfile() {
   if (!connectionProfilePath || !walletPath || !targetPeer) {
     throw new Error('FABRIC_CONNECTION_PROFILE, FABRIC_WALLET_PATH and FABRIC_TARGET_PEER are required');
@@ -63,10 +67,30 @@ async function verifyTxOnAssignedPeer(txId) {
   const gateway = await getGateway();
   const network = await gateway.getNetwork(channelName);
   const qscc = network.getContract('qscc');
-  const result = await qscc.evaluateTransaction('GetBlockByTxID', channelName, txId);
-  if (!result || result.length === 0) {
-    throw new Error(`peer-backed verification failed for txId ${txId}`);
+
+  const maxAttempts = Number(process.env.VALIDATOR_TX_VERIFY_RETRIES || 20);
+  const retryDelayMs = Number(process.env.VALIDATOR_TX_VERIFY_RETRY_DELAY_MS || 500);
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const result = await qscc.evaluateTransaction('GetBlockByTxID', channelName, txId);
+      if (result && result.length > 0) {
+        return;
+      }
+      lastError = new Error(`empty result for txId ${txId}`);
+    } catch (error) {
+      lastError = error;
+    }
+
+    if (attempt < maxAttempts) {
+      await sleep(retryDelayMs);
+    }
   }
+
+  throw new Error(
+    `peer-backed verification failed for txId ${txId} via ${targetPeer}: ${lastError?.message || 'unknown error'}`
+  );
 }
 
 app.get('/health', (_req, res) => {

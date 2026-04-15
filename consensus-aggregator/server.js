@@ -9,9 +9,9 @@ app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'consensus-aggregator' });
 });
 
-app.get('/validator-set/:channelName', (req, res) => {
+app.get('/validator-set/:scopeName', (req, res) => {
   try {
-    const validatorSet = getTrustedValidatorSet(req.params.channelName);
+    const validatorSet = getTrustedValidatorSet(req.params.scopeName);
     res.json({
       validatorSetId: validatorSet.validatorSetId,
       threshold: validatorSet.threshold,

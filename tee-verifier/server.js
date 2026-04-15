@@ -5,6 +5,10 @@ const {
   verifyFabricEventProof,
   verifyFabricFinalityInfo
 } = require('../shared/fabric-proof');
+const {
+  verifyEvmEventProof,
+  verifyEvmFinalityInfo
+} = require('../shared/evm-proof');
 
 ensureRuntime();
 const app = express();
@@ -64,6 +68,24 @@ function verifyUpstreamProofs(xmsg) {
       txId: eventProof.txId,
       blockNumber: eventProof.blockNumber,
       proofType: eventProof.proofType,
+      validatorSetId: eventProof.consensusProof?.validatorSetId || null,
+      threshold: eventProof.consensusProof?.threshold || null
+    };
+  }
+
+  if (proofType === 'evm-v1' || proofType === 'evm-v2') {
+    const eventProof = verifyEvmEventProof(xmsg);
+    const finalityInfo = verifyEvmFinalityInfo(xmsg);
+    if (eventProof.blockHash !== finalityInfo.blockHash) {
+      throw new Error('evm proof/finality blockHash mismatch');
+    }
+    return {
+      proofType,
+      verificationMode: 'evm',
+      networkName: eventProof.networkName,
+      emitterAddress: eventProof.emitterAddress,
+      txHash: eventProof.txHash,
+      blockNumber: eventProof.blockNumber,
       validatorSetId: eventProof.consensusProof?.validatorSetId || null,
       threshold: eventProof.consensusProof?.threshold || null
     };

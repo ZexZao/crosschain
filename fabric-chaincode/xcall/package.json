@@ -7,6 +7,7 @@
     "start": "fabric-chaincode-node start"
   },
   "dependencies": {
+    "ethers": "^6.13.5",
     "fabric-contract-api": "^2.5.8",
     "fabric-shim": "^2.5.8"
   }

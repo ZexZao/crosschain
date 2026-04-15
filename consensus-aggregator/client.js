@@ -2,6 +2,7 @@ const axios = require('axios');
 
 async function requestConsensusAggregate({
   channelName,
+  networkName,
   blockNumber,
   blockHash,
   eventRoot,
@@ -14,6 +15,7 @@ async function requestConsensusAggregate({
     `${aggregatorUrl}/aggregate`,
     {
       channelName,
+      networkName,
       blockNumber,
       blockHash,
       eventRoot,

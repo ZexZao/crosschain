@@ -270,12 +270,18 @@ services:
     image: node:20
     container_name: consensus-aggregator
     working_dir: /app
+    ports:
+      - "9200:9200"
     environment:
       - PORT=9200
       - VALIDATOR_NODE_1_URL=http://validator-node-1:9101
       - VALIDATOR_NODE_2_URL=http://validator-node-2:9102
       - VALIDATOR_NODE_3_URL=http://validator-node-3:9103
       - VALIDATOR_NODE_4_URL=http://validator-node-4:9104
+      - EVM_VALIDATOR_NODE_1_URL=http://evm-validator-node-1:9301
+      - EVM_VALIDATOR_NODE_2_URL=http://evm-validator-node-2:9302
+      - EVM_VALIDATOR_NODE_3_URL=http://evm-validator-node-3:9303
+      - EVM_VALIDATOR_NODE_4_URL=http://evm-validator-node-4:9304
     volumes:
       - ./:/app
     command: sh -c "npm install && node consensus-aggregator/server.js"

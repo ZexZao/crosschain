@@ -3,8 +3,11 @@ const fs = require('fs-extra');
 const path = require('path');
 const { ethers } = require('ethers');
 const axios = require('axios');
+const { Gateway, Wallets } = require('fabric-network');
+const { buildXmsgFromEvmEvent } = require('../proof-builder/evm-proof-builder');
 
 const LISTENER_POLL_INTERVAL_MS = 20;
+const LISTENER_WAIT_TIMEOUT_MS = Number(process.env.FABRIC_LISTENER_WAIT_TIMEOUT_MS || 60000);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -83,7 +86,7 @@ async function syncTeeStateWithChain(projectRoot) {
   return { ctr, lastDigest };
 }
 
-async function waitForCapturedEvent(projectRoot, txId, timeoutMs = 20000) {
+async function waitForCapturedEvent(projectRoot, txId, timeoutMs = LISTENER_WAIT_TIMEOUT_MS) {
   const capturedPath = path.join(projectRoot, 'runtime', 'fabric-captured-event.json');
   const xmsgPath = path.join(projectRoot, 'runtime', 'latest-xmsg.json');
   const deadline = Date.now() + timeoutMs;
@@ -147,6 +150,136 @@ async function readTargetState(projectRoot) {
   };
 }
 
+async function getFabricContract(projectRoot) {
+  const profile = process.env.FABRIC_CONNECTION_PROFILE || path.join(projectRoot, 'fabric-network', 'connection-org1.json');
+  const walletPath = process.env.FABRIC_WALLET_PATH || path.join(projectRoot, 'fabric-network', 'wallet');
+  const identity = process.env.FABRIC_IDENTITY || 'appUser';
+  const channel = process.env.FABRIC_CHANNEL || 'mychannel';
+  const chaincode = process.env.FABRIC_CHAINCODE || 'xcall';
+  const asLocalhost = process.env.FABRIC_AS_LOCALHOST !== 'false';
+
+  const ccp = fs.readJsonSync(profile);
+  const wallet = await Wallets.newFileSystemWallet(walletPath);
+  const gateway = new Gateway();
+  await gateway.connect(ccp, {
+    wallet,
+    identity,
+    discovery: { enabled: true, asLocalhost }
+  });
+  const network = await gateway.getNetwork(channel);
+  return {
+    gateway,
+    contract: network.getContract(chaincode)
+  };
+}
+
+async function buildAckArtifacts(projectRoot, relayTxHash) {
+  const deployment = fs.readJsonSync(path.join(projectRoot, 'runtime', 'deployment.json'));
+  const provider = new ethers.JsonRpcProvider('http://127.0.0.1:8545');
+  const receipt = await provider.getTransactionReceipt(relayTxHash);
+  if (!receipt) {
+    throw new Error(`Could not find EVM receipt for ACK relay tx ${relayTxHash}`);
+  }
+
+  const targetInterface = new ethers.Interface([
+    'event BusinessExecuted(bytes32 indexed requestID,address indexed caller,string op,string recordId,string actor,string amount)'
+  ]);
+
+  const targetLog = receipt.logs.find((log) => {
+    if (ethers.getAddress(log.address) !== ethers.getAddress(deployment.targetContract)) {
+      return false;
+    }
+    try {
+      targetInterface.parseLog(log);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  });
+
+  if (!targetLog) {
+    throw new Error(`BusinessExecuted log not found in relay receipt ${relayTxHash}`);
+  }
+
+  const parsed = targetInterface.parseLog(targetLog);
+  const listenerReceivedAtMs = Date.now();
+  const captured = {
+    networkName: 'evm-localhost',
+    emitterAddress: deployment.targetContract,
+    eventName: 'BusinessExecuted',
+    rawPayload: {
+      op: 'ack_confirm',
+      originRequestID: parsed.args.requestID,
+      status: 'success',
+      relayTxHash,
+      targetOp: parsed.args.op,
+      targetRecordId: parsed.args.recordId,
+      targetActor: parsed.args.actor,
+      targetAmount: parsed.args.amount
+    },
+    txHash: receipt.hash,
+    blockNumber: receipt.blockNumber,
+    blockHash: receipt.blockHash,
+    logIndex: Number(targetLog.index),
+    nonce: Number(targetLog.index),
+    dstChainName: 'fabric-mychannel',
+    dstContract: ethers.ZeroAddress,
+    listenerTiming: {
+      listenerReceivedAtMs,
+      listenerReceivedAt: new Date(listenerReceivedAtMs).toISOString()
+    }
+  };
+
+  fs.writeJsonSync(path.join(projectRoot, 'runtime', 'evm-ack-captured-event.json'), captured, { spaces: 2 });
+  const xmsg = await buildXmsgFromEvmEvent({
+    deployment,
+    ...captured
+  });
+  const xmsgWrittenAtMs = Date.now();
+  xmsg.listenerTiming = {
+    ...captured.listenerTiming,
+    xmsgWrittenAtMs,
+    xmsgWrittenAt: new Date(xmsgWrittenAtMs).toISOString(),
+    processingMs: xmsgWrittenAtMs - listenerReceivedAtMs
+  };
+  fs.writeJsonSync(path.join(projectRoot, 'runtime', 'latest-ack-xmsg.json'), xmsg, { spaces: 2 });
+  return { captured, xmsg };
+}
+
+async function readAckState(projectRoot, originRequestID) {
+  const { gateway, contract } = await getFabricContract(projectRoot);
+  try {
+    const data = await contract.evaluateTransaction('GetAckStatus', originRequestID);
+    const text = data.toString();
+    return text ? JSON.parse(text) : null;
+  } finally {
+    gateway.disconnect();
+  }
+}
+
+function parseCliArgs(argv) {
+  const options = {
+    datasetArg: 'test-data/fabric-real-cases.json',
+    caseId: null,
+    mode: 'forward'
+  };
+
+  const positional = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--mode') {
+      options.mode = argv[i + 1] || options.mode;
+      i += 1;
+      continue;
+    }
+    positional.push(arg);
+  }
+
+  if (positional[0]) options.datasetArg = positional[0];
+  if (positional[1]) options.caseId = positional[1];
+  return options;
+}
+
 function compareExpected(actual, expected) {
   return {
     opMatch: actual.lastOp === expected.op,
@@ -156,7 +289,9 @@ function compareExpected(actual, expected) {
   };
 }
 
-async function runCase(projectRoot, datasetPath, testCase) {
+async function runCase(projectRoot, datasetPath, testCase, options = {}) {
+  const mode = options.mode || 'forward';
+  const withAck = mode === 'full';
   const caseStartedAt = Date.now();
   const tempPath = path.join(projectRoot, 'runtime', `fabric-suite-${testCase.caseId}.json`);
   const latestXmsgPath = path.join(projectRoot, 'runtime', 'latest-xmsg.json');
@@ -209,7 +344,38 @@ async function runCase(projectRoot, datasetPath, testCase) {
     const relayResult = extractJsonFromText(relayStdout) || fs.readJsonSync(path.join(projectRoot, 'runtime', 'last-relay-result.json'));
     const targetState = await readTargetState(projectRoot);
     const fieldCheck = compareExpected(targetState, testCase.expectedTargetFields);
-    const pass = Object.values(fieldCheck).every(Boolean) && targetState.lastRequestID === listenerResult.xmsg.requestID;
+    let ackArtifacts = null;
+    let ackRelayResult = null;
+    let ackState = null;
+    let ackCheck = null;
+    let ackBuildDurationMs = 0;
+    let ackRelayDurationMs = 0;
+
+    if (withAck) {
+      const ackStartedAt = Date.now();
+      ackArtifacts = await buildAckArtifacts(projectRoot, relayResult.txHash);
+      ackBuildDurationMs = Date.now() - ackStartedAt;
+      const ackRelayStartedAt = Date.now();
+      const ackRelayStdout = execFileSync(process.execPath, [
+        path.join(projectRoot, 'relayer', 'ack-to-fabric.js')
+      ], {
+        cwd: projectRoot,
+        encoding: 'utf8',
+        stdio: 'pipe'
+      });
+      ackRelayDurationMs = Date.now() - ackRelayStartedAt;
+      ackRelayResult = extractJsonFromText(ackRelayStdout) || fs.readJsonSync(path.join(projectRoot, 'runtime', 'last-ack-to-fabric-result.json'));
+      ackState = await readAckState(projectRoot, listenerResult.xmsg.requestID);
+      ackCheck = {
+        ackCreated: ackArtifacts.xmsg.payloadDecoded.op === 'ack_confirm',
+        ackOriginMatch: ackState?.originRequestID === listenerResult.xmsg.requestID,
+        ackStatusMatch: ackState?.status === 'success'
+      };
+    }
+
+    const pass = Object.values(fieldCheck).every(Boolean)
+      && targetState.lastRequestID === listenerResult.xmsg.requestID
+      && (!withAck || Object.values(ackCheck).every(Boolean));
     const totalDurationMs = Date.now() - caseStartedAt;
     const proofBuildMs = Number(listenerResult.xmsg.proofMeta?.proofBuildMs || 0);
 
@@ -228,14 +394,20 @@ async function runCase(projectRoot, datasetPath, testCase) {
         proofBuild: proofBuildMs,
         teeSync: teeSyncDurationMs,
         relay: relayDurationMs,
+        ackBuild: ackBuildDurationMs,
+        ackRelay: ackRelayDurationMs,
         total: totalDurationMs
       },
       proofMeta: listenerResult.xmsg.proofMeta || null,
       teeSync,
       relayVerificationMeta: relayResult.verificationMeta || null,
+      ackProofMeta: ackArtifacts?.xmsg?.proofMeta || null,
+      ackRelayVerificationMeta: ackRelayResult?.verificationMeta || null,
       expectedTargetFields: testCase.expectedTargetFields,
       actualTargetState: targetState,
       fieldCheck,
+      ackState,
+      ackCheck,
       pass
     };
   } finally {
@@ -245,8 +417,10 @@ async function runCase(projectRoot, datasetPath, testCase) {
 
 async function main() {
   const projectRoot = path.join(__dirname, '..');
-  const datasetArg = process.argv[2] || 'test-data/fabric-real-cases.json';
-  const caseId = process.argv[3] || null;
+  const cli = parseCliArgs(process.argv.slice(2));
+  const datasetArg = cli.datasetArg;
+  const caseId = cli.caseId;
+  const mode = cli.mode === 'full' ? 'full' : 'forward';
   const datasetPath = path.resolve(projectRoot, datasetArg);
 
   if (!fs.existsSync(datasetPath)) {
@@ -264,8 +438,8 @@ async function main() {
 
   const results = [];
   for (const testCase of cases) {
-    console.log(`Running Fabric real case ${testCase.caseId}`);
-    const result = await runCase(projectRoot, datasetPath, testCase);
+    console.log(`Running Fabric real case ${testCase.caseId} (${mode})`);
+    const result = await runCase(projectRoot, datasetPath, testCase, { mode });
     results.push(result);
   }
 
@@ -281,19 +455,32 @@ async function main() {
       proofBuild: Number((results.reduce((sum, item) => sum + item.timingMs.proofBuild, 0) / results.length).toFixed(2)),
       teeSync: Number((results.reduce((sum, item) => sum + item.timingMs.teeSync, 0) / results.length).toFixed(2)),
       relay: Number((results.reduce((sum, item) => sum + item.timingMs.relay, 0) / results.length).toFixed(2)),
+      ackBuild: Number((results.reduce((sum, item) => sum + item.timingMs.ackBuild, 0) / results.length).toFixed(2)),
+      ackRelay: Number((results.reduce((sum, item) => sum + item.timingMs.ackRelay, 0) / results.length).toFixed(2)),
       total: Number((results.reduce((sum, item) => sum + item.timingMs.total, 0) / results.length).toFixed(2))
     } : null
   };
 
-  const resultPath = path.join(projectRoot, 'runtime', 'fabric-real-results.json');
-  const summaryPath = path.join(projectRoot, 'runtime', 'fabric-real-summary.md');
+  const resultPath = path.join(
+    projectRoot,
+    'runtime',
+    mode === 'full' ? 'fabric-real-ack-results.json' : 'fabric-real-results.json'
+  );
+  const summaryPath = path.join(
+    projectRoot,
+    'runtime',
+    mode === 'full' ? 'fabric-real-ack-summary.md' : 'fabric-real-summary.md'
+  );
 
   fs.writeJsonSync(resultPath, { summary, results }, { spaces: 2 });
 
   const lines = [
-    '# Fabric Real Mode Test Summary',
+    mode === 'full'
+      ? '# Fabric Real Mode ACK Test Summary'
+      : '# Fabric Real Mode Test Summary',
     '',
     `- Dataset: \`${dataset.dataset}\``,
+    `- Mode: \`${mode}\``,
     `- Total: \`${summary.total}\``,
     `- Pass: \`${summary.pass}\``,
     `- Fail: \`${summary.fail}\``,
@@ -302,14 +489,24 @@ async function main() {
     `- Avg ProofBuild: \`${summary.averageTimingMs?.proofBuild ?? 0} ms\``,
     `- Avg TeeSync: \`${summary.averageTimingMs?.teeSync ?? 0} ms\``,
     `- Avg Relay: \`${summary.averageTimingMs?.relay ?? 0} ms\``,
+    `- Avg AckBuild: \`${summary.averageTimingMs?.ackBuild ?? 0} ms\``,
+    `- Avg AckRelay: \`${summary.averageTimingMs?.ackRelay ?? 0} ms\``,
     `- Avg E2E: \`${summary.averageTimingMs?.total ?? 0} ms\``,
     '',
-    '| Case | Result | Proof | RequestID | Relay Tx | Gas | Invoke ms | Listener ms | ProofBuild ms | TeeSync ms | Relay ms | E2E ms |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
+    mode === 'full'
+      ? '| Case | Result | Proof | Ack Proof | RequestID | Relay Tx | Gas | Invoke ms | Listener ms | ProofBuild ms | TeeSync ms | Relay ms | AckBuild ms | AckRelay ms | E2E ms |'
+      : '| Case | Result | Proof | RequestID | Relay Tx | Gas | Invoke ms | Listener ms | ProofBuild ms | TeeSync ms | Relay ms | E2E ms |',
+    mode === 'full'
+      ? '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
+      : '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |'
   ];
 
   for (const item of results) {
-    lines.push(`| ${item.caseId} | ${item.pass ? 'PASS' : 'FAIL'} | ${item.proofMeta?.proofType || 'unknown'} | ${item.requestID} | ${item.relayTxHash} | ${item.gasUsed} | ${item.timingMs.invoke} | ${item.timingMs.listener} | ${item.timingMs.proofBuild} | ${item.timingMs.teeSync} | ${item.timingMs.relay} | ${item.timingMs.total} |`);
+    if (mode === 'full') {
+      lines.push(`| ${item.caseId} | ${item.pass ? 'PASS' : 'FAIL'} | ${item.proofMeta?.proofType || 'unknown'} | ${item.ackProofMeta?.proofType || 'unknown'} | ${item.requestID} | ${item.relayTxHash} | ${item.gasUsed} | ${item.timingMs.invoke} | ${item.timingMs.listener} | ${item.timingMs.proofBuild} | ${item.timingMs.teeSync} | ${item.timingMs.relay} | ${item.timingMs.ackBuild} | ${item.timingMs.ackRelay} | ${item.timingMs.total} |`);
+    } else {
+      lines.push(`| ${item.caseId} | ${item.pass ? 'PASS' : 'FAIL'} | ${item.proofMeta?.proofType || 'unknown'} | ${item.requestID} | ${item.relayTxHash} | ${item.gasUsed} | ${item.timingMs.invoke} | ${item.timingMs.listener} | ${item.timingMs.proofBuild} | ${item.timingMs.teeSync} | ${item.timingMs.relay} | ${item.timingMs.total} |`);
+    }
   }
 
   fs.writeFileSync(summaryPath, `${lines.join('\n')}\n`, 'utf8');

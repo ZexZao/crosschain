@@ -41,6 +41,32 @@ const trustedSets = {
         url: process.env.VALIDATOR_NODE_4_URL || 'http://validator-node-4:9104'
       })
     ]
+  },
+  'evm-localhost': {
+    validatorSetId: 'evm-localhost-v1',
+    threshold: 3,
+    validators: [
+      buildValidator({
+        id: 'evm-validator-node-1',
+        label: 'evm-localhost-validator-1',
+        url: process.env.EVM_VALIDATOR_NODE_1_URL || 'http://evm-validator-node-1:9301'
+      }),
+      buildValidator({
+        id: 'evm-validator-node-2',
+        label: 'evm-localhost-validator-2',
+        url: process.env.EVM_VALIDATOR_NODE_2_URL || 'http://evm-validator-node-2:9302'
+      }),
+      buildValidator({
+        id: 'evm-validator-node-3',
+        label: 'evm-localhost-validator-3',
+        url: process.env.EVM_VALIDATOR_NODE_3_URL || 'http://evm-validator-node-3:9303'
+      }),
+      buildValidator({
+        id: 'evm-validator-node-4',
+        label: 'evm-localhost-validator-4',
+        url: process.env.EVM_VALIDATOR_NODE_4_URL || 'http://evm-validator-node-4:9304'
+      })
+    ]
   }
 };
 

@@ -261,3 +261,142 @@ docker compose -f docker-compose.fabric.yml up -d fabric-listener
 docker compose -f docker-compose.fabric.yml down -v
 docker compose up -d evm-node
 ```
+
+## 双向联调
+
+当前版本已经支持三条链路联调：
+
+- `Fabric -> EVM`
+- `EVM -> Fabric`
+- `ACK-XMsg -> Fabric`
+
+其中：
+
+- 正向 `Fabric -> EVM` 仍然走 `fabric-listener -> proof-builder -> fabric validator set -> TEE -> VerifierContract -> TargetContract`
+- 反向 `EVM -> Fabric` 走 `evm-listener -> evm validator set -> TEE -> Fabric xcall chaincode`
+- 回执 `ACK-XMsg -> Fabric` 由 EVM 侧 `BusinessExecuted` 事件构造 `ACK-XMsg`，再回写 Fabric
+
+### 联调前置
+
+先完成基础启动：
+
+```powershell
+.\start-real-fabric.ps1
+docker compose up -d evm-node evm-validator-node-1 evm-validator-node-2 evm-validator-node-3 evm-validator-node-4
+npm.cmd run deploy
+powershell -ExecutionPolicy Bypass -File fabric-network\scripts\deploy-chaincode.ps1
+docker compose -f docker-compose.fabric.yml restart fabric-listener
+```
+
+再启动两个 EVM 监听器：
+
+```powershell
+node source-chain/evm-listener.js --mode forward
+```
+
+```powershell
+node source-chain/evm-listener.js --mode ack
+```
+
+等价脚本命令：
+
+```powershell
+npm.cmd run evm:listen
+npm.cmd run evm:listen:ack
+```
+
+### 1. 运行 EVM -> Fabric
+
+```powershell
+npm.cmd run evm:fabric:demo
+```
+
+这一步会自动完成：
+
+- 调用 `EvmSourceContract.requestFabricCall(...)`
+- 监听 `FabricCallRequested`
+- 生成 `latest-evm-xmsg.json`
+- 由 EVM 侧验证者集合生成阈值签名证明
+- 经 TEE 验证后提交到 Fabric 链码 `ExecuteInboundXMsg`
+
+结果文件：
+
+- `runtime/latest-evm-xmsg.json`
+- `runtime/last-evm-to-fabric-result.json`
+
+### 2. 运行 Fabric -> EVM
+
+单条样例：
+
+```powershell
+node scripts/run-fabric-test-case.js test-data/fabric-real-cases.json FABRIC-001
+node relayer/index.js normal
+```
+
+全量样例：
+
+```powershell
+npm.cmd run fabric:test
+```
+
+结果文件：
+
+- `runtime/latest-xmsg.json`
+- `runtime/last-relay-result.json`
+- `runtime/fabric-real-summary.md`
+- `runtime/fabric-real-results.json`
+
+### 3. 运行 ACK-XMsg -> Fabric
+
+当 `Fabric -> EVM` 成功后，`evm-listener --mode ack` 会自动监听 `BusinessExecuted` 事件，并生成：
+
+- `runtime/evm-ack-captured-event.json`
+- `runtime/latest-ack-xmsg.json`
+
+然后执行：
+
+```powershell
+node relayer/ack-to-fabric.js
+```
+
+这一步会：
+
+- 将回执型 `XMsg` 发给 TEE
+- 由 Fabric 链码 `ConfirmAckXMsg` 更新源链确认状态
+
+结果文件：
+
+- `runtime/latest-ack-xmsg.json`
+- `runtime/last-ack-to-fabric-result.json`
+
+### 4. 查看 Fabric 侧闭环状态
+
+当前链码已支持：
+
+- `GetInboundStatus(requestID)`
+- `GetAckStatus(originRequestID)`
+
+分别用于查看：
+
+- `EVM -> Fabric` 入站请求是否已执行
+- `Fabric -> EVM` 原始请求是否已收到成功回执
+
+### 最近一次双向联调结果
+
+最近一次实际联调已跑通：
+
+- `EVM -> Fabric` 成功
+  - 结果见 `runtime/last-evm-to-fabric-result.json`
+- `Fabric -> EVM` 成功
+  - 结果见 `runtime/last-relay-result.json`
+- `ACK-XMsg -> Fabric` 成功
+  - 结果见 `runtime/last-ack-to-fabric-result.json`
+
+这次联调后的典型结果包括：
+
+- `EVM -> Fabric requestID`
+  - `0x26ad95d5832d3911ef412bb198bd9cc539df46c01f284288dd24c2e38de3b7f7`
+- `ACK originRequestID`
+  - `0x9bac6569e14344c8b37cdf92a2e5f5da140b09fc21ae3285fee46399c891592b`
+- `ACK status`
+  - `success`

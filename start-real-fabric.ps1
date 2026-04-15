@@ -67,7 +67,7 @@ function Wait-FabricListenerReady {
     throw 'Timed out waiting for fabric-listener to become ready'
 }
 
-function Wait-ConsensusServicesReady {
+function Wait-FabricConsensusServicesReady {
     param(
         [int]$TimeoutSeconds = 120
     )
@@ -78,6 +78,41 @@ function Wait-ConsensusServicesReady {
         @{ Name = 'validator-node-3'; Pattern = 'validator-node validator-node-3 listening' },
         @{ Name = 'validator-node-4'; Pattern = 'validator-node validator-node-4 listening' },
         @{ Name = 'consensus-aggregator'; Pattern = 'consensus-aggregator listening on 9200' }
+    )
+
+    foreach ($service in $services) {
+        $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+        while ((Get-Date) -lt $deadline) {
+            try {
+                $running = docker inspect -f "{{.State.Running}}" $service.Name 2>$null
+                if ($running -match 'true') {
+                    $logs = docker logs $service.Name --tail 30 2>$null
+                    if ($logs -match $service.Pattern) {
+                        break
+                    }
+                }
+            } catch {
+                # keep waiting
+            }
+            Start-Sleep -Seconds 2
+        }
+
+        if ((Get-Date) -ge $deadline) {
+            throw "Timed out waiting for $($service.Name) to become ready"
+        }
+    }
+}
+
+function Wait-EvmConsensusServicesReady {
+    param(
+        [int]$TimeoutSeconds = 120
+    )
+
+    $services = @(
+        @{ Name = 'evm-validator-node-1'; Pattern = 'evm-validator-node evm-validator-node-1 listening' },
+        @{ Name = 'evm-validator-node-2'; Pattern = 'evm-validator-node evm-validator-node-2 listening' },
+        @{ Name = 'evm-validator-node-3'; Pattern = 'evm-validator-node evm-validator-node-3 listening' },
+        @{ Name = 'evm-validator-node-4'; Pattern = 'evm-validator-node evm-validator-node-4 listening' }
     )
 
     foreach ($service in $services) {
@@ -139,16 +174,19 @@ Write-Host 'Waiting for Fabric peers startup...'
 Wait-FabricPeersReady
 
 Write-Host 'Waiting for validator nodes and aggregator startup...'
-Wait-ConsensusServicesReady
+Wait-FabricConsensusServicesReady
 
 Write-Host 'Waiting for Fabric listener startup...'
 Wait-FabricListenerReady
 
 Write-Host 'Starting EVM node...'
-docker compose up -d evm-node
+docker compose up -d evm-node evm-validator-node-1 evm-validator-node-2 evm-validator-node-3 evm-validator-node-4
 
 Write-Host 'Waiting for EVM RPC (8545)...'
 Wait-HttpJsonRpc -Uri 'http://127.0.0.1:8545' -Body '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' | Out-Null
+
+Write-Host 'Waiting for validator nodes and aggregator startup...'
+Wait-EvmConsensusServicesReady
 
 Write-Host 'Ensuring TEE service is running...'
 $existingTee = Get-CimInstance Win32_Process |

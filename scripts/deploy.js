@@ -11,12 +11,17 @@ async function main() {
   const target = await Target.deploy();
   await target.waitForDeployment();
 
+  const Source = await ethers.getContractFactory('EvmSourceContract');
+  const source = await Source.deploy();
+  await source.waitForDeployment();
+
   const Verifier = await ethers.getContractFactory('VerifierContract');
   const verifier = await Verifier.deploy();
   await verifier.waitForDeployment();
 
   const deployment = {
     deployer: deployer.address,
+    evmSourceContract: await source.getAddress(),
     targetContract: await target.getAddress(),
     verifierContract: await verifier.getAddress(),
     chainId: Number((await ethers.provider.getNetwork()).chainId),

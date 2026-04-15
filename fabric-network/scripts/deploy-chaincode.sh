@@ -3,9 +3,17 @@ set -euo pipefail
 
 ROOT_DIR="/fabric-network"
 CC_NAME="${CC_NAME:-xcall}"
-CC_LABEL="${CC_LABEL:-xcall_1.0}"
-CC_VERSION="${CC_VERSION:-1.0}"
-CC_SEQUENCE="${CC_SEQUENCE:-1}"
+DEFAULT_SEQUENCE=1
+CURRENT_SEQUENCE=$(
+  peer lifecycle chaincode querycommitted --channelID mychannel --name "$CC_NAME" 2>/dev/null | \
+  sed -n 's/^Version: .* Sequence: \([0-9][0-9]*\),.*/\1/p' | head -n 1
+)
+if [ -n "$CURRENT_SEQUENCE" ]; then
+  DEFAULT_SEQUENCE=$((CURRENT_SEQUENCE + 1))
+fi
+CC_SEQUENCE="${CC_SEQUENCE:-$DEFAULT_SEQUENCE}"
+CC_VERSION="${CC_VERSION:-${CC_SEQUENCE}.0}"
+CC_LABEL="${CC_LABEL:-xcall_${CC_VERSION}}"
 CC_SRC_PATH="$ROOT_DIR/fabric-chaincode/xcall"
 CC_PACKAGE_FILE="$ROOT_DIR/fabric-network/runtime/channel-artifacts/${CC_LABEL}.tar.gz"
 
@@ -18,9 +26,8 @@ install_on_peer() {
   peer lifecycle chaincode install "$CC_PACKAGE_FILE" || true
 }
 
-if [ ! -f "$CC_PACKAGE_FILE" ]; then
-  peer lifecycle chaincode package "$CC_PACKAGE_FILE" --path "$CC_SRC_PATH" --lang node --label "$CC_LABEL"
-fi
+rm -f "$CC_PACKAGE_FILE"
+peer lifecycle chaincode package "$CC_PACKAGE_FILE" --path "$CC_SRC_PATH" --lang node --label "$CC_LABEL"
 
 install_on_peer "peer0.org1.example.com" "7051" "/fabric-network/fabric-network/runtime/organizations/peerOrganizations/org1.example.com/peers/peer0.org1.example.com/tls/ca.crt"
 install_on_peer "peer1.org1.example.com" "8051" "/fabric-network/fabric-network/runtime/organizations/peerOrganizations/org1.example.com/peers/peer1.org1.example.com/tls/ca.crt"

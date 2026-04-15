@@ -19,6 +19,7 @@ async function requestValidatorSignature(validator, payload, timeoutMs = 4000) {
 
 async function buildConsensusAggregate({
   channelName,
+  networkName,
   blockNumber,
   blockHash,
   eventRoot,
@@ -26,7 +27,11 @@ async function buildConsensusAggregate({
   payloadHash,
   txId
 }) {
-  const validatorSet = getTrustedValidatorSet(channelName);
+  const validatorScope = channelName || networkName;
+  if (!validatorScope) {
+    throw new Error('channelName or networkName is required');
+  }
+  const validatorSet = getTrustedValidatorSet(validatorScope);
   const validatorAddresses = validatorSet.validators.map((validator) => validator.address);
   const validatorSetHash = computeValidatorSetHash(
     validatorSet.validatorSetId,
@@ -34,7 +39,7 @@ async function buildConsensusAggregate({
     validatorAddresses
   );
   const signedMessage = computeConsensusMessage({
-    channelName,
+    channelName: validatorScope,
     blockNumber,
     blockHash,
     eventRoot,
@@ -45,7 +50,7 @@ async function buildConsensusAggregate({
 
   const signaturePayload = {
     validatorSetId: validatorSet.validatorSetId,
-    channelName,
+    channelName: validatorScope,
     blockNumber,
     blockHash,
     eventRoot,
