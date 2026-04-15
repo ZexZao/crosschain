@@ -182,7 +182,7 @@ async function buildAckArtifacts(projectRoot, relayTxHash) {
   }
 
   const targetInterface = new ethers.Interface([
-    'event BusinessExecuted(bytes32 indexed requestID,address indexed caller,string op,string recordId,string actor,string amount)'
+    'event BusinessExecuted(bytes32 indexed requestID,address indexed caller,string op,string recordId,string actor,string amount,bool requireAck)'
   ]);
 
   const targetLog = receipt.logs.find((log) => {
@@ -202,6 +202,9 @@ async function buildAckArtifacts(projectRoot, relayTxHash) {
   }
 
   const parsed = targetInterface.parseLog(targetLog);
+  if (!parsed.args.requireAck) {
+    return null;
+  }
   const listenerReceivedAtMs = Date.now();
   const captured = {
     networkName: 'evm-localhost',
@@ -215,7 +218,8 @@ async function buildAckArtifacts(projectRoot, relayTxHash) {
       targetOp: parsed.args.op,
       targetRecordId: parsed.args.recordId,
       targetActor: parsed.args.actor,
-      targetAmount: parsed.args.amount
+      targetAmount: parsed.args.amount,
+      requireAck: false
     },
     txHash: receipt.hash,
     blockNumber: receipt.blockNumber,
@@ -295,7 +299,11 @@ async function runCase(projectRoot, datasetPath, testCase, options = {}) {
   const caseStartedAt = Date.now();
   const tempPath = path.join(projectRoot, 'runtime', `fabric-suite-${testCase.caseId}.json`);
   const latestXmsgPath = path.join(projectRoot, 'runtime', 'latest-xmsg.json');
-  fs.writeFileSync(tempPath, JSON.stringify(testCase.payload), 'utf8');
+  const runtimePayload = {
+    ...testCase.payload,
+    requireAck: withAck ? true : Boolean(testCase.payload.requireAck)
+  };
+  fs.writeFileSync(tempPath, JSON.stringify(runtimePayload), 'utf8');
 
   try {
     const invokeStep = runCommandWithOutput('docker', [
@@ -355,22 +363,30 @@ async function runCase(projectRoot, datasetPath, testCase, options = {}) {
       const ackStartedAt = Date.now();
       ackArtifacts = await buildAckArtifacts(projectRoot, relayResult.txHash);
       ackBuildDurationMs = Date.now() - ackStartedAt;
-      const ackRelayStartedAt = Date.now();
-      const ackRelayStdout = execFileSync(process.execPath, [
-        path.join(projectRoot, 'relayer', 'ack-to-fabric.js')
-      ], {
-        cwd: projectRoot,
-        encoding: 'utf8',
-        stdio: 'pipe'
-      });
-      ackRelayDurationMs = Date.now() - ackRelayStartedAt;
-      ackRelayResult = extractJsonFromText(ackRelayStdout) || fs.readJsonSync(path.join(projectRoot, 'runtime', 'last-ack-to-fabric-result.json'));
-      ackState = await readAckState(projectRoot, listenerResult.xmsg.requestID);
-      ackCheck = {
-        ackCreated: ackArtifacts.xmsg.payloadDecoded.op === 'ack_confirm',
-        ackOriginMatch: ackState?.originRequestID === listenerResult.xmsg.requestID,
-        ackStatusMatch: ackState?.status === 'success'
-      };
+      if (ackArtifacts) {
+        const ackRelayStartedAt = Date.now();
+        const ackRelayStdout = execFileSync(process.execPath, [
+          path.join(projectRoot, 'relayer', 'ack-to-fabric.js')
+        ], {
+          cwd: projectRoot,
+          encoding: 'utf8',
+          stdio: 'pipe'
+        });
+        ackRelayDurationMs = Date.now() - ackRelayStartedAt;
+        ackRelayResult = extractJsonFromText(ackRelayStdout) || fs.readJsonSync(path.join(projectRoot, 'runtime', 'last-ack-to-fabric-result.json'));
+        ackState = await readAckState(projectRoot, listenerResult.xmsg.requestID);
+        ackCheck = {
+          ackCreated: ackArtifacts.xmsg.payloadDecoded.op === 'ack_confirm',
+          ackOriginMatch: ackState?.originRequestID === listenerResult.xmsg.requestID,
+          ackStatusMatch: ackState?.status === 'success'
+        };
+      } else {
+        ackCheck = {
+          ackCreated: false,
+          ackOriginMatch: false,
+          ackStatusMatch: false
+        };
+      }
     }
 
     const pass = Object.values(fieldCheck).every(Boolean)

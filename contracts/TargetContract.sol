@@ -8,6 +8,7 @@ contract TargetContract {
         string actor;
         string amount;
         string metadata;
+        bool requireAck;
     }
 
     struct ExecutionRecord {
@@ -28,7 +29,8 @@ contract TargetContract {
         string op,
         string recordId,
         string actor,
-        string amount
+        string amount,
+        bool requireAck
     );
 
     bytes32 public lastRequestID;
@@ -53,15 +55,17 @@ contract TargetContract {
             string memory recordId,
             string memory actor,
             string memory amount,
-            string memory metadata
-        ) = abi.decode(payload, (string, string, string, string, string));
+            string memory metadata,
+            bool requireAck
+        ) = abi.decode(payload, (string, string, string, string, string, bool));
 
         return BusinessPayload({
             op: op,
             recordId: recordId,
             actor: actor,
             amount: amount,
-            metadata: metadata
+            metadata: metadata,
+            requireAck: requireAck
         });
     }
 
@@ -107,7 +111,8 @@ contract TargetContract {
             parsed.op,
             parsed.recordId,
             parsed.actor,
-            parsed.amount
+            parsed.amount,
+            parsed.requireAck
         );
         return true;
     }

@@ -400,3 +400,61 @@ node relayer/ack-to-fabric.js
   - `0x9bac6569e14344c8b37cdf92a2e5f5da140b09fc21ae3285fee46399c891592b`
 - `ACK status`
   - `success`
+
+## ACK Optional Mode
+
+The current version supports optional acknowledgements.
+
+- When `requireAck = false`:
+  - the system runs only the forward `Fabric -> EVM` path
+  - no `ACK-XMsg` is generated after target-chain execution
+  - this is suitable for calls that do not require source-chain confirmation
+
+- When `requireAck = true`:
+  - the system runs the full closed loop
+  - the target chain emits a receipt event and builds an `ACK-XMsg`
+  - the ACK then goes through proof generation, threshold signatures, TEE endorsement, and is written back to Fabric
+
+`requireAck` is now an explicit field in the business payload and participates in payload encoding, target-chain execution, and ACK event handling.
+
+## Test Modes
+
+Two test modes are now kept side by side.
+
+- Forward-only baseline
+  - command:
+    ```powershell
+    npm.cmd run fabric:test
+    ```
+  - output:
+    - `runtime/fabric-real-summary.md`
+    - `runtime/fabric-real-results.json`
+
+- Full closed loop with ACK
+  - command:
+    ```powershell
+    npm.cmd run fabric:test:ack
+    ```
+  - output:
+    - `runtime/fabric-real-ack-summary.md`
+    - `runtime/fabric-real-ack-results.json`
+
+## Startup Script
+
+`start-real-fabric.ps1` now supports both modes.
+
+- Forward-only:
+  ```powershell
+  .\start-real-fabric.ps1
+  ```
+  or:
+  ```powershell
+  .\start-real-fabric.ps1 -TestMode forward
+  ```
+
+- Full closed loop:
+  ```powershell
+  .\start-real-fabric.ps1 -TestMode full
+  ```
+
+The script prints the corresponding result files after completion.

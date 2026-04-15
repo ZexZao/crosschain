@@ -38,7 +38,7 @@ function getAckEventConfig(deployment) {
   }
   return {
     address: deployment.targetContract,
-    abi: ['event BusinessExecuted(bytes32 indexed requestID,address indexed caller,string op,string recordId,string actor,string amount)'],
+    abi: ['event BusinessExecuted(bytes32 indexed requestID,address indexed caller,string op,string recordId,string actor,string amount,bool requireAck)'],
     eventName: 'BusinessExecuted',
     dstChainName: 'fabric-mychannel',
     dstContract: ethers.ZeroAddress,
@@ -59,6 +59,16 @@ async function handleLog(provider, deployment, config, mode, log) {
     rawPayload = JSON.parse(parsed.args.payloadJson);
     nonce = Number(parsed.args.nonce);
   } else {
+    if (!parsed.args.requireAck) {
+      console.log(JSON.stringify({
+        ok: true,
+        mode,
+        txHash: log.transactionHash,
+        skipped: true,
+        reason: 'requireAck=false'
+      }));
+      return;
+    }
     rawPayload = {
       op: 'ack_confirm',
       originRequestID: parsed.args.requestID,
@@ -67,7 +77,8 @@ async function handleLog(provider, deployment, config, mode, log) {
       targetOp: parsed.args.op,
       targetRecordId: parsed.args.recordId,
       targetActor: parsed.args.actor,
-      targetAmount: parsed.args.amount
+      targetAmount: parsed.args.amount,
+      requireAck: false
     };
     nonce = Number(log.index);
   }

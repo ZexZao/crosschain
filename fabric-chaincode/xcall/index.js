@@ -56,8 +56,8 @@ function computeDigest(xmsg, ctr, prevDigest, teePubKey) {
 }
 
 function decodeBusinessPayload(payloadHex) {
-  const [op, recordId, actor, amount, metadata] = ABI.decode(
-    ['string', 'string', 'string', 'string', 'string'],
+  const [op, recordId, actor, amount, metadata, requireAck] = ABI.decode(
+    ['string', 'string', 'string', 'string', 'string', 'bool'],
     payloadHex
   );
   return {
@@ -65,7 +65,8 @@ function decodeBusinessPayload(payloadHex) {
     recordId,
     actor,
     amount,
-    metadata
+    metadata,
+    requireAck
   };
 }
 
@@ -151,6 +152,7 @@ class XCallContract extends Contract {
       actor: parsedPayload.actor,
       amount: parsedPayload.amount,
       metadata: parsedPayload.metadata,
+      requireAck: Boolean(parsedPayload.requireAck),
       status: 'executed',
       updatedAt: new Date().toISOString()
     };

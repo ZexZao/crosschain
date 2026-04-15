@@ -65,7 +65,8 @@ function normalizeBusinessPayload(rawPayload) {
     recordId: String(recordId),
     actor: String(actor),
     amount,
-    metadata: JSON.stringify(rawPayload)
+    metadata: JSON.stringify(rawPayload),
+    requireAck: Boolean(rawPayload.requireAck)
   };
 }
 
@@ -75,13 +76,14 @@ function encodeBusinessPayload(rawPayload) {
   return {
     normalized,
     payloadHex: abiCoder.encode(
-      ['string', 'string', 'string', 'string', 'string'],
+      ['string', 'string', 'string', 'string', 'string', 'bool'],
       [
         normalized.op,
         normalized.recordId,
         normalized.actor,
         normalized.amount,
-        normalized.metadata
+        normalized.metadata,
+        normalized.requireAck
       ]
     )
   };

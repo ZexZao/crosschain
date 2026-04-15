@@ -1,5 +1,10 @@
 $ErrorActionPreference = 'Stop'
 
+param(
+    [ValidateSet('forward', 'full')]
+    [string]$TestMode = 'forward'
+)
+
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
@@ -220,10 +225,20 @@ docker compose -f docker-compose.fabric.yml restart fabric-listener
 Write-Host 'Waiting for Fabric listener restart to complete...'
 Wait-FabricListenerReady
 
-Write-Host 'Running real Fabric test suite...'
-npm.cmd run fabric:test
+if ($TestMode -eq 'full') {
+    Write-Host 'Running full Fabric test suite (forward + ack)...'
+    npm.cmd run fabric:test:ack
+} else {
+    Write-Host 'Running forward-only Fabric test suite...'
+    npm.cmd run fabric:test
+}
 
 Write-Host ''
 Write-Host 'Done. Latest result files:'
-Write-Host '  runtime\fabric-real-summary.md'
-Write-Host '  runtime\fabric-real-results.json'
+if ($TestMode -eq 'full') {
+    Write-Host '  runtime\fabric-real-ack-summary.md'
+    Write-Host '  runtime\fabric-real-ack-results.json'
+} else {
+    Write-Host '  runtime\fabric-real-summary.md'
+    Write-Host '  runtime\fabric-real-results.json'
+}
