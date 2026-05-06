@@ -105,6 +105,19 @@ function verifyConsensusProof(proof, xmsg) {
   if (!cp) {
     throw new Error('evm proof missing consensusProof');
   }
+
+  // BLS aggregate path: consensus verification is handled by the TEE /attest
+  // endpoint via blsVerifyAggregate. Skip ECDSA-specific checks.
+  if (cp.signatureScheme === 'bls-aggregate') {
+    const trustedSet = getTrustedValidatorSet(proof.networkName);
+    if (cp.validatorSetId !== trustedSet.validatorSetId) {
+      throw new Error('evm consensus validatorSetId mismatch');
+    }
+    if (Number(cp.threshold) !== Number(trustedSet.threshold)) {
+      throw new Error('evm consensus threshold mismatch');
+    }
+    return;
+  }
   const trustedSet = getTrustedValidatorSet(proof.networkName);
   if (cp.validatorSetId !== trustedSet.validatorSetId) {
     throw new Error('evm consensus validatorSetId mismatch');

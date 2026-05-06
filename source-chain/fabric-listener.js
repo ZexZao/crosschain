@@ -146,7 +146,7 @@ async function runGatewayListener(options) {
   await gateway.connect(ccp, {
     wallet,
     identity: options.identity,
-    discovery: { enabled: true, asLocalhost: options.asLocalhost }
+    discovery: { enabled: false, asLocalhost: options.asLocalhost }
   });
 
   const deployment = readJSON('deployment.json');

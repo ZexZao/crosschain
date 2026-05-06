@@ -1,4 +1,5 @@
 const { ethers } = require('ethers');
+const { getBlsPublicKey } = require('../shared/bls');
 
 function buildWallet(label) {
   const privateKey = ethers.keccak256(ethers.toUtf8Bytes(`crosschain-validator:${label}`));
@@ -7,11 +8,13 @@ function buildWallet(label) {
 
 function buildValidator({ id, label, url }) {
   const wallet = buildWallet(label);
+  const blsPubkey = getBlsPublicKey(label);
   return {
     id,
     label,
     url,
-    address: wallet.address
+    address: wallet.address,
+    blsPubkey,
   };
 }
 

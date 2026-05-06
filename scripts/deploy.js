@@ -15,15 +15,22 @@ async function main() {
   const source = await Source.deploy();
   await source.waitForDeployment();
 
+  // Deploy V1 (legacy, backward compatible)
   const Verifier = await ethers.getContractFactory('VerifierContract');
   const verifier = await Verifier.deploy();
   await verifier.waitForDeployment();
+
+  // Deploy V2 (hybrid bridge: BLS + TEE dual verification)
+  const VerifierV2 = await ethers.getContractFactory('VerifierContractV2');
+  const verifierV2 = await VerifierV2.deploy();
+  await verifierV2.waitForDeployment();
 
   const deployment = {
     deployer: deployer.address,
     evmSourceContract: await source.getAddress(),
     targetContract: await target.getAddress(),
     verifierContract: await verifier.getAddress(),
+    verifierContractV2: await verifierV2.getAddress(),
     chainId: Number((await ethers.provider.getNetwork()).chainId),
   };
 

@@ -1,9 +1,15 @@
 const axios = require('axios');
+const { ethers } = require('ethers');
 const {
   computeValidatorSetHash,
   computeConsensusMessage
 } = require('../shared/consensus-proof');
 const { getTrustedValidatorSet } = require('./validator-set');
+const {
+  blsHashToCurve,
+  blsAggregateSignatures,
+  blsVerifyAggregate,
+} = require('../shared/bls');
 
 async function requestValidatorSignature(validator, payload, timeoutMs = 4000) {
   const response = await axios.post(`${validator.url}/sign`, payload, {
@@ -94,6 +100,97 @@ async function buildConsensusAggregate({
   };
 }
 
+async function requestValidatorBlsSignature(validator, payload, timeoutMs = 4000) {
+  const response = await axios.post(`${validator.url}/bls-sign`, payload, {
+    timeout: timeoutMs
+  });
+
+  const data = response.data || {};
+  return {
+    validatorId: data.validatorId,
+    blsSignature: data.blsSignature
+  };
+}
+
+async function buildBlsConsensusAggregate({
+  channelName,
+  networkName,
+  blockNumber,
+  blockHash,
+  eventRoot,
+  requestID,
+  payloadHash,
+  txId
+}) {
+  const validatorScope = channelName || networkName;
+  if (!validatorScope) {
+    throw new Error('channelName or networkName is required');
+  }
+  const validatorSet = getTrustedValidatorSet(validatorScope);
+  const validatorSetHash = computeValidatorSetHash(
+    validatorSet.validatorSetId,
+    validatorSet.threshold,
+    validatorSet.validators.map((v) => v.address)
+  );
+
+  const consensusMessage = computeConsensusMessage({
+    channelName: validatorScope,
+    blockNumber,
+    blockHash,
+    eventRoot,
+    requestID,
+    payloadHash,
+    validatorSetHash
+  });
+
+  const payload = {
+    validatorSetId: validatorSet.validatorSetId,
+    channelName: validatorScope,
+    blockNumber,
+    blockHash,
+    eventRoot,
+    requestID,
+    payloadHash,
+    txId,
+    consensusMessage,
+  };
+
+  const sigResults = await Promise.allSettled(
+    validatorSet.validators.map((validator) =>
+      requestValidatorBlsSignature(validator, payload).then((result) => ({
+        ...result,
+        validatorId: validator.id,
+      }))
+    )
+  );
+
+  const signatures = sigResults
+    .filter((result) => result.status === 'fulfilled')
+    .map((result) => result.value)
+    .filter((item) => item.blsSignature);
+
+  if (signatures.length < validatorSet.threshold) {
+    const failureCount = sigResults.filter((r) => r.status !== 'fulfilled').length;
+    throw new Error(
+      `BLS consensus threshold not satisfied: collected ${signatures.length}/${validatorSet.threshold} signatures (${failureCount} validator requests failed)`
+    );
+  }
+
+  // BLS aggregate: N sigs → 1 sig (single pairing to verify)
+  const aggregateSig = blsAggregateSignatures(signatures.map((s) => s.blsSignature));
+
+  return {
+    validatorSetId: validatorSet.validatorSetId,
+    validatorSetHash,
+    threshold: validatorSet.threshold,
+    aggregateSig,
+    validatorBlsPubkeys: validatorSet.validators.map((v) => v.blsPubkey),
+    consensusMessage,
+    signatureScheme: 'bls-aggregate',
+  };
+}
+
 module.exports = {
-  buildConsensusAggregate
+  buildConsensusAggregate,
+  buildBlsConsensusAggregate,
 };

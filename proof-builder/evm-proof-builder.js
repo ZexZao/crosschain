@@ -1,7 +1,7 @@
 const { ethers } = require('ethers');
 const { ensureRuntime, writeJSON, readJSON } = require('../shared/utils');
 const { createBaseXmsg, createRequestId } = require('../shared/xmsg');
-const { requestConsensusAggregate } = require('../consensus-aggregator/client');
+const { requestBlsConsensusAggregate } = require('../consensus-aggregator/client');
 const {
   buildEvmEventProof,
   buildEvmFinalityInfo
@@ -56,7 +56,9 @@ async function buildXmsgFromEvmEvent({
   });
 
   const parsedEventProof = { ...eventProof };
-  const consensusProof = await requestConsensusAggregate({
+
+  // Use BLS consensus aggregate (hybrid bridge path)
+  const blsProof = await requestBlsConsensusAggregate({
     networkName,
     blockNumber,
     blockHash,
@@ -65,14 +67,14 @@ async function buildXmsgFromEvmEvent({
     payloadHash: base.payloadHash,
     txId: txHash
   });
-  parsedEventProof.consensusProof = consensusProof;
+  parsedEventProof.consensusProof = blsProof;
 
   const finalityInfo = buildEvmFinalityInfo({
     networkName,
     blockNumber,
     blockHash,
     confirmations: 1,
-    consensusProof
+    consensusProof: blsProof
   });
 
   return {
@@ -81,13 +83,14 @@ async function buildXmsgFromEvmEvent({
     finalityInfo: JSON.stringify(finalityInfo),
     teePubKey: ethers.ZeroAddress,
     proofMeta: {
-      proofType: 'evm-v2',
-      signatureScheme: 'threshold-ecdsa',
-      validatorSetId: consensusProof.validatorSetId,
-      threshold: consensusProof.threshold,
-      validatorCount: consensusProof.validatorAddresses.length,
+      proofType: 'hybrid-v1',
+      signatureScheme: 'bls-aggregate',
+      validatorSetId: blsProof.validatorSetId,
+      threshold: blsProof.threshold,
+      validatorCount: blsProof.validatorBlsPubkeys.length,
       proofBuildMs: Date.now() - proofBuildStartedAt
-    }
+    },
+    blsProof,
   };
 }
 

@@ -16,8 +16,8 @@
     "proof:build": "node proof-builder/fabric-proof-builder.js",
     "proof:build:evm": "node -e \"require('./proof-builder/evm-proof-builder').buildFromCapturedEvent().then(x=>console.log(JSON.stringify(x,null,2))).catch(e=>{console.error(e.message||e);process.exit(1);})\"",
     "fabric:case": "node scripts/run-fabric-test-case.js",
-    "fabric:test": "node scripts/run-fabric-real-suite.js --mode forward",
-    "fabric:test:ack": "node scripts/run-fabric-real-suite.js --mode full",
+    "fabric:test": "node scripts/run-fabric-e2e-tests.js",
+    "fabric:test:ack": "node scripts/run-full-suite.js",
     "evm:fabric:request": "node scripts/request-evm-fabric-call.js",
     "evm:fabric:demo": "node scripts/run-evm-fabric-demo.js",
     "fabric:wallet": "node scripts/export-fabric-wallet.js",
@@ -36,17 +36,22 @@
     "exp:tamper": "node scripts/run-experiment.js tamper",
     "exp:replay": "node scripts/run-experiment.js replay",
     "exp:forged": "node scripts/run-experiment.js forged",
-    "exp:rollback": "node scripts/run-experiment.js rollback"
+    "exp:rollback": "node scripts/run-experiment.js rollback",
+    "start": "powershell -ExecutionPolicy Bypass -File start.ps1",
+    "start:full": "powershell -ExecutionPolicy Bypass -File start.ps1 -TestMode full",
+    "start:forward": "powershell -ExecutionPolicy Bypass -File start.ps1 -TestMode forward",
+    "test:hybrid": "node scripts/test-hybrid-bridge.js"
   },
   "dependencies": {
+    "@noble/curves": "^2.2.0",
     "axios": "^1.8.1",
-    "express": "^4.21.2",
     "ethers": "^6.13.5",
+    "express": "^4.21.2",
     "fabric-network": "^2.2.20",
     "fs-extra": "^11.3.0"
   },
   "devDependencies": {
-    "hardhat": "^2.22.18",
-    "@nomicfoundation/hardhat-toolbox": "^5.0.0"
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.18"
   }
 }

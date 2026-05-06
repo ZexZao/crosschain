@@ -2,6 +2,7 @@ const express = require('express');
 const { ethers } = require('ethers');
 const fs = require('fs-extra');
 const { getValidatorWalletByLabel } = require('../consensus-aggregator/validator-set');
+const { deriveBlsPrivateKey, blsSignPoint, blsHashToCurve } = require('../shared/bls');
 const { Gateway, Wallets } = require('fabric-network');
 
 const label = process.env.VALIDATOR_LABEL;
@@ -132,6 +133,37 @@ app.post('/sign', async (req, res) => {
       targetPeer,
       signer: wallet.address,
       signature
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/bls-sign', async (req, res) => {
+  try {
+    const consensusMessageHex = req.body?.consensusMessage;
+    if (!ethers.isHexString(consensusMessageHex, 32)) {
+      throw new Error('consensusMessage must be a 32-byte hex string');
+    }
+    const txId = req.body?.txId;
+    if (!txId) {
+      throw new Error('txId is required for peer-backed verification');
+    }
+
+    // Same peer verification as ECDSA path
+    await verifyTxOnAssignedPeer(txId);
+
+    // BLS: hash consensus message to curve, then sign
+    const msgBytes = ethers.getBytes(consensusMessageHex);
+    const msgPoint = blsHashToCurve(msgBytes);
+    const blsPrivKey = deriveBlsPrivateKey(label);
+    const blsSignature = blsSignPoint(msgPoint, blsPrivKey);
+
+    res.json({
+      ok: true,
+      validatorId: nodeId,
+      targetPeer,
+      blsSignature,
     });
   } catch (error) {
     res.status(400).json({ error: error.message });

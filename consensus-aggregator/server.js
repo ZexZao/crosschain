@@ -1,5 +1,5 @@
 const express = require('express');
-const { buildConsensusAggregate } = require('./index');
+const { buildConsensusAggregate, buildBlsConsensusAggregate } = require('./index');
 const { getTrustedValidatorSet } = require('./validator-set');
 
 const app = express();
@@ -18,7 +18,8 @@ app.get('/validator-set/:scopeName', (req, res) => {
       validators: validatorSet.validators.map((validator) => ({
         id: validator.id,
         address: validator.address,
-        url: validator.url
+        url: validator.url,
+        blsPubkey: validator.blsPubkey,
       }))
     });
   } catch (error) {
@@ -35,7 +36,16 @@ app.post('/aggregate', async (req, res) => {
   }
 });
 
+app.post('/bls-aggregate', async (req, res) => {
+  try {
+    const blsProof = await buildBlsConsensusAggregate(req.body);
+    res.json(blsProof);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 const port = Number(process.env.PORT || 9200);
 app.listen(port, () => {
-  console.log(`consensus-aggregator listening on ${port}`);
+  console.log(`consensus-aggregator listening on ${port} (BLS + ECDSA ready)`);
 });

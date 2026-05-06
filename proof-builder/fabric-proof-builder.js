@@ -1,7 +1,7 @@
 const { ethers } = require('ethers');
 const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
 const { createBaseXmsg, createRequestId } = require('../shared/xmsg');
-const { requestConsensusAggregate } = require('../consensus-aggregator/client');
+const { requestBlsConsensusAggregate } = require('../consensus-aggregator/client');
 const {
   buildFabricEventProof,
   buildFabricFinalityInfo
@@ -35,8 +35,6 @@ async function buildXmsgFromFabricEvent({
 }) {
   ensureRuntime();
   const proofBuildStartedAt = Date.now();
-  // Derive requestID from immutable Fabric event identity so multiple listeners
-  // observing the same transaction produce the same XMsg.
   const requestID = createRequestId(
     `fabric-${channelName}-${txId}`,
     0,
@@ -50,7 +48,7 @@ async function buildXmsgFromFabricEvent({
     srcEmitterName: chaincodeId,
     srcHeight: blockNumber,
     nonce,
-      txId
+    txId
   });
 
   const eventProof = buildFabricEventProof({
@@ -72,7 +70,9 @@ async function buildXmsgFromFabricEvent({
   });
 
   const parsedEventProof = { ...eventProof };
-  const consensusProof = await requestConsensusAggregate({
+
+  // Use BLS consensus aggregate (hybrid bridge path)
+  const blsProof = await requestBlsConsensusAggregate({
     channelName,
     blockNumber,
     blockHash: parsedEventProof.blockHash,
@@ -81,7 +81,7 @@ async function buildXmsgFromFabricEvent({
     payloadHash: base.payloadHash,
     txId
   });
-  parsedEventProof.consensusProof = consensusProof;
+  parsedEventProof.consensusProof = blsProof;
 
   const finalityInfo = buildFabricFinalityInfo({
     channelName,
@@ -91,7 +91,7 @@ async function buildXmsgFromFabricEvent({
     metadataBase64: blockMetadataBase64,
     commitStatus: txValidationCode || 'VALID',
     confirmations: 1,
-    consensusProof
+    consensusProof: blsProof
   });
 
   return {
@@ -100,13 +100,14 @@ async function buildXmsgFromFabricEvent({
     finalityInfo: JSON.stringify(finalityInfo),
     teePubKey: ethers.ZeroAddress,
     proofMeta: {
-      proofType: 'fabric-v2',
-      signatureScheme: 'threshold-ecdsa',
-      validatorSetId: parsedEventProof.consensusProof.validatorSetId,
-      threshold: parsedEventProof.consensusProof.threshold,
-      validatorCount: parsedEventProof.consensusProof.validatorAddresses.length,
+      proofType: 'hybrid-v1',
+      signatureScheme: 'bls-aggregate',
+      validatorSetId: blsProof.validatorSetId,
+      threshold: blsProof.threshold,
+      validatorCount: blsProof.validatorBlsPubkeys.length,
       proofBuildMs: Date.now() - proofBuildStartedAt
-    }
+    },
+    blsProof,
   };
 }
 

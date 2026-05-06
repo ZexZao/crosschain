@@ -128,6 +128,19 @@ function verifyConsensusProof(proof, xmsg) {
   }
 
   const cp = proof.consensusProof;
+
+  // BLS aggregate path: consensus verification is handled by the TEE /attest
+  // endpoint via blsVerifyAggregate. Skip ECDSA-specific checks.
+  if (cp.signatureScheme === 'bls-aggregate') {
+    const trustedSet = getTrustedValidatorSet(proof.channelName);
+    if (cp.validatorSetId !== trustedSet.validatorSetId) {
+      throw new Error('fabric consensus validatorSetId mismatch');
+    }
+    if (Number(cp.threshold) !== Number(trustedSet.threshold)) {
+      throw new Error('fabric consensus threshold mismatch');
+    }
+    return cp;
+  }
   const trustedSet = getTrustedValidatorSet(proof.channelName);
   if (cp.validatorSetId !== trustedSet.validatorSetId) {
     throw new Error('fabric consensus validatorSetId mismatch');

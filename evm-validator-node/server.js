@@ -1,6 +1,7 @@
 const express = require('express');
 const { ethers } = require('ethers');
 const { getValidatorWalletByLabel } = require('../consensus-aggregator/validator-set');
+const { deriveBlsPrivateKey, blsSignPoint, blsHashToCurve } = require('../shared/bls');
 
 const label = process.env.VALIDATOR_LABEL;
 if (!label) {
@@ -79,6 +80,40 @@ app.post('/sign', async (req, res) => {
       validatorId: nodeId,
       signer: wallet.address,
       signature
+    });
+  } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.post('/bls-sign', async (req, res) => {
+  try {
+    const consensusMessageHex = req.body?.consensusMessage;
+    if (!ethers.isHexString(consensusMessageHex, 32)) {
+      throw new Error('consensusMessage must be a 32-byte hex string');
+    }
+    const txHash = req.body?.txId || req.body?.txHash;
+    if (!txHash || !ethers.isHexString(txHash, 32)) {
+      throw new Error('txHash is required for evm-backed verification');
+    }
+
+    // Same EVM verification as ECDSA path
+    await verifyTxOnEvm({
+      txHash,
+      blockHash: req.body?.blockHash,
+      eventEmitter: req.body?.eventEmitter
+    });
+
+    // BLS: hash consensus message to curve, then sign
+    const msgBytes = ethers.getBytes(consensusMessageHex);
+    const msgPoint = blsHashToCurve(msgBytes);
+    const blsPrivKey = deriveBlsPrivateKey(label);
+    const blsSignature = blsSignPoint(msgPoint, blsPrivKey);
+
+    res.json({
+      ok: true,
+      validatorId: nodeId,
+      blsSignature,
     });
   } catch (error) {
     res.status(400).json({ error: error.message });
