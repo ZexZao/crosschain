@@ -212,6 +212,8 @@ async function main() {
     };
 
     try {
+      const tStart = Date.now();
+
       // Step 1: Invoke Fabric chaincode
       console.log('  [1/5] Invoking chaincode...');
       const payload = { ...testCase.payload, requireAck: false };
@@ -256,6 +258,7 @@ async function main() {
       caseResult.actualTargetState = targetState;
       caseResult.fieldCheck = checkFields(testCase.expectedTargetFields, targetState);
       caseResult.pass = Object.values(caseResult.fieldCheck).every(Boolean);
+      caseResult.totalMs = Date.now() - tStart;
 
       console.log(`  Target state: op=${targetState.lastOp}, recordId=${targetState.lastRecordId}`);
       console.log(`  Field checks: ${JSON.stringify(caseResult.fieldCheck)}`);
@@ -298,18 +301,9 @@ async function main() {
   console.log(`FINAL: ${passCount}/${cases.length} passed, ${failCount}/${cases.length} failed`);
   console.log(`Results saved to: ${RESULTS_PATH}`);
 
-  // Print all results
-  console.log('\n--- Detailed Results ---');
-  for (const r of results) {
-    const status = r.pass ? '✅' : '❌';
-    console.log(`${status} ${r.caseId}: ${r.description?.slice(0, 60)}...`);
-    if (r.fieldCheck) {
-      console.log(`   Fields: ${JSON.stringify(r.fieldCheck)}`);
-    }
-    if (r.error) {
-      console.log(`   Error: ${r.error}`);
-    }
-  }
+  // Generate formatted summary table
+  const { saveForwardSummary } = require('./save-summary');
+  saveForwardSummary('fabric-hybrid-e2e-results.json');
 
   process.exit(failCount > 0 ? 1 : 0);
 }

@@ -175,17 +175,34 @@ class XCallContract extends Contract {
     if (ethers.keccak256(xmsg.payload) !== xmsg.payloadHash) {
       throw new Error('payload hash mismatch');
     }
-    if (
-      ethers.keccak256(voucher.teeReport) !==
-      ethers.keccak256(ethers.solidityPacked(['string', 'address'], ['SIM_TEE_REPORT', voucher.teePubKey]))
-    ) {
-      throw new Error('bad tee report');
-    }
 
-    const digest = computeDigest(xmsg, voucher.ctr, voucher.prevDigest, voucher.teePubKey);
-    const signer = ethers.recoverAddress(digest, voucher.teeSig);
-    if (ethers.getAddress(signer) !== ethers.getAddress(voucher.teePubKey)) {
-      throw new Error('invalid tee signature');
+    // ── Hybrid bridge path (BLS + TEE /attest) ──
+    // attestDigest = keccak256(abi.encode(reportHash, teePubKey))
+    // VerifierContractV2 uses the same computation on-chain
+    if (voucher.reportHash && voucher.teeSig) {
+      const attestDigest = ethers.keccak256(
+        ABI.encode(['bytes32', 'address'], [voucher.reportHash, voucher.teePubKey])
+      );
+      const signer = ethers.recoverAddress(attestDigest, voucher.teeSig);
+      if (ethers.getAddress(signer) !== ethers.getAddress(voucher.teePubKey)) {
+        throw new Error('invalid tee signature (attestDigest)');
+      }
+    }
+    // ── Legacy ECDSA path ( /verify-sign ) ──
+    else if (voucher.ctr !== undefined && voucher.prevDigest !== undefined) {
+      if (
+        ethers.keccak256(voucher.teeReport) !==
+        ethers.keccak256(ethers.solidityPacked(['string', 'address'], ['SIM_TEE_REPORT', voucher.teePubKey]))
+      ) {
+        throw new Error('bad tee report');
+      }
+      const digest = computeDigest(xmsg, voucher.ctr, voucher.prevDigest, voucher.teePubKey);
+      const signer = ethers.recoverAddress(digest, voucher.teeSig);
+      if (ethers.getAddress(signer) !== ethers.getAddress(voucher.teePubKey)) {
+        throw new Error('invalid tee signature (legacy)');
+      }
+    } else {
+      throw new Error('unrecognized voucher format');
     }
 
     const parsedPayload = decodeBusinessPayload(xmsg.payload);

@@ -23,6 +23,30 @@ const DEPLOYMENT = readJSON('deployment.json');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+function ensureAckDaemonRunning() {
+  // Check if daemon is already running in fabric-listener container
+  try {
+    const healthCmd = `docker exec fabric-listener node -e "const h=require('http');h.get('http://localhost:3009/health',res=>{let b='';res.on('data',c=>b+=c);res.on('end',()=>console.log(b));});" 2>&1`;
+    const healthOut = execSync(healthCmd, {
+      encoding: 'utf8', timeout: 5000,
+      env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*' }
+    });
+    if (healthOut.includes('"ok"')) {
+      console.log('  ACK daemon already running');
+      return;
+    }
+  } catch (_) { /* Daemon not running, start it */ }
+
+  console.log('  Starting ACK relay daemon...');
+  execSync(
+    'docker exec -d fabric-listener sh -c "node /app/scripts/ack-relay-daemon.js 2>&1 &"',
+    { encoding: 'utf8', timeout: 5000, env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*' } }
+  );
+  // Give it time to connect to Fabric Gateway
+  sleep(5000);
+  console.log('  ACK daemon ready (Gateway connection established)');
+}
+
 function invokeFabricChaincode(payloadObj) {
   fs.writeFileSync(PAYLOAD_PATH, JSON.stringify(payloadObj));
   const cmd = `docker exec fabric-tools bash /fabric-network/fabric-network/scripts/invoke-xcall.sh --payload-file /fabric-network/runtime/test-payload.json 2>&1`;
@@ -143,27 +167,35 @@ async function buildAckArtifacts(relayTxHash) {
   return { captured, xmsg };
 }
 
-async function relayAckToFabric() {
-  const ackResultPath = path.join(RUNTIME_DIR, 'last-ack-to-fabric-result.json');
-  try { fs.unlinkSync(ackResultPath); } catch (_) {}
+async function relayAckToFabric(ackXmsg) {
+  // Write ACK xmsg to shared volume so the daemon inside fabric-listener can read it
+  const ackPath = path.join(RUNTIME_DIR, 'latest-ack-xmsg.json');
+  fs.writeJsonSync(ackPath, ackXmsg, { spaces: 2 });
 
-  const cmd = `docker exec fabric-listener node //app/scripts/docker-ack-relay.js 2>&1`;
+  // Call the persistent ACK daemon via a lightweight Node HTTP request.
+  // Much faster than spawning a new Node process with full module loading.
+  const cmd = `docker exec fabric-listener node -e "const h=require('http');const d=require('fs').readFileSync('/app/runtime/latest-ack-xmsg.json','utf8');const r=h.request({hostname:'localhost',port:3009,path:'/relay-ack',method:'POST',headers:{'Content-Type':'application/json'}},res=>{let b='';res.on('data',c=>b+=c);res.on('end',()=>console.log(b));});r.write(d);r.end();" 2>&1`;
 
   try {
     const output = execSync(cmd, {
-      encoding: 'utf8', timeout: 30000, maxBuffer: 10 * 1024 * 1024,
+      encoding: 'utf8', timeout: 30000, maxBuffer: 1 * 1024 * 1024,
       env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*' }
     });
-    console.log('  ACK relay output:', output.slice(0, 300).replace(/\n/g, ' '));
-  } catch (e) {
-    console.log('  ACK relay stdout:', (e.stdout || '').slice(0, 500));
-    if (e.stderr) console.log('  ACK relay stderr:', (e.stderr || '').slice(0, 500));
-  }
+    console.log('  ACK daemon:', output.slice(0, 300).replace(/\n/g, ' '));
 
-  if (fs.existsSync(ackResultPath)) {
-    return fs.readJsonSync(ackResultPath);
+    const match = output.match(/\{.*\}/s);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (parsed.ok) {
+        return { mode: 'ack-to-fabric', requestID: parsed.requestID, fabricResult: parsed.fabricResult };
+      }
+      return { error: parsed.error || 'daemon returned error' };
+    }
+    return { error: 'unparseable daemon response', raw: output.slice(0, 200) };
+  } catch (e) {
+    console.log('  Daemon error:', (e.stdout || '').slice(0, 200), (e.stderr || '').slice(0, 200));
+    return { error: e.message || 'daemon call failed' };
   }
-  return null;
 }
 
 async function queryTargetState() {
@@ -199,6 +231,9 @@ function checkFields(expected, actual) {
 async function main() {
   console.log('=== Full Round-Trip E2E Test Suite (Fabric → EVM → Fabric) ===\n');
   console.log('Building ACK artifacts directly from EVM receipts (no listener dependency)\n');
+
+  // Ensure the persistent ACK relay daemon is running for fast ACK submission
+  ensureAckDaemonRunning();
 
   const testData = fs.readJsonSync(TEST_DATA);
   const cases = testData.cases;
@@ -251,7 +286,7 @@ async function main() {
 
         // [5] Relay ACK to Fabric
         console.log('  [5/6] Relaying ACK to Fabric...');
-        const ackResult = await relayAckToFabric();
+        const ackResult = await relayAckToFabric(ackArtifacts.xmsg);
         caseResult.ackFabricResult = ackResult;
         console.log(`  Fabric ACK: ${ackResult?.fabricResult}`);
       }
@@ -297,12 +332,10 @@ async function main() {
   console.log('='.repeat(60));
   console.log(`FINAL: ${passCount}/${cases.length} passed, ${failCount}/${cases.length} failed`);
   console.log('Results: runtime/fabric-full-roundtrip-results.json');
-  for (const r of results) {
-    const s = r.pass ? '✅' : '❌';
-    const f = r.fieldCheck ? ` fields=${JSON.stringify(r.fieldCheck)}` : '';
-    const e = r.error ? ` error=${r.error}` : '';
-    console.log(`${s} ${r.caseId}${f}${e}`);
-  }
+
+  // Generate formatted summary table
+  const { saveRoundtripSummary } = require('./save-summary');
+  saveRoundtripSummary('fabric-full-roundtrip-results.json');
 }
 
 main().catch(err => { console.error('Suite error:', err.message || err); process.exit(1); });

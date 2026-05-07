@@ -138,6 +138,131 @@ flowchart LR
     EVM_LISTENER -->|ConfirmAckXMsg| CC
 ```
 
+## XMsg 字段说明
+
+统一跨链消息 `XMsg` 是系统内所有组件之间传递的核心数据结构。每条 XMsg 包含以下字段：
+
+### 基础标识字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `version` | `uint8` | XMsg 协议版本号，当前固定为 `1` |
+| `requestID` | `bytes32` | 全局唯一请求标识，由 `keccak256(namespace, nonce, srcHeight)` 生成 |
+| `txId` | `string` | 源链交易 ID（Fabric 为 `txId`，EVM 为 `txHash`） |
+| `nonce` | `uint64` | 源链交易序号（Fabric 为链码 nonce，EVM 为 `logIndex`） |
+| `createdAt` | `string` | XMsg 创建时间的 ISO 8601 字符串 |
+
+### 链标识字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `srcChainID` | `bytes32` | 源链标识，由链名称的 `keccak256` 派生（如 `keccak256("fabric-mychannel")`） |
+| `dstChainID` | `bytes32` | 目标链标识，由链名称的 `keccak256` 派生（如 `keccak256("evm-31337")`） |
+| `srcEmitter` | `bytes32` | 源链事件发射者标识（Fabric 为链码名称的 `keccak256`，EVM 为合约地址的 `keccak256`） |
+| `dstContract` | `address` | 目标链接收合约地址（EVM 为 `TargetContract` 地址，Fabric 为 `ZeroAddress`） |
+| `srcHeight` | `uint64` | 源链事件发生的区块高度（Fabric 为 `blockNumber`，EVM 为 `block.number`） |
+
+### 负载字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `payload` | `bytes` | ABI 编码的业务负载，格式为 `(string op, string recordId, string actor, string amount, string metadata, bool requireAck)` |
+| `payloadHash` | `bytes32` | 负载完整性哈希，`keccak256(payload)`，用于链上校验负载未被篡改 |
+| `payloadDecoded` | `object` | 负载解码后的可读对象（仅链下使用，不参与链上验证），包含 `{ op, recordId, actor, amount, metadata, requireAck }` |
+
+### 证明材料字段
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `eventProof` | `string` | 事件包含证明的 JSON 字符串，包含 `proofType`（`fabric-v2` 或 `evm-v2`）、源链特定字段、Merkle 证明等 |
+| `finalityInfo` | `string` | 最终性信息的 JSON 字符串，包含 `proofType`、`commitStatus`、`blockHash`、`confirmations` 等 |
+| `blsProof` | `object` | BLS 聚合签名证明，包含 `aggregateSig`（48 字节 G1 签名）、`validatorBlsPubkeys`（4 个 96 字节 G2 公钥）、`threshold`（3）、`consensusMessage` 等 |
+| `teePubKey` | `address` | TEE 验证者的以太坊地址（0x00...000 为占位，由 TEE 验证后填入） |
+| `proofMeta` | `object` | 证明元数据，包含 `proofType`（`hybrid-v1`）、`signatureScheme`（`bls-aggregate`）、`validatorSetId`、`threshold`、`validatorCount` 等 |
+
+### eventProof 差异化字段
+
+正向传输（Fabric → EVM）和闭环 ACK（EVM → Fabric）的 `eventProof` 包含不同的字段，对应两种链的证明结构：
+
+| 场景 | proofType | 特有字段 |
+|------|-----------|----------|
+| Fabric → EVM | `fabric-v2` | `channelName`, `chaincodeId`, `txId`, `blockNumber`, `txValidationCode`, `txEnvelopeBase64`, `blockHeader`, `creatorMspId`, `creatorHash`, `endorsements`, `rwsetHash`, `namespace` |
+| EVM → Fabric ACK | `evm-v2` | `networkName`, `emitterAddress`, `txHash`, `blockNumber`, `blockHash`, `logIndex` |
+
+### 业务负载标准化
+
+源链原始 JSON 负载经过 `normalizeBusinessPayload()` 标准化为统一结构：
+
+```json
+{
+  "op": "asset_lock",
+  "recordId": "FABRIC-ASSET-0001",
+  "actor": "org1.userA",
+  "amount": "128.50",
+  "metadata": "{\"op\":\"asset_lock\",\"assetId\":\"FABRIC-ASSET-0001\",...}",
+  "requireAck": true
+}
+```
+
+然后 ABI 编码为 `bytes` 存储到 `payload` 字段，目标链 `TargetContract.decodePayload()` 按相同 ABI 解码。
+
+## Docker 容器及其角色
+
+整个系统由 18 个 Docker 容器组成，分为 Fabric 侧（13 个）和 EVM 侧（5 个）。
+
+### Fabric 侧容器（docker-compose.fabric.yml）
+
+| 容器名称 | 镜像 | 端口 | 角色 |
+|----------|------|------|------|
+| `fabric-ca.org1.example.com` | `fabric-ca:1.5.12` | 7054 | Fabric CA 证书服务，负责签发 Org1 的 MSP 身份证书 |
+| `orderer.example.com` | `fabric-orderer:2.5.10` | 7050 | Fabric 排序节点，对交易进行排序并生成区块 |
+| `peer0.org1.example.com` | `fabric-peer:2.5.10` | 7051/7052 | Fabric 对等节点 #1，维护账本副本、执行链码、背书交易 |
+| `peer1.org1.example.com` | `fabric-peer:2.5.10` | 8051/8052 | Fabric 对等节点 #2，与 peer0 组成 Gossip 网络 |
+| `peer2.org1.example.com` | `fabric-peer:2.5.10` | 9051/9052 | Fabric 对等节点 #3 |
+| `peer3.org1.example.com` | `fabric-peer:2.5.10` | 10051/10052 | Fabric 对等节点 #4 |
+| `validator-node-1` | `node:20` | 9101 | Fabric 验证节点 #1，绑定 `peer0`，提供 `/sign` (ECDSA) + `/bls-sign` (BLS) 端点。签名前通过 peer 的 QSCC `GetBlockByTxID` 验证源链交易存在 |
+| `validator-node-2` | `node:20` | 9102 | Fabric 验证节点 #2，绑定 `peer1` |
+| `validator-node-3` | `node:20` | 9103 | Fabric 验证节点 #3，绑定 `peer2` |
+| `validator-node-4` | `node:20` | 9104 | Fabric 验证节点 #4，绑定 `peer3` |
+| `consensus-aggregator` | `node:20` | 9200 | 共识聚合器，向 4 个验证节点并行请求签名，收集到阈值 (3/4) 后通过 `/bls-aggregate` 端点聚合成单一 BLS 签名 |
+| `fabric-listener` | `node:20` | — | Fabric 事件监听器，通过 Fabric Gateway 监听链码 `XCALL` 事件，调用 proof-builder 构造 XMsg，向 consensus-aggregator 请求 BLS 聚合证明 |
+| `fabric-tools` | `fabric-tools:2.5.10` | — | Fabric CLI 工具容器，用于通道创建、链码部署/调用等管理操作 |
+
+#### 验证节点与 Peer 的绑定关系
+
+| 验证节点 | 绑定 Peer | 签名端点 | 验证机制 |
+|----------|----------|----------|----------|
+| `validator-node-1` | `peer0:7051` | `:9101/bls-sign` | 签名前通过 `peer0` 查询 `GetBlockByTxID` |
+| `validator-node-2` | `peer1:8051` | `:9102/bls-sign` | 签名前通过 `peer1` 查询 `GetBlockByTxID` |
+| `validator-node-3` | `peer2:9051` | `:9103/bls-sign` | 签名前通过 `peer2` 查询 `GetBlockByTxID` |
+| `validator-node-4` | `peer3:10051` | `:9104/bls-sign` | 签名前通过 `peer3` 查询 `GetBlockByTxID` |
+
+### EVM 侧容器（docker-compose.yml）
+
+| 容器名称 | 镜像 | 端口 | 角色 |
+|----------|------|------|------|
+| `evm-node` | `node:20` | 8545 | 本地 Hardhat 以太坊测试链（Chain ID 31337），运行 Solidity 合约 |
+| `evm-validator-node-1` | `node:20` | 9301 | EVM 验证节点 #1，提供 `/sign` + `/bls-sign` 端点，签名前从 EVM 获取交易收据进行验证 |
+| `evm-validator-node-2` | `node:20` | 9302 | EVM 验证节点 #2 |
+| `evm-validator-node-3` | `node:20` | 9303 | EVM 验证节点 #3 |
+| `evm-validator-node-4` | `node:20` | 9304 | EVM 验证节点 #4 |
+| `tee-verifier` | `node:20` | 9000 | TEE 模拟验证服务，提供 `/attest`（BLS 混合桥验证 + TEE 签名）和 `/verify-sign`（ECDSA 兼容路径）端点 |
+
+### 链码运行容器（由 Fabric 自动创建）
+
+| 容器命名规则 | 说明 |
+|--------------|------|
+| `dev-peer*.org1.example.com-xcall_N.M-<hash>` | Fabric 链码运行时容器，每个 peer 一个，由 Fabric 在首次调用链码时自动创建，运行 `fabric-chaincode-node start` |
+
+### 验证者集合
+
+系统维护两组独立的验证者集合，分别服务于正向传输和闭环 ACK：
+
+| 集合 ID | 验证节点 | 阈值 | 用途 |
+|---------|----------|------|------|
+| `fabric-mychannel-v1` | `validator-node-1~4` | 3/4 | 正向传输（Fabric → EVM）的 BLS 签名 |
+| `evm-localhost-v1` | `evm-validator-node-1~4` | 3/4 | 闭环 ACK（EVM → Fabric）的 BLS 签名 |
+
 ## 目录说明
 
 - `contracts/`
@@ -184,7 +309,9 @@ flowchart LR
   - `run-fabric-test-case.js` — 单条 Fabric 用例调用
   - `run-experiment.js` — 模拟实验运行器（支持 normal/tamper/replay/forged/rollback 模式）
   - `run-evm-fabric-demo.js` — EVM → Fabric 演示脚本
-  - `docker-ack-relay.js` — Docker 容器内 ACK 回传脚本
+  - `docker-ack-relay.js` — Docker 容器内 ACK 回传脚本（已由 ack-relay-daemon.js 取代）
+  - `ack-relay-daemon.js` — ACK 中继守护进程，复用 Fabric Gateway 连接
+  - `save-summary.js` — 测试完成后自动生成格式化汇总表格
   - `export-fabric-wallet.js` — Fabric 钱包导出
   - `generate-test-datasets.js` — 测试数据集生成
   - `load-test-case.js` — 测试用例加载器

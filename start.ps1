@@ -176,22 +176,28 @@ Start-Sleep -Seconds 3
 Wait-Container -Name 'consensus-aggregator' -LogPattern 'listening on 9200' -Timeout 60
 
 # =============================================
-# Phase 8: Run tests
+# Phase 8: Start ACK daemon (full mode only)
 # =============================================
-Write-Step 'Phase 8: Running tests'
-
 if ($TestMode -eq 'full') {
-    Write-Host 'Running FULL round-trip test suite (Fabric -> EVM -> Fabric ACK)...' -ForegroundColor Green
-    node scripts/run-full-suite.js
-    Write-Host ''
-    Write-Host 'Results:' -ForegroundColor Green
-    Write-Host '  runtime\fabric-full-roundtrip-results.json'
-} else {
-    Write-Host 'Running FORWARD-ONLY test suite (Fabric -> EVM)...' -ForegroundColor Green
-    node scripts/run-fabric-e2e-tests.js
-    Write-Host ''
-    Write-Host 'Results:' -ForegroundColor Green
-    Write-Host '  runtime\fabric-hybrid-e2e-results.json'
+    Write-Step 'Phase 8: Starting ACK relay daemon (Gateway connection reused)'
+    docker exec -d fabric-listener sh -c "node /app/scripts/ack-relay-daemon.js 2>&1 &"
+    Start-Sleep -Seconds 5
+    Write-Host '  ACK daemon ready'
+}
+
+# =============================================
+# Phase 9: Run tests
+# =============================================
+Write-Step 'Phase 9: Running tests'
+
+node scripts/run-all-tests.js $TestMode
+
+Write-Host ''
+Write-Host 'Results:' -ForegroundColor Green
+Write-Host '  runtime/test-summary.md                   (表格汇总)'
+Write-Host '  runtime/fabric-hybrid-e2e-results.json    (正向 JSON)'
+if ($TestMode -eq 'full') {
+    Write-Host '  runtime/fabric-full-roundtrip-results.json (闭环 JSON)'
 }
 
 Write-Host ''
