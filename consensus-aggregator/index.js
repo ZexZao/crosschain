@@ -190,7 +190,82 @@ async function buildBlsConsensusAggregate({
   };
 }
 
+async function buildV3ConsensusProof({
+  channelName,
+  networkName,
+  blockNumber,
+  blockHash,
+  eventRoot,
+  requestID,
+  payloadHash,
+  txId
+}) {
+  const scope = channelName || networkName;
+  if (!scope) throw new Error('channelName or networkName is required');
+  const validatorSet = getTrustedValidatorSet(scope);
+
+  const consensusMessage = computeConsensusMessage({
+    channelName: scope,
+    blockNumber,
+    blockHash,
+    eventRoot,
+    requestID,
+    payloadHash,
+    validatorSetHash: ethers.ZeroHash, // V3 doesn't use validatorSetHash on-chain
+  });
+
+  const payload = {
+    validatorSetId: validatorSet.validatorSetId,
+    channelName: scope,
+    blockNumber,
+    blockHash,
+    eventRoot,
+    requestID,
+    payloadHash,
+    txId,
+    digest: consensusMessage,
+  };
+
+  const sigResults = await Promise.allSettled(
+    validatorSet.validators.map((v) =>
+      requestValidatorSignature(v, payload).then((r) => ({
+        signer: r.signer,
+        signature: r.signature,
+        validatorId: v.id,
+      }))
+    )
+  );
+
+  const collected = sigResults
+    .filter((r) => r.status === 'fulfilled')
+    .map((r) => r.value)
+    .filter((item) => item.signer && item.signature);
+
+  if (collected.length < validatorSet.threshold) {
+    throw new Error(
+      `V3 consensus threshold not satisfied: ${collected.length}/${validatorSet.threshold}`
+    );
+  }
+
+  // Sort by signer address (ascending) for on-chain dedup
+  collected.sort((a, b) => {
+    const addrA = ethers.getAddress(a.signer).toLowerCase();
+    const addrB = ethers.getAddress(b.signer).toLowerCase();
+    return addrA < addrB ? -1 : addrA > addrB ? 1 : 0;
+  });
+
+  return {
+    validatorSetId: validatorSet.validatorSetId,
+    threshold: validatorSet.threshold,
+    consensusMessage,
+    signatures: collected.map(({ signer, signature }) => ({ signer, signature })),
+    signerAddresses: collected.map(({ signer }) => signer),
+    signatureScheme: 'ecdsa-threshold-v3',
+  };
+}
+
 module.exports = {
   buildConsensusAggregate,
   buildBlsConsensusAggregate,
+  buildV3ConsensusProof,
 };

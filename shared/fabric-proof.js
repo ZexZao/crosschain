@@ -141,6 +141,19 @@ function verifyConsensusProof(proof, xmsg) {
     }
     return cp;
   }
+
+  // V3 path: ECDSA threshold signatures verified on-chain by VerifierContractV3.
+  // TEE only validates structure — skips ECDSA re-verification.
+  if (cp.signatureScheme === 'ecdsa-threshold-v3') {
+    const trustedSet = getTrustedValidatorSet(proof.channelName);
+    if (cp.validatorSetId !== trustedSet.validatorSetId) {
+      throw new Error('fabric consensus validatorSetId mismatch');
+    }
+    if (Number(cp.threshold) !== Number(trustedSet.threshold)) {
+      throw new Error('fabric consensus threshold mismatch');
+    }
+    return cp;
+  }
   const trustedSet = getTrustedValidatorSet(proof.channelName);
   if (cp.validatorSetId !== trustedSet.validatorSetId) {
     throw new Error('fabric consensus validatorSetId mismatch');

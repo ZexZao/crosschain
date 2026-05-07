@@ -57,15 +57,16 @@ async function ensureConnected() {
 async function relayAck(ackXmsg) {
   await ensureConnected();
 
-  // Use /attest (BLS + eventProof + finalityInfo full verification, same as forward path)
+  // Use /attest — works for both V2 (BLS) and V3 (ECDSA threshold)
+  const hasBlsProof = ackXmsg.blsProof && ackXmsg.blsProof.signatureScheme === 'bls-aggregate';
   const teeResp = await axios.post(`${TEE_URL}/attest`, {
     xmsg: ackXmsg,
-    blsProof: ackXmsg.blsProof,
+    blsProof: hasBlsProof ? ackXmsg.blsProof : null,
   }, { timeout: 15000 });
   const attestation = teeResp.data;
   const submitXmsg = { ...ackXmsg, teePubKey: attestation.teePubKey };
 
-  // Fabric submit with full attestation (reportHash + teeSig + teePubKey + validatorSetId)
+  // Fabric submit
   const fabricResp = await contract.submitTransaction(
     'ConfirmAckXMsg',
     JSON.stringify(submitXmsg),
@@ -74,8 +75,7 @@ async function relayAck(ackXmsg) {
       reportHash: attestation.reportHash,
       teeSig: attestation.teeSig,
       validatorSetId: attestation.validatorSetId,
-      blsValid: attestation.teeReport?.blsValid,
-      signatureScheme: 'bls-aggregate',
+      signatureScheme: attestation.teeReport?.signatureScheme || 'bls-aggregate',
     })
   );
 

@@ -1,5 +1,5 @@
 const express = require('express');
-const { buildConsensusAggregate, buildBlsConsensusAggregate } = require('./index');
+const { buildConsensusAggregate, buildBlsConsensusAggregate, buildV3ConsensusProof } = require('./index');
 const { getTrustedValidatorSet } = require('./validator-set');
 
 const app = express();
@@ -15,11 +15,8 @@ app.get('/validator-set/:scopeName', (req, res) => {
     res.json({
       validatorSetId: validatorSet.validatorSetId,
       threshold: validatorSet.threshold,
-      validators: validatorSet.validators.map((validator) => ({
-        id: validator.id,
-        address: validator.address,
-        url: validator.url,
-        blsPubkey: validator.blsPubkey,
+      validators: validatorSet.validators.map((v) => ({
+        id: v.id, address: v.address, url: v.url, blsPubkey: v.blsPubkey,
       }))
     });
   } catch (error) {
@@ -29,8 +26,8 @@ app.get('/validator-set/:scopeName', (req, res) => {
 
 app.post('/aggregate', async (req, res) => {
   try {
-    const consensusProof = await buildConsensusAggregate(req.body);
-    res.json(consensusProof);
+    const proof = await buildConsensusAggregate(req.body);
+    res.json(proof);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -38,8 +35,18 @@ app.post('/aggregate', async (req, res) => {
 
 app.post('/bls-aggregate', async (req, res) => {
   try {
-    const blsProof = await buildBlsConsensusAggregate(req.body);
-    res.json(blsProof);
+    const proof = await buildBlsConsensusAggregate(req.body);
+    res.json(proof);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// V3: ECDSA threshold signatures array (for on-chain dual verification)
+app.post('/v3-aggregate', async (req, res) => {
+  try {
+    const proof = await buildV3ConsensusProof(req.body);
+    res.json(proof);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -47,5 +54,5 @@ app.post('/bls-aggregate', async (req, res) => {
 
 const port = Number(process.env.PORT || 9200);
 app.listen(port, () => {
-  console.log(`consensus-aggregator listening on ${port} (BLS + ECDSA ready)`);
+  console.log(`consensus-aggregator listening on ${port} (V3 ECDSA + BLS + legacy ECDSA)`);
 });

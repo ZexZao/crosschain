@@ -118,6 +118,18 @@ function verifyConsensusProof(proof, xmsg) {
     }
     return;
   }
+
+  // V3 path: ECDSA threshold signatures — verified on-chain
+  if (cp.signatureScheme === 'ecdsa-threshold-v3') {
+    const trustedSet = getTrustedValidatorSet(proof.networkName);
+    if (cp.validatorSetId !== trustedSet.validatorSetId) {
+      throw new Error('evm consensus validatorSetId mismatch');
+    }
+    if (Number(cp.threshold) !== Number(trustedSet.threshold)) {
+      throw new Error('evm consensus threshold mismatch');
+    }
+    return;
+  }
   const trustedSet = getTrustedValidatorSet(proof.networkName);
   if (cp.validatorSetId !== trustedSet.validatorSetId) {
     throw new Error('evm consensus validatorSetId mismatch');

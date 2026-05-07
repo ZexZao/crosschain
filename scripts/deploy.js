@@ -25,12 +25,18 @@ async function main() {
   const verifierV2 = await VerifierV2.deploy();
   await verifierV2.waitForDeployment();
 
+  // Deploy V3 (dual independent verification: ECDSA threshold + TEE)
+  const VerifierV3 = await ethers.getContractFactory('VerifierContractV3');
+  const verifierV3 = await VerifierV3.deploy();
+  await verifierV3.waitForDeployment();
+
   const deployment = {
     deployer: deployer.address,
     evmSourceContract: await source.getAddress(),
     targetContract: await target.getAddress(),
     verifierContract: await verifier.getAddress(),
     verifierContractV2: await verifierV2.getAddress(),
+    verifierContractV3: await verifierV3.getAddress(),
     chainId: Number((await ethers.provider.getNetwork()).chainId),
   };
 

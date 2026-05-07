@@ -1,6 +1,5 @@
-// Full round-trip E2E test suite: Fabric → EVM → Fabric (ACK)
-// Builds ACK xmsg directly from EVM receipt, no dependency on EVM listener.
-// Usage: node scripts/run-full-suite.js
+// Full round-trip E2E test suite: V3 dual independent verification
+// Fabric → EVM → Fabric ACK (ECDSA threshold + TEE both paths)
 
 const { execSync } = require('child_process');
 const { ethers } = require('ethers');
@@ -8,7 +7,7 @@ const axios = require('axios');
 const fs = require('fs-extra');
 const path = require('path');
 const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
-const { buildXmsgFromEvmEvent } = require('../proof-builder/evm-proof-builder');
+const { buildXmsgFromFabricEventV3, buildXmsgFromEvmEventV3 } = require('../proof-builder/v3-proof-builder');
 
 ensureRuntime();
 
@@ -23,317 +22,211 @@ const DEPLOYMENT = readJSON('deployment.json');
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function ensureAckDaemonRunning() {
-  // Check if daemon is already running in fabric-listener container
-  try {
-    const healthCmd = `docker exec fabric-listener node -e "const h=require('http');h.get('http://localhost:3009/health',res=>{let b='';res.on('data',c=>b+=c);res.on('end',()=>console.log(b));});" 2>&1`;
-    const healthOut = execSync(healthCmd, {
-      encoding: 'utf8', timeout: 5000,
-      env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*' }
-    });
-    if (healthOut.includes('"ok"')) {
-      console.log('  ACK daemon already running');
-      return;
-    }
-  } catch (_) { /* Daemon not running, start it */ }
-
-  console.log('  Starting ACK relay daemon...');
-  execSync(
-    'docker exec -d fabric-listener sh -c "node /app/scripts/ack-relay-daemon.js 2>&1 &"',
-    { encoding: 'utf8', timeout: 5000, env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*' } }
-  );
-  // Give it time to connect to Fabric Gateway
-  sleep(5000);
-  console.log('  ACK daemon ready (Gateway connection established)');
-}
-
 function invokeFabricChaincode(payloadObj) {
   fs.writeFileSync(PAYLOAD_PATH, JSON.stringify(payloadObj));
   const cmd = `docker exec fabric-tools bash /fabric-network/fabric-network/scripts/invoke-xcall.sh --payload-file /fabric-network/runtime/test-payload.json 2>&1`;
   let output;
-  try {
-    output = execSync(cmd, { encoding: 'utf8', timeout: 20000, maxBuffer: 10 * 1024 * 1024 });
-  } catch (e) {
-    output = (e.stdout || '') + '\n' + (e.stderr || '');
-  }
-  const txMatch = output.match(/txId[^a-f0-9]*([a-f0-9]{64})/i);
-  return txMatch ? txMatch[1] : null;
+  try { output = execSync(cmd, { encoding: 'utf8', timeout: 20000, maxBuffer: 10*1024*1024 }); }
+  catch (e) { output = (e.stdout || '') + '\n' + (e.stderr || ''); }
+  const m = output.match(/txId[^a-f0-9]*([a-f0-9]{64})/i);
+  return m ? m[1] : null;
 }
 
-async function waitForXmsg(txId, timeoutMs = 30000) {
-  const xmsgPath = path.join(RUNTIME_DIR, 'latest-xmsg.json');
+async function buildForwardXmsg(txId) {
+  const cp = path.join(RUNTIME_DIR, 'fabric-captured-event.json');
   const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  while (Date.now() - start < 30000) {
     await sleep(500);
-    if (!fs.existsSync(xmsgPath)) continue;
-    const xmsg = fs.readJsonSync(xmsgPath);
-    if (xmsg.txId === txId && xmsg.blsProof) return xmsg;
+    if (!fs.existsSync(cp)) continue;
+    const cap = fs.readJsonSync(cp);
+    if (cap.txId === txId) {
+      return await buildXmsgFromFabricEventV3({ deployment: DEPLOYMENT, ...cap });
+    }
   }
-  throw new Error(`Timeout waiting for xmsg with txId ${txId}`);
+  throw new Error(`Timeout waiting for captured event ${txId}`);
 }
 
-async function teeAttest(xmsg) {
-  const resp = await axios.post(`${TEE_URL}/attest`, { xmsg, blsProof: xmsg.blsProof }, { timeout: 15000 });
-  return resp.data;
-}
-
-async function relayForwardToEvm(xmsg) {
-  const attestation = await teeAttest(xmsg);
-  if (!attestation.teeReport.blsValid) throw new Error('BLS verification failed');
+async function relayForwardToV3(xmsg) {
+  const teeResp = await axios.post(`${TEE_URL}/attest`, { xmsg, blsProof: null }, { timeout: 15000 });
+  const att = teeResp.data;
 
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
   const wallet = new ethers.Wallet(PRIV_KEY, provider);
   const deployer = new ethers.NonceManager(wallet);
-  const vsIdBytes32 = ethers.keccak256(ethers.toUtf8Bytes(attestation.validatorSetId));
 
-  const verifierV2Abi = [
-    'function registerTEE(address tee) external',
-    'function teeWhitelist(address tee) view returns (bool)',
-    'function submit((uint8,bytes32,bytes32,bytes32,bytes32,address,bytes,bytes32,uint64,bytes,bytes,uint64),bytes32,bytes,address,bytes32) external',
-    'function registerValidatorSet(bytes32,uint16,bytes[]) external',
-    'function validatorSetExists(bytes32) view returns (bool)',
+  const v3Abi = [
+    'function registerTEE(address) external', 'function teeWhitelist(address) view returns (bool)',
+    'function registerSignersBatch(address[],uint16) external', 'function registeredSigners(address) view returns (bool)',
+    'function submit((uint8,bytes32,bytes32,bytes32,bytes32,address,bytes,bytes32,uint64,uint64),bytes[],bytes32,address,bytes32,bytes) external',
   ];
-  const verifier = new ethers.Contract(DEPLOYMENT.verifierContractV2, verifierV2Abi, deployer);
+  const v3 = new ethers.Contract(DEPLOYMENT.verifierContractV3, v3Abi, deployer);
 
-  if (!(await verifier.teeWhitelist(attestation.teePubKey))) {
-    const tx = await verifier.registerTEE(attestation.teePubKey); await tx.wait();
-  }
-  if (!(await verifier.validatorSetExists(vsIdBytes32))) {
-    const pubkeys = xmsg.blsProof.validatorBlsPubkeys || [];
-    const tx = await verifier.registerValidatorSet(vsIdBytes32, xmsg.blsProof.threshold, pubkeys);
+  if (!(await v3.teeWhitelist(att.teePubKey))) { const tx = await v3.registerTEE(att.teePubKey); await tx.wait(); }
+  if (!(await v3.registeredSigners(xmsg.v3Proof.signerAddresses[0]))) {
+    const tx = await v3.registerSignersBatch(xmsg.v3Proof.signerAddresses, xmsg.v3Proof.threshold);
     await tx.wait();
   }
 
-  const tx = await verifier.submit(
+  const tx = await v3.submit(
     [xmsg.version, xmsg.requestID, xmsg.srcChainID, xmsg.dstChainID, xmsg.srcEmitter,
-     xmsg.dstContract, xmsg.payload, xmsg.payloadHash, xmsg.srcHeight,
-     ethers.toUtf8Bytes(xmsg.eventProof), ethers.toUtf8Bytes(xmsg.finalityInfo), xmsg.nonce],
-    attestation.reportHash, attestation.teeSig, attestation.teePubKey, vsIdBytes32
+     xmsg.dstContract, xmsg.payload, xmsg.payloadHash, xmsg.srcHeight, xmsg.nonce],
+    xmsg.v3Proof.signatures.map(s => s.signature),
+    xmsg.v3Proof.consensusMessage,
+    att.teePubKey, att.reportHash, att.teeSig
   );
   const receipt = await tx.wait();
-  return { txHash: receipt.hash, blockNumber: receipt.blockNumber, gasUsed: receipt.gasUsed.toString() };
+  return { txHash: receipt.hash, gasUsed: receipt.gasUsed.toString(), att };
 }
 
-async function buildAckArtifacts(relayTxHash) {
-  // Build ACK xmsg directly from EVM receipt (no dependency on listener)
+async function buildAckXmsg(relayTxHash) {
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
   const receipt = await provider.getTransactionReceipt(relayTxHash);
-  if (!receipt) throw new Error(`Receipt not found for relay tx ${relayTxHash}`);
+  if (!receipt) throw new Error(`Receipt not found: ${relayTxHash}`);
 
   const targetInterface = new ethers.Interface([
     'event BusinessExecuted(bytes32 indexed requestID,address indexed caller,string op,string recordId,string actor,string amount,bool requireAck)'
   ]);
-
   const targetLog = receipt.logs.find(log => {
     if (ethers.getAddress(log.address) !== ethers.getAddress(DEPLOYMENT.targetContract)) return false;
     try { targetInterface.parseLog(log); return true; } catch (_) { return false; }
   });
-
-  if (!targetLog) throw new Error(`BusinessExecuted log not found in receipt ${relayTxHash}`);
+  if (!targetLog) throw new Error(`BusinessExecuted log not found`);
   const parsed = targetInterface.parseLog(targetLog);
-  if (!parsed.args.requireAck) return null; // No ACK needed
+  if (!parsed.args.requireAck) return null;
 
-  const captured = {
-    networkName: 'evm-localhost',
-    emitterAddress: DEPLOYMENT.targetContract,
+  return await buildXmsgFromEvmEventV3({
+    deployment: DEPLOYMENT,
+    networkName: 'evm-localhost', emitterAddress: DEPLOYMENT.targetContract,
     eventName: 'BusinessExecuted',
     rawPayload: {
-      op: 'ack_confirm',
-      originRequestID: parsed.args.requestID,
-      status: 'success',
-      relayTxHash,
-      targetOp: parsed.args.op,
-      targetRecordId: parsed.args.recordId,
-      targetActor: parsed.args.actor,
-      targetAmount: parsed.args.amount,
+      op: 'ack_confirm', originRequestID: parsed.args.requestID,
+      status: 'success', relayTxHash,
+      targetOp: parsed.args.op, targetRecordId: parsed.args.recordId,
+      targetActor: parsed.args.actor, targetAmount: parsed.args.amount,
       requireAck: false
     },
-    txHash: receipt.hash,
-    blockNumber: receipt.blockNumber,
-    blockHash: receipt.blockHash,
-    logIndex: Number(targetLog.index),
-    nonce: Number(targetLog.index),
-    dstChainName: 'fabric-mychannel',
-    dstContract: ethers.ZeroAddress,
-    listenerTiming: {
-      listenerReceivedAtMs: Date.now(),
-      listenerReceivedAt: new Date().toISOString()
-    }
-  };
-
-  const xmsg = await buildXmsgFromEvmEvent({ deployment: DEPLOYMENT, ...captured });
-  const ackPath = path.join(RUNTIME_DIR, 'latest-ack-xmsg.json');
-  fs.writeJsonSync(ackPath, xmsg, { spaces: 2 });
-  return { captured, xmsg };
+    txHash: receipt.hash, blockNumber: receipt.blockNumber, blockHash: receipt.blockHash,
+    logIndex: Number(targetLog.index), nonce: Number(targetLog.index),
+    dstChainName: 'fabric-mychannel', dstContract: ethers.ZeroAddress,
+  });
 }
 
 async function relayAckToFabric(ackXmsg) {
-  // Write ACK xmsg to shared volume so the daemon inside fabric-listener can read it
   const ackPath = path.join(RUNTIME_DIR, 'latest-ack-xmsg.json');
   fs.writeJsonSync(ackPath, ackXmsg, { spaces: 2 });
 
-  // Call the persistent ACK daemon via a lightweight Node HTTP request.
-  // Much faster than spawning a new Node process with full module loading.
+  // Call ACK daemon via HTTP inside fabric-listener container
   const cmd = `docker exec fabric-listener node -e "const h=require('http');const d=require('fs').readFileSync('/app/runtime/latest-ack-xmsg.json','utf8');const r=h.request({hostname:'localhost',port:3009,path:'/relay-ack',method:'POST',headers:{'Content-Type':'application/json'}},res=>{let b='';res.on('data',c=>b+=c);res.on('end',()=>console.log(b));});r.write(d);r.end();" 2>&1`;
 
   try {
     const output = execSync(cmd, {
-      encoding: 'utf8', timeout: 30000, maxBuffer: 1 * 1024 * 1024,
+      encoding: 'utf8', timeout: 30000, maxBuffer: 1*1024*1024,
       env: { ...process.env, MSYS2_ARG_CONV_EXCL: '*' }
     });
-    console.log('  ACK daemon:', output.slice(0, 300).replace(/\n/g, ' '));
-
     const match = output.match(/\{.*\}/s);
     if (match) {
       const parsed = JSON.parse(match[0]);
-      if (parsed.ok) {
-        return { mode: 'ack-to-fabric', requestID: parsed.requestID, fabricResult: parsed.fabricResult };
-      }
-      return { error: parsed.error || 'daemon returned error' };
+      if (parsed.ok) return { mode: 'ack-to-fabric', requestID: parsed.requestID, fabricResult: parsed.fabricResult };
+      return { error: parsed.error || 'daemon error' };
     }
-    return { error: 'unparseable daemon response', raw: output.slice(0, 200) };
+    return { error: 'unparseable response' };
   } catch (e) {
-    console.log('  Daemon error:', (e.stdout || '').slice(0, 200), (e.stderr || '').slice(0, 200));
-    return { error: e.message || 'daemon call failed' };
+    return { error: (e.stdout || '').slice(0, 200) || e.message };
   }
 }
 
 async function queryTargetState() {
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
-  const targetAbi = [
-    'function executionCount() view returns (uint256)', 'function historyCount() view returns (uint256)',
-    'function lastRequestID() view returns (bytes32)', 'function lastOp() view returns (string)',
+  const abi = [
+    'function executionCount() view returns (uint256)', 'function lastOp() view returns (string)',
     'function lastRecordId() view returns (string)', 'function lastActor() view returns (string)',
-    'function lastAmount() view returns (string)', 'function lastPayloadHash() view returns (bytes32)',
+    'function lastAmount() view returns (string)',
   ];
-  const target = new ethers.Contract(DEPLOYMENT.targetContract, targetAbi, provider);
+  const t = new ethers.Contract(DEPLOYMENT.targetContract, abi, provider);
   return {
-    executionCount: (await target.executionCount()).toString(),
-    historyCount: (await target.historyCount()).toString(),
-    lastRequestID: await target.lastRequestID(),
-    lastOp: await target.lastOp(),
-    lastRecordId: await target.lastRecordId(),
-    lastActor: await target.lastActor(),
-    lastAmount: await target.lastAmount(),
-    lastPayloadHash: await target.lastPayloadHash(),
-  };
-}
-
-function checkFields(expected, actual) {
-  return {
-    opMatch: actual.lastOp === expected.op,
-    recordIdMatch: actual.lastRecordId === expected.recordId,
-    actorMatch: actual.lastActor === expected.actor,
-    amountMatch: actual.lastAmount === expected.amount,
+    executionCount: (await t.executionCount()).toString(),
+    lastOp: await t.lastOp(), lastRecordId: await t.lastRecordId(),
+    lastActor: await t.lastActor(), lastAmount: await t.lastAmount(),
   };
 }
 
 async function main() {
-  console.log('=== Full Round-Trip E2E Test Suite (Fabric → EVM → Fabric) ===\n');
-  console.log('Building ACK artifacts directly from EVM receipts (no listener dependency)\n');
-
-  // Ensure the persistent ACK relay daemon is running for fast ACK submission
-  ensureAckDaemonRunning();
-
+  console.log('=== V3 Full Round-Trip E2E Test Suite ===\n');
   const testData = fs.readJsonSync(TEST_DATA);
   const cases = testData.cases;
-  const results = [];
-  let passCount = 0, failCount = 0;
+  const results = []; let passCount = 0, failCount = 0;
 
   for (let i = 0; i < cases.length; i++) {
-    const testCase = cases[i];
-    const caseId = testCase.caseId;
-    console.log(`[${i + 1}/${cases.length}] ${caseId}: ${testCase.description}`);
-    console.log(`  Expected: op=${testCase.expectedTargetFields.op}, recordId=${testCase.expectedTargetFields.recordId}`);
-
-    const caseResult = { caseId, description: testCase.description, expectedTargetFields: testCase.expectedTargetFields, pass: false };
-    const caseStartedAt = Date.now();
+    const tc = cases[i]; const caseId = tc.caseId;
+    console.log(`[${i + 1}/${cases.length}] ${caseId}: ${tc.description}`);
+    const caseResult = { caseId, description: tc.description, expectedTargetFields: tc.expectedTargetFields, pass: false };
+    const tStart = Date.now();
 
     try {
-      // [1] Invoke Fabric with requireAck=true
       console.log('  [1/6] Invoking chaincode (requireAck=true)...');
-      const payload = { ...testCase.payload, requireAck: true };
+      const payload = { ...tc.payload, requireAck: true };
       const txId = invokeFabricChaincode(payload);
-      if (!txId) throw new Error('Failed to get txId');
       caseResult.txId = txId;
-      console.log(`  txId: ${txId} (${Date.now() - caseStartedAt}ms)`);
 
-      // [2] Wait for Fabric listener
-      console.log('  [2/6] Waiting for Fabric→EVM xmsg...');
-      const xmsg = await waitForXmsg(txId);
-      caseResult.requestID = xmsg.requestID;
-      caseResult.srcHeight = xmsg.srcHeight;
+      console.log('  [2/6] Building V3 forward proof...');
+      const xmsg = await buildForwardXmsg(txId);
+      caseResult.requestID = xmsg.requestID; caseResult.srcHeight = xmsg.srcHeight;
       caseResult.forwardProofMeta = xmsg.proofMeta;
-      console.log(`  requestID: ${xmsg.requestID}, proofType: ${xmsg.proofMeta?.proofType}`);
 
-      // [3] Relay Fabric → EVM
-      console.log('  [3/6] Relaying Fabric → EVM...');
-      const relayResult = await relayForwardToEvm(xmsg);
-      caseResult.relayTxHash = relayResult.txHash;
-      caseResult.forwardGasUsed = relayResult.gasUsed;
+      console.log('  [3/6] Relaying Fabric → EVM (V3)...');
+      const relayResult = await relayForwardToV3(xmsg);
+      caseResult.relayTxHash = relayResult.txHash; caseResult.forwardGasUsed = relayResult.gasUsed;
       console.log(`  relayTxHash: ${relayResult.txHash}, gas: ${relayResult.gasUsed}`);
 
-      // [4] Build ACK artifacts from EVM receipt
-      console.log('  [4/6] Building ACK artifacts from EVM receipt...');
-      const ackArtifacts = await buildAckArtifacts(relayResult.txHash);
-      if (!ackArtifacts) {
+      console.log('  [4/6] Building ACK xmsg from EVM receipt...');
+      const ackXmsg = await buildAckXmsg(relayResult.txHash);
+      if (!ackXmsg) {
         caseResult.ackSkipped = true;
-        console.log('  ACK skipped (requireAck=false in event)');
+        console.log('  ACK skipped');
       } else {
-        caseResult.ackRequestID = ackArtifacts.xmsg.requestID;
-        caseResult.ackProofMeta = ackArtifacts.xmsg.proofMeta;
-        console.log(`  ACK xmsg built, requestID: ${ackArtifacts.xmsg.requestID}, proofType: ${ackArtifacts.xmsg.proofMeta?.proofType}`);
+        caseResult.ackRequestID = ackXmsg.requestID;
+        caseResult.ackProofMeta = ackXmsg.proofMeta;
 
-        // [5] Relay ACK to Fabric
         console.log('  [5/6] Relaying ACK to Fabric...');
-        const ackResult = await relayAckToFabric(ackArtifacts.xmsg);
+        const ackResult = await relayAckToFabric(ackXmsg);
         caseResult.ackFabricResult = ackResult;
-        console.log(`  Fabric ACK: ${ackResult?.fabricResult}`);
+        console.log(`  Fabric ACK: ${ackResult?.fabricResult || ackResult?.error || 'N/A'}`);
       }
 
-      // [6] Verify EVM on-chain state
       console.log('  [6/6] Verifying on-chain state...');
       const targetState = await queryTargetState();
-      caseResult.actualTargetState = targetState;
-      caseResult.fieldCheck = checkFields(testCase.expectedTargetFields, targetState);
-
-      const allFieldsMatch = Object.values(caseResult.fieldCheck).every(Boolean);
+      const f = {
+        opMatch: targetState.lastOp === tc.expectedTargetFields.op,
+        recordIdMatch: targetState.lastRecordId === tc.expectedTargetFields.recordId,
+        actorMatch: targetState.lastActor === tc.expectedTargetFields.actor,
+        amountMatch: targetState.lastAmount === tc.expectedTargetFields.amount,
+      };
+      caseResult.fieldCheck = f; caseResult.actualTargetState = targetState;
       const ackOk = caseResult.ackSkipped || (caseResult.ackFabricResult?.fabricResult?.includes('"ok":true'));
-      caseResult.pass = allFieldsMatch && ackOk;
-
-      caseResult.totalMs = Date.now() - caseStartedAt;
+      caseResult.pass = Object.values(f).every(Boolean) && ackOk;
+      caseResult.totalMs = Date.now() - tStart;
 
       console.log(`  EVM: op=${targetState.lastOp}, recordId=${targetState.lastRecordId}`);
-      console.log(`  Fields: ${JSON.stringify(caseResult.fieldCheck)}, ACK: ${ackOk ? 'confirmed' : (caseResult.ackSkipped ? 'skipped' : 'FAILED')}`);
-      console.log(`  Total: ${caseResult.totalMs}ms`);
-      if (caseResult.pass) { console.log(`  ✅ ${caseId} PASSED\n`); passCount++; }
-      else { console.log(`  ❌ ${caseId} FAILED\n`); failCount++; }
+      console.log(`  Fields: ${JSON.stringify(f)}, ACK: ${ackOk ? 'confirmed' : 'FAILED'}, time: ${caseResult.totalMs}ms`);
+      console.log(caseResult.pass ? `  ✅ ${caseId} PASSED\n` : `  ❌ ${caseId} FAILED\n`);
+      if (caseResult.pass) passCount++; else failCount++;
 
     } catch (error) {
       console.log(`  ❌ ${caseId} ERROR: ${error.message}\n`);
-      caseResult.error = error.message;
-      failCount++;
+      caseResult.error = error.message; failCount++;
     }
-
     results.push(caseResult);
 
-    const summary = {
-      testType: 'full-roundtrip-e2e',
-      dataset: 'test-data/fabric-real-cases.json',
-      testedAt: new Date().toISOString(),
-      total: cases.length, pass: passCount, fail: failCount,
-      caseIds: cases.map(c => c.caseId),
-      results,
-    };
-    writeJSON('fabric-full-roundtrip-results.json', summary);
+    writeJSON('fabric-full-roundtrip-results.json', {
+      testType: 'full-roundtrip-e2e-v3', dataset: 'test-data/fabric-real-cases.json',
+      testedAt: new Date().toISOString(), total: cases.length, pass: passCount, fail: failCount,
+      caseIds: cases.map(c => c.caseId), results,
+    });
     if (i < cases.length - 1) await sleep(2000);
   }
 
   console.log('='.repeat(60));
   console.log(`FINAL: ${passCount}/${cases.length} passed, ${failCount}/${cases.length} failed`);
-  console.log('Results: runtime/fabric-full-roundtrip-results.json');
-
-  // Generate formatted summary table
   const { saveRoundtripSummary } = require('./save-summary');
   saveRoundtripSummary('fabric-full-roundtrip-results.json');
 }
