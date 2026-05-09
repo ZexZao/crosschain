@@ -116,6 +116,9 @@ function createBaseXmsg({
 
   return {
     version: 1,
+    chainType: (srcChainName || '').startsWith('fabric-') ? 0 : ((srcChainName || '').startsWith('evm-') ? 1 : 255),
+    finalityModel: (srcChainName || '').startsWith('fabric-') ? 0 : 1,
+    requiredConfirmations: (srcChainName || '').startsWith('fabric-') ? 1 : 6,
     requestID,
     srcChainID: bytes32FromText(srcChainName),
     dstChainID: bytes32FromText(dstChainName || `evm-${deployment.chainId}`),

@@ -40,7 +40,7 @@ async function main() {
       'function registerSignersBatch(address[],uint16) external',
       'function registeredSigners(address) view returns (bool)',
       'function signerThreshold() view returns (uint16)',
-      'function submit((uint8,bytes32,bytes32,bytes32,bytes32,address,bytes,bytes32,uint64,uint64),bytes[],bytes32,address,bytes32,bytes) external',
+      'function submit((uint8,uint8,uint8,uint16,bytes32,bytes32,bytes32,bytes32,address,bytes,bytes32,uint64,uint64),bytes[],bytes32,address,bytes32,bytes) external',
       'function consumed(bytes32) view returns (bool)',
       'function ctr() view returns (uint64)',
     ];
@@ -64,7 +64,7 @@ async function main() {
     // Submit with dual proofs: ECDSA signatures (Path A) + TEE attestation (Path B)
     const tx = await v3.submit(
       [
-        xmsg.version, xmsg.requestID, xmsg.srcChainID, xmsg.dstChainID,
+        xmsg.version, xmsg.chainType ?? 0, xmsg.finalityModel ?? 0, xmsg.requiredConfirmations ?? 1, xmsg.requestID, xmsg.srcChainID, xmsg.dstChainID,
         xmsg.srcEmitter, xmsg.dstContract, xmsg.payload, xmsg.payloadHash,
         xmsg.srcHeight, xmsg.nonce,
       ],

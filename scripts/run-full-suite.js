@@ -40,14 +40,19 @@ async function buildForwardXmsg(txId) {
     if (!fs.existsSync(cp)) continue;
     const cap = fs.readJsonSync(cp);
     if (cap.txId === txId) {
-      return await buildXmsgFromFabricEventV3({ deployment: DEPLOYMENT, ...cap });
+      const xmsg = await buildXmsgFromFabricEventV3({ deployment: DEPLOYMENT, ...cap });
+      xmsg._blockData = { signedBlockBytes: cap.signedBlockBytes || '' };
+      return xmsg;
     }
   }
   throw new Error(`Timeout waiting for captured event ${txId}`);
 }
 
 async function relayForwardToV3(xmsg) {
-  const teeResp = await axios.post(`${TEE_URL}/attest`, { xmsg, blsProof: null }, { timeout: 15000 });
+  const teeResp = await axios.post(`${TEE_URL}/attest`, {
+    xmsg, blsProof: null,
+    blockData: xmsg._blockData || null,
+  }, { timeout: 15000 });
   const att = teeResp.data;
 
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
@@ -57,7 +62,7 @@ async function relayForwardToV3(xmsg) {
   const v3Abi = [
     'function registerTEE(address) external', 'function teeWhitelist(address) view returns (bool)',
     'function registerSignersBatch(address[],uint16) external', 'function registeredSigners(address) view returns (bool)',
-    'function submit((uint8,bytes32,bytes32,bytes32,bytes32,address,bytes,bytes32,uint64,uint64),bytes[],bytes32,address,bytes32,bytes) external',
+    'function submit((uint8,uint8,uint8,uint16,bytes32,bytes32,bytes32,bytes32,address,bytes,bytes32,uint64,uint64),bytes[],bytes32,address,bytes32,bytes) external',
   ];
   const v3 = new ethers.Contract(DEPLOYMENT.verifierContractV3, v3Abi, deployer);
 
@@ -68,7 +73,7 @@ async function relayForwardToV3(xmsg) {
   }
 
   const tx = await v3.submit(
-    [xmsg.version, xmsg.requestID, xmsg.srcChainID, xmsg.dstChainID, xmsg.srcEmitter,
+    [xmsg.version, xmsg.chainType ?? 0, xmsg.finalityModel ?? 0, xmsg.requiredConfirmations ?? 1, xmsg.requestID, xmsg.srcChainID, xmsg.dstChainID, xmsg.srcEmitter,
      xmsg.dstContract, xmsg.payload, xmsg.payloadHash, xmsg.srcHeight, xmsg.nonce],
     xmsg.v3Proof.signatures.map(s => s.signature),
     xmsg.v3Proof.consensusMessage,

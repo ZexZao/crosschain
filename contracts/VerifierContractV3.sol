@@ -8,6 +8,9 @@ interface ITargetContract {
 contract VerifierContractV3 {
     struct XMsg {
         uint8 version;
+        uint8 chainType;               // 0 = Fabric, 1 = EVM, 255 = unknown
+        uint8 finalityModel;           // 0 = BFT-即时, 1 = 概率, 2 = 经济, 3 = 检查点
+        uint16 requiredConfirmations;  // BFT=1, PoW=6-12, PoS=2(two epochs)
         bytes32 requestID;
         bytes32 srcChainID;
         bytes32 dstChainID;

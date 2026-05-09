@@ -50,23 +50,50 @@
 - `validator-node-3 → peer2.org1.example.com`
 - `validator-node-4 → peer3.org1.example.com`
 
-## XMsg 结构（V3，无 eventProof）
+## XMsg 结构（V3）
 
-XMsg 是系统内所有组件传递的核心数据结构。V3 版本删除了 eventProof 和 finalityInfo，因为 TEE 独立查询源链替代了它们的密码学证明作用。
+XMsg 是系统内所有组件传递的核心跨链消息。V3 已删除 eventProof 和 finalityInfo（TEE 独立查询源链替代了密码学证明），并显式支持异构链差异。
+
+### 链上合约字段（13 个，ABI 编码提交到 VerifierContractV3）
+
+| 字段 | Solidity 类型 | 说明 |
+|------|-------------|------|
+| `version` | `uint8` | 协议版本号，固定为 `1` |
+| `chainType` | `uint8` | 源链类型：`0` = Fabric，`1` = EVM，`255` = 未知 |
+| `finalityModel` | `uint8` | 最终性模型：`0` = BFT 即时（Fabric），`1` = 概率（PoW/PoS），`2` = 经济（PoS with finality），`3` = 检查点锚定 |
+| `requiredConfirmations` | `uint16` | 所需确认数：Fabric = `1`，EVM PoW = `6~12`，EVM PoS = `2` epoch |
+| `requestID` | `bytes32` | 全局唯一请求标识 `keccak256(namespace, nonce, srcHeight)` |
+| `srcChainID` | `bytes32` | 源链标识 `keccak256("fabric-mychannel")` |
+| `dstChainID` | `bytes32` | 目标链标识 `keccak256("evm-31337")` |
+| `srcEmitter` | `bytes32` | 源链事件发射者 `keccak256("xcall")` |
+| `dstContract` | `address` | 目标 `TargetContract` 地址 |
+| `payload` | `bytes` | ABI 编码业务负载 `(string op, string recordId, string actor, string amount, string metadata, bool requireAck)` |
+| `payloadHash` | `bytes32` | `keccak256(payload)`，链上校验负载完整性 |
+| `srcHeight` | `uint64` | 源链区块高度（Fabric = blockNumber，EVM = block.number） |
+| `nonce` | `uint64` | 源链交易序号 |
+
+**ABI Tuple**: `(uint8, uint8, uint8, uint16, bytes32, bytes32, bytes32, bytes32, address, bytes, bytes32, uint64, uint64)`
+
+### 链下传输字段（不进入合约，供 TEE/Relayer 使用）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `version` | `uint8` | 协议版本号，固定为 `1` |
-| `requestID` | `bytes32` | 全局唯一请求标识 `keccak256(namespace, nonce, srcHeight)` |
-| `srcChainID` | `bytes32` | 源链标识 `keccak256` 派生 |
-| `dstChainID` | `bytes32` | 目标链标识 |
-| `srcEmitter` | `bytes32` | 源链事件发射者 `keccak256` 派生 |
-| `dstContract` | `address` | 目标业务合约地址 |
-| `payload` | `bytes` | ABI 编码业务负载 `(string op, string recordId, string actor, string amount, string metadata, bool requireAck)` |
-| `payloadHash` | `bytes32` | `keccak256(payload)`，链上校验负载完整性 |
-| `srcHeight` | `uint64` | 源链区块高度 |
-| `nonce` | `uint64` | 源链交易序号 |
-| `txId` | `string` | 源链交易 ID（链下使用，TEE 用它做独立查询） |
+| `txId` | `string` | 源链交易原始 ID（TEE 用它做独立源链查询） |
+| `createdAt` | `string` | XMsg 创建时间 ISO 8601 |
+| `payloadDecoded` | `object` | 负载解码后可读对象 `{ op, recordId, actor, amount, metadata, requireAck }` |
+| `teePubKey` | `address` | TEE 以太坊地址（初始 `0x00...`，TEE 签名后填入） |
+| `_blockData` | `object` | 可选的区块数据 `{ signedBlockBytes }`，用于 TEE 本地验证 |
+
+### 证明数据（链下，附在 XMsg 上传输）
+
+| 字段 | 说明 |
+|------|------|
+| `v3Proof.signatures[]` | N 个 ECDSA 签名（每个 65 字节），链上 `ecrecover` 逐条验证 |
+| `v3Proof.signerAddresses[]` | 签名者地址（已排序，用于链上注册） |
+| `v3Proof.consensusMessage` | 签名者签名的共识消息 |
+| `v3Proof.threshold` | 阈值，当前固定 `3`（3/4） |
+| `v3Proof.validatorSetId` | 验证者集合标识 |
+| `proofMeta` | 元数据：`proofType: 'hybrid-v3'`，`signatureScheme: 'ecdsa-threshold-v3'` |
 
 附带的证明数据（不进入合约 tuple）：
 
@@ -215,28 +242,39 @@ node scripts/test-hybrid-bridge.js
 | `runtime/fabric-hybrid-e2e-results.json` | 正向测试 JSON |
 | `runtime/fabric-full-roundtrip-results.json` | 闭环测试 JSON |
 
-## 最新测试结果
+## 最新测试结果（V3）
 
 ### 正向测试（Fabric → EVM）8/8 ✅
 
-| 用例 | 操作 | Gas | 端到端时延 | 状态 |
-|------|------|-----|------------|------|
-| FABRIC-001 | asset_lock | 692,504 | 14,442ms | ✅ |
-| FABRIC-002 | mint_confirm | 611,915 | 2,907ms | ✅ |
-| FABRIC-003 | receivable_attest | 522,582 | 2,829ms | ✅ |
-| FABRIC-004 | logistics_sync | 521,797 | 2,810ms | ✅ |
-| FABRIC-005 | medical_consent | 522,086 | 2,864ms | ✅ |
-| FABRIC-006 | oracle_update | 521,715 | 2,824ms | ✅ |
-| FABRIC-007 | approval_commit | 521,362 | 2,909ms | ✅ |
-| FABRIC-008 | subsidy_confirm | 522,068 | 2,876ms | ✅ |
-| **平均** | | **~554k** | **~4,308ms** | **8/8** |
+| 用例 | Gas | 端到端时延 | 字段 | 状态 |
+|------|-----|-----------|------|------|
+| FABRIC-001 | 470,539 | 2,989ms | ✅/✅/✅/✅ | ✅ |
+| FABRIC-002 | 560,984 | 2,768ms | ✅/✅/✅/✅ | ✅ |
+| FABRIC-003 | 471,644 | 2,801ms | ✅/✅/✅/✅ | ✅ |
+| FABRIC-004 | 470,839 | 2,764ms | ✅/✅/✅/✅ | ✅ |
+| FABRIC-005 | 471,145 | 2,766ms | ✅/✅/✅/✅ | ✅ |
+| FABRIC-006 | 470,760 | 2,759ms | ✅/✅/✅/✅ | ✅ |
+| FABRIC-007 | 470,395 | 2,753ms | ✅/✅/✅/✅ | ✅ |
+| FABRIC-008 | 471,149 | 2,865ms | ✅/✅/✅/✅ | ✅ |
+| **平均** | **~482k** | **2,808ms** | | |
 
 ### 闭环测试（Fabric → EVM → Fabric ACK）8/8 ✅
 
 | 用例 | 正向 Gas | ACK | 总耗时 | 状态 |
 |------|----------|-----|--------|------|
-| FABRIC-001~008 | 470,021~560,586 | 8/8 confirmed | 5,164~5,389ms | ✅ |
-| **平均** | **~485k** | **8/8** | **~5,200ms** | **8/8** |
+| FABRIC-001~008 | 470,417~560,958 | 8/8 confirmed | 4,866~4,959ms | ✅ |
+| **平均** | **~482k** | **8/8** | **4,923ms** | **8/8** |
+
+## TEE 验证机制
+
+TEE `/attest` 端点采用**本地区块验证 + QSCC/RPC 降级**的双模式：
+
+| 模式 | Fabric | EVM |
+|------|--------|-----|
+| 本地验证 | protobuf 解码 → 验 block.number → 验 previous_hash 链连续 → 验 txId 在 block.data 中 | 验 blockHash 自洽 → 验 parentHash 链连续 → 验 receipt.transactionHash 匹配 |
+| 降级查询 | Gateway → QSCC.GetBlockByTxID → 同上本地验证 | RPC getTransactionReceipt → 验 receipt 存在 |
+
+轻量化验证方案详见 `docs/tee-lightweight-verification.md`。
 
 ## 常用命令
 
