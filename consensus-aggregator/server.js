@@ -1,5 +1,5 @@
 const express = require('express');
-const { buildConsensusAggregate, buildBlsConsensusAggregate, buildV3ConsensusProof } = require('./index');
+const { buildConsensusAggregate, buildBlsConsensusAggregate, buildV3ConsensusProof, buildMpcConsensusAggregate } = require('./index');
 const { getTrustedValidatorSet } = require('./validator-set');
 
 const app = express();
@@ -46,6 +46,16 @@ app.post('/bls-aggregate', async (req, res) => {
 app.post('/v3-aggregate', async (req, res) => {
   try {
     const proof = await buildV3ConsensusProof(req.body);
+    res.json(proof);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// MPC-TSS: single combined signature
+app.post('/mpc-aggregate', async (req, res) => {
+  try {
+    const proof = await buildMpcConsensusAggregate(req.body);
     res.json(proof);
   } catch (error) {
     res.status(500).json({ error: error.message });

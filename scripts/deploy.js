@@ -30,6 +30,11 @@ async function main() {
   const verifierV3 = await VerifierV3.deploy();
   await verifierV3.waitForDeployment();
 
+  // Deploy V3-MPC (MPC-TSS single signature + TEE dual verification)
+  const VerifierV3MPC = await ethers.getContractFactory('VerifierContractV3MPC');
+  const verifierV3MPC = await VerifierV3MPC.deploy();
+  await verifierV3MPC.waitForDeployment();
+
   const deployment = {
     deployer: deployer.address,
     evmSourceContract: await source.getAddress(),
@@ -37,6 +42,7 @@ async function main() {
     verifierContract: await verifier.getAddress(),
     verifierContractV2: await verifierV2.getAddress(),
     verifierContractV3: await verifierV3.getAddress(),
+    verifierContractV3MPC: await verifierV3MPC.getAddress(),
     chainId: Number((await ethers.provider.getNetwork()).chainId),
   };
 
