@@ -1,6 +1,6 @@
 const { ethers } = require('ethers');
 const { ensureRuntime, writeJSON, readJSON, nowMs } = require('../shared/utils');
-const { buildXmsgFromEvmEvent } = require('../proof-builder/evm-proof-builder');
+// EVM -> Fabric will be reintroduced through the MELV-EF h-xmsg builder in stage 4.
 
 function normalizeArgv(argv) {
   const options = {
@@ -48,6 +48,7 @@ function getAckEventConfig(deployment) {
 }
 
 async function handleLog(provider, deployment, config, mode, log) {
+  throw new Error('EVM listener is disabled until the stage 4 MELV-EF h-xmsg builder is implemented');
   const iface = new ethers.Interface(config.abi);
   const parsed = iface.parseLog(log);
   const block = await provider.getBlock(log.blockNumber);

@@ -15,34 +15,21 @@ async function main() {
   const source = await Source.deploy();
   await source.waitForDeployment();
 
-  // Deploy V1 (legacy, backward compatible)
-  const Verifier = await ethers.getContractFactory('VerifierContract');
-  const verifier = await Verifier.deploy();
-  await verifier.waitForDeployment();
+  // Deploy h-xmsg lightweight gateway (stage 3 main path)
+  const TEERegistry = await ethers.getContractFactory('TEERegistry');
+  const teeRegistry = await TEERegistry.deploy();
+  await teeRegistry.waitForDeployment();
 
-  // Deploy V2 (hybrid bridge: BLS + TEE dual verification)
-  const VerifierV2 = await ethers.getContractFactory('VerifierContractV2');
-  const verifierV2 = await VerifierV2.deploy();
-  await verifierV2.waitForDeployment();
-
-  // Deploy V3 (dual independent verification: ECDSA threshold + TEE)
-  const VerifierV3 = await ethers.getContractFactory('VerifierContractV3');
-  const verifierV3 = await VerifierV3.deploy();
-  await verifierV3.waitForDeployment();
-
-  // Deploy V3-MPC (MPC-TSS single signature + TEE dual verification)
-  const VerifierV3MPC = await ethers.getContractFactory('VerifierContractV3MPC');
-  const verifierV3MPC = await VerifierV3MPC.deploy();
-  await verifierV3MPC.waitForDeployment();
+  const HXMsgGateway = await ethers.getContractFactory('HXMsgGateway');
+  const hxmsgGateway = await HXMsgGateway.deploy(await teeRegistry.getAddress());
+  await hxmsgGateway.waitForDeployment();
 
   const deployment = {
     deployer: deployer.address,
     evmSourceContract: await source.getAddress(),
     targetContract: await target.getAddress(),
-    verifierContract: await verifier.getAddress(),
-    verifierContractV2: await verifierV2.getAddress(),
-    verifierContractV3: await verifierV3.getAddress(),
-    verifierContractV3MPC: await verifierV3MPC.getAddress(),
+    teeRegistry: await teeRegistry.getAddress(),
+    hxmsgGateway: await hxmsgGateway.getAddress(),
     chainId: Number((await ethers.provider.getNetwork()).chainId),
   };
 

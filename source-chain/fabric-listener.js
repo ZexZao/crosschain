@@ -1,7 +1,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { ensureRuntime, writeJSON, readJSON, nowMs } = require('../shared/utils');
-const { buildXmsgFromFabricEvent } = require('../proof-builder/fabric-proof-builder');
+const { buildHXMsgFromFabricEvent } = require('../hxmsg-builder/fabric-to-evm');
 
 function loadFabricSdk() {
   try {
@@ -135,7 +135,7 @@ async function runMockListener(mockFile) {
   if (!deployment) {
     throw new Error('deployment.json not found; run deploy first');
   }
-  const xmsg = await buildXmsgFromFabricEvent({ deployment, ...captured });
+  const xmsg = buildHXMsgFromFabricEvent({ deployment, ...captured });
   const xmsgWrittenAtMs = nowMs();
   xmsg.listenerTiming = {
     ...captured.listenerTiming,
@@ -179,7 +179,7 @@ async function runGatewayListener(options) {
     try {
       const captured = mapCapturedEvent(contractEvent, options);
       writeJSON('fabric-captured-event.json', captured);
-      const xmsg = await buildXmsgFromFabricEvent({ deployment, ...captured });
+      const xmsg = buildHXMsgFromFabricEvent({ deployment, ...captured });
       const xmsgWrittenAtMs = nowMs();
       xmsg.listenerTiming = {
         ...captured.listenerTiming,
@@ -195,7 +195,7 @@ async function runGatewayListener(options) {
         srcHeight: xmsg.srcHeight,
         listenerProcessingMs: xmsg.listenerTiming.processingMs,
         proofBuildMs: xmsg.proofMeta?.proofBuildMs || 0,
-        proofType: xmsg.proofMeta?.proofType || 'fabric-v1'
+        proofType: xmsg.proofMeta?.proofType || 'h-fsv'
       }));
     } catch (error) {
       console.error(`Fabric event processing failed: ${error.message}`);

@@ -3,6 +3,9 @@ const { ethers } = require('ethers');
 const fs = require('fs-extra');
 const path = require('path');
 const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
+const { computeHXMsgDigest } = require('../shared/hxmsg');
+const { verifyHFsv } = require('./adapters/fabric-hfsv-adapter');
+const { buildCertification } = require('./core/certification');
 
 ensureRuntime();
 const app = express();
@@ -29,6 +32,16 @@ let state = readJSON('tee-state.json');
 if (!state) {
   const wallet = ethers.Wallet.createRandom();
   state = { privateKey: wallet.privateKey, address: wallet.address, ctr: 0, lastDigest: ethers.ZeroHash, mode: 'normal' };
+  writeJSON('tee-state.json', state);
+} else if (!state.privateKey && state.sessions?.default?.privateKey) {
+  state = {
+    privateKey: state.sessions.default.privateKey,
+    address: state.sessions.default.address,
+    ctr: state.sessions.default.ctr || 0,
+    lastDigest: state.sessions.default.lastDigest || ethers.ZeroHash,
+    mode: state.mode || 'normal',
+    sessions: state.sessions,
+  };
   writeJSON('tee-state.json', state);
 }
 
@@ -259,6 +272,28 @@ app.post('/verify-sign', async (req, res) => {
 
 app.post('/attest', async (req, res) => {
   try {
+    if (req.body?.hxmsg) {
+      const hxmsg = req.body.hxmsg;
+      hxmsg.hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
+      if (Number(hxmsg.header.expireAt) < Math.floor(Date.now() / 1000)) {
+        throw new Error('h-xmsg expired');
+      }
+      const verificationResult = await verifyHFsv({
+        hxmsg,
+        helperData: req.body.helperData || req.body.blockData || {},
+      });
+      const teeCertification = buildCertification({
+        hxmsg,
+        privateKey: state.privateKey,
+      });
+      res.json({
+        teePubKey: teeCertification.teeAddress,
+        teeCertification,
+        verificationResult,
+      });
+      return;
+    }
+
     const { xmsg, blockData } = req.body;
     if (!xmsg) throw new Error('xmsg is required');
 

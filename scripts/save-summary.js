@@ -15,7 +15,7 @@ function saveForwardSummary(resultsFile) {
 
   let md = '# 正向跨链测试结果 (Fabric → EVM)\n\n';
   md += `**测试时间**：${new Date().toISOString()}\n`;
-  md += `**通过率**：${pass}/${total} | **签名方案**：ECDSA threshold (3/4) | **证明类型**：hybrid-v3 | **合约**：VerifierContractV3\n\n`;
+  md += `**通过率**：${pass}/${total} | **消息结构**：h-xmsg | **证明类型**：h-FSV | **合约**：HXMsgGateway\n\n`;
   md += '| 用例 | 业务 | 金额 | Fabric 区块 | EVM Gas | 端到端时延 | 字段 | 状态 |\n';
   md += '|------|------|------|------------|---------|------------|------|------|\n';
 
@@ -45,7 +45,7 @@ function saveRoundtripSummary(resultsFile) {
 
   let md = '# 闭环跨链测试结果 (Fabric → EVM → Fabric ACK)\n\n';
   md += `**测试时间**：${new Date().toISOString()}\n`;
-  md += `**通过率**：${pass}/${total} | **签名方案**：ECDSA threshold (3/4) | **证明类型**：hybrid-v3 | **合约**：VerifierContractV3\n\n`;
+  md += `**通过率**：${pass}/${total} | **消息结构**：h-xmsg | **证明类型**：h-FSV | **合约**：HXMsgGateway\n\n`;
   md += '| 用例 | 业务 | 金额 | 正向 Gas | ACK (BLS+TEE) | 字段 | 总耗时 | 状态 |\n';
   md += '|------|------|------|----------|---------------|------|--------|------|\n';
 
@@ -100,7 +100,7 @@ function saveCombinedSummary() {
     const total = results.length;
     const pass = results.filter(r => r.pass).length;
     md += '# 一、正向测试 (Fabric → EVM)\n\n';
-    md += `**通过率**：${pass}/${total} | **签名方案**：ECDSA threshold (3/4) | **证明类型**：hybrid-v3 | **合约**：VerifierContractV3\n\n`;
+    md += `**通过率**：${pass}/${total} | **消息结构**：h-xmsg | **证明类型**：h-FSV | **合约**：HXMsgGateway\n\n`;
     md += '| 用例 | 业务 | 金额 | Fabric 区块 | EVM Gas | 端到端时延 | 字段 | 状态 |\n';
     md += '|------|------|------|------------|---------|------------|------|------|\n';
     let gs = 0, ts = 0, bs = 0;
@@ -123,7 +123,7 @@ function saveCombinedSummary() {
     const total = results.length;
     const pass = results.filter(r => r.pass).length;
     md += '# 二、闭环测试 (Fabric → EVM → Fabric ACK)\n\n';
-    md += `**通过率**：${pass}/${total} | **签名方案**：ECDSA threshold (3/4)\n\n`;
+    md += `**通过率**：${pass}/${total} |  **消息结构**：h-xmsg | **证明类型**：h-FSV\n\n`;
     md += '| 用例 | 业务 | 金额 | 正向 Gas | ACK (BLS+TEE) | 字段 | 总耗时 | 状态 |\n';
     md += '|------|------|------|----------|---------------|------|--------|------|\n';
     let gs = 0, ts = 0;

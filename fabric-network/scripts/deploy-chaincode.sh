@@ -5,7 +5,7 @@ ROOT_DIR="/fabric-network"
 CC_NAME="${CC_NAME:-xcall}"
 DEFAULT_SEQUENCE=1
 CURRENT_SEQUENCE=$(
-  peer lifecycle chaincode querycommitted --channelID mychannel --name "$CC_NAME" 2>/dev/null | \
+  { peer lifecycle chaincode querycommitted --channelID mychannel --name "$CC_NAME" 2>/dev/null || true; } | \
   sed -n 's/^Version: .* Sequence: \([0-9][0-9]*\),.*/\1/p' | head -n 1
 )
 if [ -n "$CURRENT_SEQUENCE" ]; then

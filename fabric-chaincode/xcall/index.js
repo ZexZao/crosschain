@@ -70,6 +70,26 @@ function decodeBusinessPayload(payloadHex) {
   };
 }
 
+function stableStringify(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashJson(value) {
+  return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(value)));
+}
+
+function addressToBytes32(value) {
+  return ethers.zeroPadValue(ethers.getAddress(value), 32);
+}
+
+function selectorOf(signature) {
+  return ethers.id(signature).slice(0, 10);
+}
+
 class XCallContract extends Contract {
   async InitLedger() {
     return;
@@ -89,16 +109,54 @@ class XCallContract extends Contract {
     await ctx.stub.putState(nonceKey, Buffer.from(String(nonce)));
 
     const txId = ctx.stub.getTxID();
+    const txTime = ctx.stub.getTxTimestamp();
+    const createdAt = Number(txTime.seconds.low || txTime.seconds || Math.floor(Date.now() / 1000));
+    const requestID = payload.requestID || ethers.keccak256(
+      ethers.toUtf8Bytes(`fabric:${ctx.stub.getChannelID()}:${txId}:${nonce}`)
+    );
+    const businessPayload = payload.businessPayload || payload.payload || payload;
+    const businessPayloadHash = payload.businessPayloadHash || hashJson(businessPayload);
+    const targetObject = payload.targetObject || (
+      payload.targetContract ? addressToBytes32(payload.targetContract) : ethers.ZeroHash
+    );
+    const receiver = payload.receiver || targetObject;
+    const functionSelector = payload.functionSelector || selectorOf('execute(bytes32,bytes)');
+    const callDataHash = payload.callDataHash;
+    if (!callDataHash) {
+      throw new Error('payload.callDataHash is required for h-xmsg binding');
+    }
+    const expireAt = Number(payload.expireAt || (createdAt + 3600));
+
+    const eventRecord = {
+      requestID,
+      sourceTxID: txId,
+      fabricCaller: ctx.clientIdentity.getID(),
+      targetChainType: payload.targetChainType || 'EVM',
+      targetChainID: payload.targetChainID || '',
+      targetObject,
+      functionSelector,
+      callDataHash,
+      businessPayloadHash,
+      receiver,
+      nonce,
+      createdAt,
+      expireAt,
+      status: 'COMMITTED',
+      businessPayload
+    };
+
     const eventPayload = {
-      ...payload,
+      ...eventRecord,
       fabricTxId: txId,
       fabricNonce: nonce,
-      emittedAt: new Date().toISOString()
+      emittedAt: new Date(createdAt * 1000).toISOString()
     };
 
     await ctx.stub.putState(`xcall:${txId}`, Buffer.from(JSON.stringify(eventPayload)));
+    await ctx.stub.putState(`crosschainEvents:${requestID}`, Buffer.from(JSON.stringify(eventRecord)));
     await ctx.stub.putState(`outbound:${txId}`, Buffer.from(JSON.stringify({
       txId,
+      requestID,
       nonce,
       status: 'pending',
       updatedAt: new Date().toISOString()
@@ -108,9 +166,18 @@ class XCallContract extends Contract {
     return JSON.stringify({
       ok: true,
       txId,
+      requestID,
       nonce,
       eventName: 'XCALL'
     });
+  }
+
+  async QueryCrosschainEvent(ctx, requestID) {
+    const data = await ctx.stub.getState(`crosschainEvents:${requestID}`);
+    if (!data || data.length === 0) {
+      throw new Error(`crosschain event not found: ${requestID}`);
+    }
+    return data.toString();
   }
 
   async ExecuteInboundXMsg(ctx, xmsgJson, voucherJson) {
@@ -176,9 +243,8 @@ class XCallContract extends Contract {
       throw new Error('payload hash mismatch');
     }
 
-    // ── Hybrid bridge path (BLS + TEE /attest) ──
+    // Legacy ACK path retained only until ACK is reintroduced as h-xmsg RESPONSE/ACK.
     // attestDigest = keccak256(abi.encode(reportHash, teePubKey))
-    // VerifierContractV2 uses the same computation on-chain
     if (voucher.reportHash && voucher.teeSig) {
       const attestDigest = ethers.keccak256(
         ABI.encode(['bytes32', 'address'], [voucher.reportHash, voucher.teePubKey])

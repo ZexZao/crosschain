@@ -8,7 +8,7 @@ if [ "${1:-}" = "--payload-file" ]; then
     echo "Missing payload file after --payload-file" >&2
     exit 1
   fi
-  PAYLOAD_JSON="$(cat "$2")"
+  PAYLOAD_JSON="$(tr -d '\n\r' < "$2")"
 elif [ -n "${1:-}" ]; then
   PAYLOAD_JSON="$1"
 fi
