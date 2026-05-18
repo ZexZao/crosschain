@@ -1,6 +1,12 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { ethers } = require('ethers');
+const { encodeBusinessPayload } = require('../shared/xmsg');
+const {
+  bytes32FromText,
+  hashJson,
+} = require('../shared/hxmsg');
+const { FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 
 async function main() {
   const projectRoot = path.join(__dirname, '..');
@@ -23,16 +29,40 @@ async function main() {
   );
   const contract = new ethers.Contract(
     deployment.evmSourceContract,
-    ['function requestFabricCall(string payloadJson) external returns (uint64)'],
+    ['function submitRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt) external returns (bytes32)'],
     signer
   );
 
-  const tx = await contract.requestFabricCall(JSON.stringify(payload));
+  const channelID = process.env.FABRIC_CHANNEL || 'mychannel';
+  const chaincodeName = process.env.FABRIC_CHAINCODE || 'xcall';
+  const { normalized, payloadHex } = encodeBusinessPayload(payload);
+  const tx = await contract.submitRequest(
+    bytes32FromText(`fabric-${channelID}`),
+    bytes32FromText('fabric-local-domain'),
+    buildFabricTargetObject(channelID, chaincodeName),
+    FABRIC_INVOKE_SELECTOR,
+    ethers.keccak256(payloadHex),
+    hashJson(normalized),
+    bytes32FromText(normalized.actor),
+    Math.floor(Date.now() / 1000) + 3600
+  );
   const receipt = await tx.wait();
+  const event = receipt.logs
+    .map((log) => {
+      try {
+        return contract.interface.parseLog(log);
+      } catch (_) {
+        return null;
+      }
+    })
+    .find((parsed) => parsed && parsed.name === 'CrossChainCallRequested');
   console.log(JSON.stringify({
     txHash: receipt.hash,
     blockNumber: receipt.blockNumber,
-    payload
+    requestID: event?.args?.requestID,
+    payload,
+    normalized,
+    callData: payloadHex
   }, null, 2));
 }
 

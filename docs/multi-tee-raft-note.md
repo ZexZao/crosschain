@@ -1,5 +1,7 @@
 # 多 TEE 与 Raft 设计注意点
 
+> 更新：当前项目已经实现本地 Docker 环境下的 Raft 风格 TEE 集群主路径，包括 RequestVote、AppendEntries、leader election、heartbeat、日志复制、commitIndex 和提交后签名。本文保留为此前的设计注意点；最新实现见 `docs/raft-tee-cluster-implementation.md`。
+
 ## 1. 背景
 
 当前项目已经在 Fabric -> EVM 方向实现了 h-FSV / Weaver-like 的验证路径：
@@ -236,4 +238,3 @@ adapters verify heterogeneous source-chain facts;
 TEE cluster uses Raft to keep verification service state consistent;
 target chains verify compact TEE cluster proof.
 ```
-

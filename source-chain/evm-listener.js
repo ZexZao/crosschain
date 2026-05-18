@@ -1,6 +1,6 @@
 const { ethers } = require('ethers');
 const { ensureRuntime, writeJSON, readJSON, nowMs } = require('../shared/utils');
-// EVM -> Fabric will be reintroduced through the MELV-EF h-xmsg builder in stage 4.
+const { buildHXMsgFromEvmReceipt, CROSS_CHAIN_CALL_EVENT } = require('../hxmsg-builder/evm-to-fabric');
 
 function normalizeArgv(argv) {
   const options = {
@@ -23,8 +23,8 @@ function getForwardEventConfig(deployment) {
   }
   return {
     address: deployment.evmSourceContract,
-    abi: ['event FabricCallRequested(uint64 indexed nonce, address indexed requester, string payloadJson)'],
-    eventName: 'FabricCallRequested',
+    abi: [CROSS_CHAIN_CALL_EVENT],
+    eventName: 'CrossChainCallRequested',
     dstChainName: 'fabric-mychannel',
     dstContract: ethers.ZeroAddress,
     captureFile: 'evm-captured-event.json',
@@ -48,16 +48,16 @@ function getAckEventConfig(deployment) {
 }
 
 async function handleLog(provider, deployment, config, mode, log) {
-  throw new Error('EVM listener is disabled until the stage 4 MELV-EF h-xmsg builder is implemented');
   const iface = new ethers.Interface(config.abi);
   const parsed = iface.parseLog(log);
   const block = await provider.getBlock(log.blockNumber);
+  const receipt = await provider.getTransactionReceipt(log.transactionHash);
   const listenerReceivedAtMs = nowMs();
 
   let rawPayload;
   let nonce;
   if (mode === 'forward') {
-    rawPayload = JSON.parse(parsed.args.payloadJson);
+    rawPayload = readJSON('latest-evm-business-payload.json') || {};
     nonce = Number(parsed.args.nonce);
   } else {
     if (!parsed.args.requireAck) {
@@ -103,9 +103,11 @@ async function handleLog(provider, deployment, config, mode, log) {
   };
 
   writeJSON(config.captureFile, captured);
-  const xmsg = await buildXmsgFromEvmEvent({
+  const xmsg = buildHXMsgFromEvmReceipt({
     deployment,
-    ...captured
+    receipt,
+    block,
+    businessPayload: rawPayload,
   });
   const xmsgWrittenAtMs = nowMs();
   xmsg.listenerTiming = {

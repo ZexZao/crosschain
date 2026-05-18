@@ -3,4 +3,5 @@ module.exports = {
   ...require('./codec'),
   ...require('./hash'),
   ...require('./fabric-hfsv-policy'),
+  ...require('./evm-melv-policy'),
 };

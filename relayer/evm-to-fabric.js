@@ -37,23 +37,28 @@ async function main() {
   }
 
   const teeBase = process.env.TEE_URL || 'http://127.0.0.1:9000';
-  const teeResp = await axios.post(`${teeBase}/verify-sign`, xmsg, { timeout: 10000 });
-  const voucher = teeResp.data;
-  const submitXmsg = { ...xmsg, teePubKey: voucher.teePubKey };
+  const teeResp = await axios.post(`${teeBase}/attest`, { hxmsg: xmsg }, { timeout: 30000 });
+  const voucher = teeResp.data.teeClusterCertification || teeResp.data.teeCertification;
 
   const { gateway, contract } = await getFabricContract(projectRoot);
   try {
+    const certs = voucher.certifications || [voucher];
+    for (const cert of certs) {
+      await contract.submitTransaction('RegisterTrustedTEE', cert.teeAddress);
+    }
     const fabricResp = await contract.submitTransaction(
-      'ExecuteInboundXMsg',
-      JSON.stringify(submitXmsg),
+      'ExecuteHXMsg',
+      JSON.stringify(xmsg),
+      xmsg.callData,
       JSON.stringify(voucher)
     );
     const result = {
       mode: 'evm-to-fabric',
-      requestID: submitXmsg.requestID,
-      txHash: submitXmsg.txId,
+      requestID: xmsg.header?.requestID || xmsg.requestID,
+      txHash: xmsg.txId,
       fabricResult: fabricResp.toString(),
-      verificationMeta: voucher.verificationMeta || null
+      verificationMeta: teeResp.data.verificationResult,
+      teeCluster: teeResp.data.teeClusterCertification || null
     };
     writeJSON('last-evm-to-fabric-result.json', result);
     console.log(JSON.stringify(result, null, 2));

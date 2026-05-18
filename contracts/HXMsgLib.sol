@@ -42,6 +42,24 @@ library HXMsgLib {
         uint64 expireAt;
     }
 
+    struct HXMsgMinimal {
+        bytes32 requestID;
+        bytes32 hmsgDigest;
+        uint8 targetChainType;
+        bytes32 targetChainID;
+        uint8 actionType;
+        bytes32 targetObject;
+        bytes4 functionSelector;
+        bytes32 callDataHash;
+        bytes32 receiver;
+        bytes32 targetExecutionHash;
+        bool feedbackRequired;
+        uint8 expectedFeedbackMsgType;
+        uint64 feedbackTimeout;
+        bytes32 callbackRefHash;
+        uint64 expireAt;
+    }
+
     struct TEECertification {
         bytes32 requestID;
         bytes32 hmsgDigest;
@@ -101,4 +119,31 @@ library HXMsgLib {
             abi.encode(headerHash, endpointHash, actionHash, verificationHash, bindingHash, feedbackHash)
         );
     }
+
+    function hashDelivery(HXMsgMinimal calldata m) internal pure returns (bytes32) {
+        bytes32 chainHash = keccak256(
+            abi.encode(m.requestID, m.hmsgDigest, m.targetChainType, m.targetChainID, m.actionType)
+        );
+        bytes32 actionHash = keccak256(
+            abi.encode(m.targetObject, m.functionSelector, m.callDataHash, m.receiver, m.targetExecutionHash)
+        );
+        bytes32 feedbackHash = keccak256(
+            abi.encode(m.feedbackRequired, m.expectedFeedbackMsgType, m.feedbackTimeout, m.callbackRefHash, m.expireAt)
+        );
+        return keccak256(abi.encode(chainHash, actionHash, feedbackHash));
+    }
+
+    function hashDeliveryFromFull(HXMsgOnChain calldata m, bytes32 hmsgDigest) internal pure returns (bytes32) {
+        bytes32 chainHash = keccak256(
+            abi.encode(m.requestID, hmsgDigest, m.targetChainType, m.targetChainID, m.actionType)
+        );
+        bytes32 actionHash = keccak256(
+            abi.encode(m.targetObject, m.functionSelector, m.callDataHash, m.receiver, m.targetExecutionHash)
+        );
+        bytes32 feedbackHash = keccak256(
+            abi.encode(m.feedbackRequired, m.expectedFeedbackMsgType, m.feedbackTimeout, m.callbackRefHash, m.expireAt)
+        );
+        return keccak256(abi.encode(chainHash, actionHash, feedbackHash));
+    }
+
 }

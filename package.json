@@ -20,6 +20,7 @@
     "fabric:test:forward": "node scripts/run-hxmsg-forward-tests.js",
     "fabric:test:ack": "node -e \"throw new Error('ACK will be reintroduced as h-xmsg RESPONSE/ACK after stage 3')\"",
     "hxmsg:test:forward": "node scripts/run-hxmsg-forward-tests.js",
+    "hxmsg:test:evm-fabric": "node scripts/run-evm-fabric-tests.js",
     "evm:fabric:request": "node scripts/request-evm-fabric-call.js",
     "evm:fabric:demo": "node scripts/run-evm-fabric-demo.js",
     "fabric:wallet": "node scripts/export-fabric-wallet.js",

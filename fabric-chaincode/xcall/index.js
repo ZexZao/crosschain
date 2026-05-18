@@ -90,6 +90,145 @@ function selectorOf(signature) {
   return ethers.id(signature).slice(0, 10);
 }
 
+function bytes32FromText(text) {
+  return ethers.keccak256(ethers.toUtf8Bytes(String(text)));
+}
+
+function normalizeFeedback(feedback = {}) {
+  return {
+    required: Boolean(feedback.required),
+    expectedMsgType: Number(feedback.expectedMsgType || 0),
+    timeout: Number(feedback.timeout || 0),
+    callbackRefHash: feedback.callbackRefHash || ethers.ZeroHash
+  };
+}
+
+function computeTargetExecutionHashFromHXMsg(hxmsg) {
+  return ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+      [
+        hxmsg.header.requestID,
+        hxmsg.target.chainID,
+        hxmsg.targetAction.targetObject,
+        hxmsg.targetAction.functionSelector,
+        hxmsg.targetAction.callDataHash,
+        hxmsg.targetAction.receiver
+      ]
+    )
+  );
+}
+
+function computeHXMsgDigest(hxmsg) {
+  const feedback = normalizeFeedback(hxmsg.feedback);
+  const headerHash = ethers.keccak256(
+    ABI.encode(
+      ['uint8', 'bytes32', 'uint8', 'uint64', 'uint64', 'uint64'],
+      [
+        Number(hxmsg.header.version),
+        hxmsg.header.requestID,
+        Number(hxmsg.header.msgType),
+        Number(hxmsg.header.nonce),
+        Number(hxmsg.header.createdAt),
+        Number(hxmsg.header.expireAt)
+      ]
+    )
+  );
+  const endpointHash = ethers.keccak256(
+    ABI.encode(
+      ['uint8', 'bytes32', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'uint8', 'bytes32'],
+      [
+        Number(hxmsg.source.chainType),
+        hxmsg.source.chainID,
+        hxmsg.source.domainID,
+        Number(hxmsg.target.chainType),
+        hxmsg.target.chainID,
+        hxmsg.target.domainID,
+        Number(hxmsg.sourceRef.refType),
+        hxmsg.sourceRef.refHash
+      ]
+    )
+  );
+  const actionHash = ethers.keccak256(
+    ABI.encode(
+      ['uint8', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+      [
+        Number(hxmsg.targetAction.actionType),
+        hxmsg.targetAction.targetObject,
+        hxmsg.targetAction.functionSelector,
+        hxmsg.targetAction.callDataHash,
+        hxmsg.targetAction.receiver
+      ]
+    )
+  );
+  const verificationHash = ethers.keccak256(
+    ABI.encode(
+      ['uint8', 'uint8', 'uint16', 'uint8', 'bytes32', 'bytes32', 'bytes32'],
+      [
+        Number(hxmsg.verification.verificationMethod),
+        Number(hxmsg.verification.finalityModel),
+        Number(hxmsg.verification.requiredConfirmations),
+        Number(hxmsg.verification.policyRef.policyType),
+        hxmsg.verification.policyRef.policyID,
+        hxmsg.verification.policyRef.policyHash,
+        hxmsg.verification.adapterID
+      ]
+    )
+  );
+  const bindingHash = ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes32', 'bytes32'],
+      [
+        hxmsg.payloadBinding.sourcePayloadHash,
+        hxmsg.payloadBinding.businessPayloadHash,
+        hxmsg.payloadBinding.targetExecutionHash
+      ]
+    )
+  );
+  const feedbackHash = ethers.keccak256(
+    ABI.encode(
+      ['bool', 'uint8', 'uint64', 'bytes32'],
+      [feedback.required, feedback.expectedMsgType, feedback.timeout, feedback.callbackRefHash]
+    )
+  );
+  return ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32'],
+      [headerHash, endpointHash, actionHash, verificationHash, bindingHash, feedbackHash]
+    )
+  );
+}
+
+async function isTrustedTEE(ctx, address) {
+  const key = `trustedTEE:${ethers.getAddress(address)}`;
+  const data = await ctx.stub.getState(key);
+  return data && data.length > 0;
+}
+
+async function verifyTEECertification(ctx, hxmsg, certEnvelope) {
+  const hmsgDigest = computeHXMsgDigest(hxmsg);
+  const certs = certEnvelope.certifications || (
+    certEnvelope.teeCertification ? [certEnvelope.teeCertification] : [certEnvelope]
+  );
+  const threshold = Number(certEnvelope.threshold || 1);
+  const seen = new Set();
+  let valid = 0;
+  for (const cert of certs) {
+    if (!cert || cert.requestID !== hxmsg.header.requestID) continue;
+    if (String(cert.hmsgDigest).toLowerCase() !== hmsgDigest.toLowerCase()) continue;
+    const signer = ethers.getAddress(ethers.recoverAddress(hmsgDigest, cert.signature));
+    if (signer !== ethers.getAddress(cert.teeAddress)) continue;
+    if (!(await isTrustedTEE(ctx, signer))) continue;
+    if (seen.has(signer)) continue;
+    seen.add(signer);
+    valid += 1;
+  }
+  if (valid < threshold) {
+    throw new Error(`TEE quorum not satisfied: ${valid}/${threshold}`);
+  }
+  return { hmsgDigest, validTEECount: valid, threshold, signers: Array.from(seen) };
+}
+
 class XCallContract extends Contract {
   async InitLedger() {
     return;
@@ -178,6 +317,90 @@ class XCallContract extends Contract {
       throw new Error(`crosschain event not found: ${requestID}`);
     }
     return data.toString();
+  }
+
+  async RegisterTrustedTEE(ctx, teeAddress) {
+    const address = ethers.getAddress(teeAddress);
+    await ctx.stub.putState(`trustedTEE:${address}`, Buffer.from(JSON.stringify({
+      address,
+      registeredByMSP: ctx.clientIdentity.getMSPID(),
+      updatedAt: new Date().toISOString()
+    })));
+    return JSON.stringify({ ok: true, address });
+  }
+
+  async QueryTrustedTEE(ctx, teeAddress) {
+    const address = ethers.getAddress(teeAddress);
+    const data = await ctx.stub.getState(`trustedTEE:${address}`);
+    return data && data.length > 0 ? data.toString() : '';
+  }
+
+  async ExecuteHXMsg(ctx, hxmsgJson, callDataHex, certJson) {
+    const hxmsg = parseJson(hxmsgJson, 'hxmsgJson');
+    const certEnvelope = parseJson(certJson, 'certJson');
+    const requestID = hxmsg.header.requestID;
+    const consumedKey = `hxmsg-consumed:${requestID}`;
+    const consumed = await ctx.stub.getState(consumedKey);
+    if (consumed && consumed.length > 0) {
+      throw new Error('replay requestID');
+    }
+
+    const now = Number(ctx.stub.getTxTimestamp().seconds.low || ctx.stub.getTxTimestamp().seconds || Math.floor(Date.now() / 1000));
+    if (Number(hxmsg.header.expireAt) < now) throw new Error('h-xmsg expired');
+    if (Number(hxmsg.target.chainType) !== 2) throw new Error('target is not Fabric');
+    if (Number(hxmsg.targetAction.actionType) !== 5) throw new Error('action is not chaincode invoke');
+
+    const expectedChainID = bytes32FromText(`fabric-${ctx.stub.getChannelID()}`);
+    const expectedDomainID = bytes32FromText('fabric-local-domain');
+    const expectedTargetObject = bytes32FromText(`fabric:${ctx.stub.getChannelID()}:xcall`);
+    if (String(hxmsg.target.chainID).toLowerCase() !== expectedChainID.toLowerCase()) {
+      throw new Error('Fabric target chainID mismatch');
+    }
+    if (String(hxmsg.target.domainID).toLowerCase() !== expectedDomainID.toLowerCase()) {
+      throw new Error('Fabric target domainID mismatch');
+    }
+    if (String(hxmsg.targetAction.targetObject).toLowerCase() !== expectedTargetObject.toLowerCase()) {
+      throw new Error('Fabric target object mismatch');
+    }
+    if (String(hxmsg.targetAction.callDataHash).toLowerCase() !== ethers.keccak256(callDataHex).toLowerCase()) {
+      throw new Error('callDataHash mismatch');
+    }
+    const targetExecutionHash = computeTargetExecutionHashFromHXMsg(hxmsg);
+    if (String(hxmsg.payloadBinding.targetExecutionHash).toLowerCase() !== targetExecutionHash.toLowerCase()) {
+      throw new Error('targetExecutionHash mismatch');
+    }
+
+    const certResult = await verifyTEECertification(ctx, hxmsg, certEnvelope);
+    const parsedPayload = decodeBusinessPayload(callDataHex);
+    const record = {
+      requestID,
+      txId: ctx.stub.getTxID(),
+      callerMSP: ctx.clientIdentity.getMSPID(),
+      hmsgDigest: certResult.hmsgDigest,
+      validTEECount: certResult.validTEECount,
+      teeThreshold: certResult.threshold,
+      teeSigners: certResult.signers,
+      sourceChainType: hxmsg.source.chainType,
+      sourceTxID: hxmsg.txId || '',
+      srcHeight: hxmsg.srcHeight || 0,
+      callDataHash: hxmsg.targetAction.callDataHash,
+      businessPayloadHash: hxmsg.payloadBinding.businessPayloadHash,
+      op: parsedPayload.op,
+      recordId: parsedPayload.recordId,
+      actor: parsedPayload.actor,
+      amount: parsedPayload.amount,
+      metadata: parsedPayload.metadata,
+      requireAck: Boolean(parsedPayload.requireAck),
+      status: 'executed',
+      updatedAt: new Date().toISOString()
+    };
+
+    await ctx.stub.putState(consumedKey, Buffer.from('1'));
+    await ctx.stub.putState(`crosschainExec:${requestID}`, Buffer.from(JSON.stringify(record)));
+    await ctx.stub.putState(`inbound:${requestID}`, Buffer.from(JSON.stringify(record)));
+    ctx.stub.setEvent('HXMSG_EXECUTED', Buffer.from(JSON.stringify(record)));
+
+    return JSON.stringify({ ok: true, requestID, status: 'executed', validTEECount: certResult.validTEECount });
   }
 
   async ExecuteInboundXMsg(ctx, xmsgJson, voucherJson) {

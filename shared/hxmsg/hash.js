@@ -112,6 +112,55 @@ function computeHXMsgDigest(hxmsg) {
   );
 }
 
+function toMinimalHXMsg(hxmsg) {
+  const feedback = normalizeFeedback(hxmsg.feedback);
+  return [
+    hxmsg.header.requestID,
+    hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg),
+    hxmsg.target.chainType,
+    hxmsg.target.chainID,
+    hxmsg.targetAction.actionType,
+    hxmsg.targetAction.targetObject,
+    hxmsg.targetAction.functionSelector,
+    hxmsg.targetAction.callDataHash,
+    hxmsg.targetAction.receiver,
+    hxmsg.payloadBinding.targetExecutionHash,
+    feedback.required,
+    feedback.expectedMsgType,
+    feedback.timeout,
+    feedback.callbackRefHash,
+    hxmsg.header.expireAt,
+  ];
+}
+
+function computeHXMsgDeliveryDigest(hxmsg) {
+  const minimal = Array.isArray(hxmsg) ? hxmsg : toMinimalHXMsg(hxmsg);
+  const chainHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8'],
+      [minimal[0], minimal[1], minimal[2], minimal[3], minimal[4]]
+    )
+  );
+  const actionHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'bytes4', 'bytes32', 'bytes32', 'bytes32'],
+      [minimal[5], minimal[6], minimal[7], minimal[8], minimal[9]]
+    )
+  );
+  const feedbackHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bool', 'uint8', 'uint64', 'bytes32', 'uint64'],
+      [minimal[10], minimal[11], minimal[12], minimal[13], minimal[14]]
+    )
+  );
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'bytes32', 'bytes32'],
+      [chainHash, actionHash, feedbackHash]
+    )
+  );
+}
+
 function toOnChainHXMsg(hxmsg) {
   const feedback = normalizeFeedback(hxmsg.feedback);
   return [
@@ -159,5 +208,7 @@ module.exports = {
   normalizeFeedback,
   computeTargetExecutionHash,
   computeHXMsgDigest,
+  computeHXMsgDeliveryDigest,
+  toMinimalHXMsg,
   toOnChainHXMsg,
 };

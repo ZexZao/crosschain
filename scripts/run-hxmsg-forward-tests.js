@@ -8,7 +8,7 @@ const {
   addressToBytes32,
   chainIdToBytes32,
   hashJson,
-  toOnChainHXMsg,
+  toMinimalHXMsg,
 } = require('../shared/hxmsg');
 const { buildHXMsgFromFabricEvent, TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { writeJSON } = require('../shared/utils');
@@ -60,7 +60,14 @@ async function relayHXMsg(hxmsg) {
     hxmsg,
     helperData: hxmsg._blockData || {},
   }, { timeout: 20000 });
-  const { teeCertification } = teeResp.data;
+  const cluster = teeResp.data.teeClusterCertification;
+  if (!cluster?.quorumReached) {
+    throw new Error(`TEE cluster quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
+  }
+  const certs = cluster.certifications || [];
+  if (certs.length < Number(cluster.threshold || 1)) {
+    throw new Error(`Committed TEE certifications below threshold: ${certs.length}/${cluster.threshold}`);
+  }
 
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
   const wallet = new ethers.Wallet(PRIV_KEY, provider);
@@ -72,27 +79,30 @@ async function relayHXMsg(hxmsg) {
     ['function trustedTEE(address) view returns (bool)', 'function registerTEE(address) external'],
     deployer
   );
-  if (!(await registry.trustedTEE(teeCertification.teeAddress))) {
-    const tx = await registry.registerTEE(teeCertification.teeAddress);
-    await tx.wait();
+  for (const cert of certs) {
+    if (!(await registry.trustedTEE(cert.teeAddress))) {
+      const tx = await registry.registerTEE(cert.teeAddress);
+      await tx.wait();
+    }
   }
 
   const gateway = new ethers.Contract(
     deployment.hxmsgGateway,
-    ['function executeHXMsg((uint8,uint8,bytes32,uint8,bytes32,bytes32,uint8,bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,uint8,uint8,uint16,(uint8,bytes32,bytes32),bytes32,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,uint64,uint64),address,bytes,(bytes32,bytes32,address,uint64,bytes)) external'],
+    ['function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,(bytes32,bytes32,address,uint64,bytes)[],uint256) external'],
     deployer
   );
-  const tx = await gateway.executeHXMsg(
-    toOnChainHXMsg(hxmsg),
+  const tx = await gateway.executeHXMsgMinimalCluster(
+    toMinimalHXMsg(hxmsg),
     deployment.targetContract,
     hxmsg.callData,
-    [
-      teeCertification.requestID,
-      teeCertification.hmsgDigest,
-      teeCertification.teeAddress,
-      teeCertification.verifiedAt,
-      teeCertification.signature,
-    ]
+    certs.map((cert) => [
+      cert.requestID,
+      cert.hmsgDigest,
+      cert.teeAddress,
+      cert.verifiedAt,
+      cert.signature,
+    ]),
+    Number(cluster.threshold || 1)
   );
   const receipt = await tx.wait();
   return {
@@ -100,6 +110,7 @@ async function relayHXMsg(hxmsg) {
     blockNumber: receipt.blockNumber,
     gasUsed: receipt.gasUsed.toString(),
     teeVerification: teeResp.data.verificationResult,
+    teeCluster: cluster,
   };
 }
 
@@ -110,31 +121,28 @@ async function queryTargetState() {
     deployment.targetContract,
     [
       'function executionCount() view returns (uint256)',
-      'function lastOp() view returns (string)',
-      'function lastRecordId() view returns (string)',
-      'function lastActor() view returns (string)',
-      'function lastAmount() view returns (string)',
+      'function lastRequestID() view returns (bytes32)',
+      'function lastPayloadHash() view returns (bytes32)',
     ],
     provider
   );
   return {
     executionCount: (await target.executionCount()).toString(),
-    lastOp: await target.lastOp(),
-    lastRecordId: await target.lastRecordId(),
-    lastActor: await target.lastActor(),
-    lastAmount: await target.lastAmount(),
+    lastRequestID: await target.lastRequestID(),
+    lastPayloadHash: await target.lastPayloadHash(),
   };
 }
 
 function saveSummary(results, totals) {
   let md = '# h-xmsg / h-FSV 正向测试结果 (Fabric → EVM)\n\n';
   md += `**测试时间**：${new Date().toISOString()}\n`;
-  md += `**通过率**：${totals.pass}/${totals.total} | **消息结构**：h-xmsg | **Fabric 验证**：h-FSV | **目标合约**：HXMsgGateway\n\n`;
-  md += '| 用例 | 业务 | 金额 | Fabric 区块 | EVM Gas | TEE 验证 | Peer 背书 | MSP | 交易写集 | 字段 | 状态 |\n';
-  md += '|------|------|------|------------|---------|----------|-----------|-----|----------|------|------|\n';
+  md += `**通过率**：${totals.pass}/${totals.total} | **消息结构**：h-xmsg | **Fabric 验证**：h-FSV | **TEE 共识**：Raft-backed TEE cluster | **EVM提交**：HXMsgMinimalCluster | **目标合约**：轻量执行确认\n\n`;
+  md += '| 用例 | 业务 | 金额 | Fabric 区块 | EVM Gas | TEE 验证 | TEE Quorum | Peer 背书 | MSP | 交易写集 | 目标执行 | 状态 |\n';
+  md += '|------|------|------|------------|---------|----------|------------|-----------|-----|----------|----------|------|\n';
   for (const r of results) {
     const f = r.fieldCheck || {};
-    md += `| ${r.caseId} | ${r.expectedTargetFields?.op || '-'} | ${r.expectedTargetFields?.amount || '-'} | ${r.srcHeight || '-'} | ${(Number(r.gasUsed) || 0).toLocaleString()} | ${r.teeVerification?.adapter || '-'} | ${r.teeVerification?.endorsementCount ?? '-'} | ${(r.teeVerification?.endorsedMSPIDs || []).join(',') || '-'} | ${r.teeVerification?.validatedWriteKey ? 'checked' : '-'} | ${f.opMatch ? 'Y' : 'N'}/${f.recordIdMatch ? 'Y' : 'N'}/${f.actorMatch ? 'Y' : 'N'}/${f.amountMatch ? 'Y' : 'N'} | ${r.pass ? 'PASS' : 'FAIL'} |\n`;
+    const quorum = r.teeCluster ? `${r.teeCluster.reached}/${r.teeCluster.threshold}` : '-';
+    md += `| ${r.caseId} | ${r.expectedTargetFields?.op || '-'} | ${r.expectedTargetFields?.amount || '-'} | ${r.srcHeight || '-'} | ${(Number(r.gasUsed) || 0).toLocaleString()} | ${r.teeVerification?.adapter || '-'} | ${quorum} | ${r.teeVerification?.endorsementCount ?? '-'} | ${(r.teeVerification?.endorsedMSPIDs || []).join(',') || '-'} | ${r.teeVerification?.validatedWriteKey ? 'checked' : '-'} | ${f.requestIDMatch ? 'requestID' : '-'} / ${f.payloadHashMatch ? 'payloadHash' : '-'} | ${r.pass ? 'PASS' : 'FAIL'} |\n`;
   }
   fs.writeFileSync(path.join(RUNTIME_DIR, SUMMARY_FILE), md);
 }
@@ -196,16 +204,17 @@ async function main() {
       caseResult.relayTxHash = relay.txHash;
       caseResult.gasUsed = relay.gasUsed;
       caseResult.teeVerification = relay.teeVerification;
+      caseResult.teeCluster = relay.teeCluster;
 
       const targetState = await queryTargetState();
+      const payloadHash = ethers.keccak256(hxmsg.callData);
       const fieldCheck = {
-        opMatch: targetState.lastOp === tc.expectedTargetFields.op,
-        recordIdMatch: targetState.lastRecordId === tc.expectedTargetFields.recordId,
-        actorMatch: targetState.lastActor === tc.expectedTargetFields.actor,
-        amountMatch: targetState.lastAmount === tc.expectedTargetFields.amount,
+        requestIDMatch: targetState.lastRequestID === caseResult.requestID,
+        payloadHashMatch: targetState.lastPayloadHash === payloadHash,
       };
       caseResult.fieldCheck = fieldCheck;
       caseResult.actualTargetState = targetState;
+      caseResult.expectedPayloadHash = payloadHash;
       caseResult.totalMs = Date.now() - t0;
       caseResult.pass = Object.values(fieldCheck).every(Boolean)
         && relay.teeVerification?.validatedWriteKey?.includes(caseResult.requestID)

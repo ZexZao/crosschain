@@ -7,15 +7,10 @@ async function main() {
   ensureRuntime();
   const [deployer] = await ethers.getSigners();
 
-  const Target = await ethers.getContractFactory('TargetContract');
-  const target = await Target.deploy();
-  await target.waitForDeployment();
-
   const Source = await ethers.getContractFactory('EvmSourceContract');
   const source = await Source.deploy();
   await source.waitForDeployment();
 
-  // Deploy h-xmsg lightweight gateway (stage 3 main path)
   const TEERegistry = await ethers.getContractFactory('TEERegistry');
   const teeRegistry = await TEERegistry.deploy();
   await teeRegistry.waitForDeployment();
@@ -23,6 +18,10 @@ async function main() {
   const HXMsgGateway = await ethers.getContractFactory('HXMsgGateway');
   const hxmsgGateway = await HXMsgGateway.deploy(await teeRegistry.getAddress());
   await hxmsgGateway.waitForDeployment();
+
+  const Target = await ethers.getContractFactory('TargetContract');
+  const target = await Target.deploy(await hxmsgGateway.getAddress());
+  await target.waitForDeployment();
 
   const deployment = {
     deployer: deployer.address,
