@@ -440,7 +440,7 @@ target chain verifies batchRoot + Merkle path + callDataHash
 | 文件 | 作用 |
 |---|---|
 | `contracts/HXMsgLib.sol` | 新增 `HXMsgMinimal` 与 `hashDelivery()` |
-| `contracts/HXMsgGateway.sol` | 新增主路径 `executeHXMsgMinimal()` |
+| `contracts/HXMsgGateway.sol` | 主路径收敛为 `executeHXMsgMinimalCluster()` |
 | `shared/hxmsg/hash.js` | 新增 `toMinimalHXMsg()` 与 `computeHXMsgDeliveryDigest()` |
 | `tee-verifier/core/certification.js` | TEE 改为签名 `deliveryDigest` |
 | `contracts/TargetContract.sol` | 改为轻量执行确认合约 |

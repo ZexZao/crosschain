@@ -14,19 +14,35 @@ const {
   buildEvmEventRefHash,
   buildEvmSourcePayloadHash,
 } = require('../../hxmsg-builder/evm-to-fabric');
+const { verifyReceiptProof } = require('../../shared/evm/receipt-proof');
 
 function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
 }
 
-function rememberHeader(chainState, block) {
+function normalizeHeader(header) {
+  return {
+    number: Number(header.number),
+    hash: header.hash,
+    parentHash: header.parentHash,
+    stateRoot: header.stateRoot,
+    transactionsRoot: header.transactionsRoot,
+    receiptsRoot: header.receiptsRoot,
+    logsBloom: header.logsBloom,
+    timestamp: Number(header.timestamp || 0),
+  };
+}
+
+function rememberHeader(chainState, header, { finalized = false, windowSize = 128 } = {}) {
   if (!chainState.evm) chainState.evm = { tipHeight: 0, tipHash: null, headers: [] };
   const state = chainState.evm;
+  const block = normalizeHeader(header);
+  if (!block.hash || !block.parentHash || !block.receiptsRoot) {
+    throw new Error('EVM header missing hash, parentHash, or receiptsRoot');
+  }
   const number = Number(block.number);
-  if (state.tipHash && number > Number(state.tipHeight) + 1) {
-    // In this prototype the helper TEE can bridge gaps; record the observed header
-    // without claiming a fully proven canonical chain for skipped heights.
-  } else if (state.tipHash && number === Number(state.tipHeight) + 1 && block.parentHash !== state.tipHash) {
+  const prevHeader = (state.headers || []).find((h) => Number(h.number) === number - 1);
+  if (prevHeader && block.parentHash !== prevHeader.hash) {
     throw new Error('EVM header chain continuity failed');
   }
   if (number >= Number(state.tipHeight || 0)) {
@@ -34,21 +50,94 @@ function rememberHeader(chainState, block) {
     state.tipHash = block.hash;
   }
   state.headers = (state.headers || []).filter((h) => Number(h.number) !== number);
-  state.headers.push({
-    number,
-    hash: block.hash,
-    parentHash: block.parentHash,
-    timestamp: Number(block.timestamp),
-  });
-  if (state.headers.length > 128) state.headers.shift();
+  state.headers.push(block);
+  state.headers.sort((a, b) => Number(a.number) - Number(b.number));
+  while (state.headers.length > windowSize) state.headers.shift();
+  if (finalized && number >= Number(state.finalizedHeight || 0)) {
+    state.finalizedHeight = number;
+    state.finalizedHash = block.hash;
+  }
+  return block;
 }
 
-async function queryHeaderHelper(blockNumber) {
-  const helperUrl = process.env.MELV_HEADER_HELPER_URL;
-  if (!helperUrl) return null;
-  const resp = await fetch(`${helperUrl.replace(/\/$/, '')}/headers/${blockNumber}`);
-  if (!resp.ok) throw new Error(`header helper returned ${resp.status}`);
-  return resp.json();
+function findStoredHeader(chainState, blockNumber, blockHash) {
+  const header = (chainState.evm?.headers || []).find((item) => Number(item.number) === Number(blockNumber));
+  if (!header) return null;
+  if (!sameHex(header.hash, blockHash)) {
+    throw new Error('stored EVM header hash mismatch');
+  }
+  return header;
+}
+
+async function fetchRpcHeader(provider, blockNumber) {
+  const block = await provider.send('eth_getBlockByNumber', [ethers.toQuantity(blockNumber), false]);
+  if (!block) throw new Error(`EVM block not found: ${blockNumber}`);
+  return normalizeHeader({
+    number: Number(BigInt(block.number)),
+    hash: block.hash,
+    parentHash: block.parentHash,
+    stateRoot: block.stateRoot,
+    transactionsRoot: block.transactionsRoot,
+    receiptsRoot: block.receiptsRoot,
+    logsBloom: block.logsBloom,
+    timestamp: Number(BigInt(block.timestamp)),
+  });
+}
+
+async function fetchFinalizedHeader(provider) {
+  try {
+    const block = await provider.send('eth_getBlockByNumber', ['finalized', false]);
+    if (!block) return null;
+    return normalizeHeader({
+      number: Number(BigInt(block.number)),
+      hash: block.hash,
+      parentHash: block.parentHash,
+      stateRoot: block.stateRoot,
+      transactionsRoot: block.transactionsRoot,
+      receiptsRoot: block.receiptsRoot,
+      logsBloom: block.logsBloom,
+      timestamp: Number(BigInt(block.timestamp)),
+    });
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function maintainHeaderWindow({ provider, chainState, targetBlockNumber, targetBlockHash, proofHeader }) {
+  const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
+  const state = chainState.evm || { tipHeight: 0, tipHash: null, headers: [] };
+  chainState.evm = state;
+  const latestNumber = await provider.getBlockNumber();
+  const start = Math.max(
+    Number(targetBlockNumber),
+    Math.max(0, Number(state.tipHeight || 0) + 1)
+  );
+  const end = Math.max(Number(targetBlockNumber), Number(latestNumber));
+
+  if (!findStoredHeader(chainState, targetBlockNumber, targetBlockHash)) {
+    rememberHeader(chainState, proofHeader, { windowSize });
+  }
+  for (let n = start; n <= end; n += 1) {
+    const existing = (chainState.evm.headers || []).find((h) => Number(h.number) === n);
+    if (existing) continue;
+    const header = await fetchRpcHeader(provider, n);
+    rememberHeader(chainState, header, { windowSize });
+  }
+
+  const finalizedHeader = await fetchFinalizedHeader(provider);
+  if (finalizedHeader) {
+    rememberHeader(chainState, finalizedHeader, { finalized: true, windowSize });
+  } else {
+    const required = Number(process.env.MELV_LOCAL_FINALITY_CONFIRMATIONS || 1);
+    const finalizedHeight = Math.max(0, Number(latestNumber) - required + 1);
+    const header = (chainState.evm.headers || []).find((h) => Number(h.number) === finalizedHeight)
+      || (finalizedHeight > 0 ? await fetchRpcHeader(provider, finalizedHeight) : null);
+    if (header) rememberHeader(chainState, header, { finalized: true, windowSize });
+  }
+
+  const stored = findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
+  if (!stored) throw new Error('target EVM header is outside maintained header window');
+  return stored;
 }
 
 async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState }) {
@@ -83,29 +172,49 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     throw new Error('untrusted EVM source contract');
   }
 
-  const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || helperData.evmRpc || 'http://evm-node:8545');
-  const receipt = helperData.receipt || await provider.getTransactionReceipt(ref.txHash);
-  if (!receipt) throw new Error(`EVM receipt not found: ${ref.txHash}`);
-  if (!sameHex(receipt.hash, ref.txHash)) throw new Error('EVM receipt txHash mismatch');
-  if (Number(receipt.blockNumber) !== Number(ref.blockNumber)) throw new Error('EVM receipt blockNumber mismatch');
-  if (!sameHex(receipt.blockHash, ref.blockHash)) throw new Error('EVM receipt blockHash mismatch');
-
-  const block = helperData.block || await provider.getBlock(Number(ref.blockNumber));
-  if (!block) throw new Error(`EVM block not found: ${ref.blockNumber}`);
-  if (!sameHex(block.hash, ref.blockHash)) throw new Error('EVM block hash mismatch');
-  const helperHeader = await queryHeaderHelper(ref.blockNumber).catch(() => null);
-  if (helperHeader && helperHeader.hash && !sameHex(helperHeader.hash, block.hash)) {
-    throw new Error('EVM helper TEE header hash mismatch');
+  const proofEnvelope = helperData.evmReceiptProof;
+  if (!proofEnvelope?.receipt || !proofEnvelope?.receiptProof || !proofEnvelope?.blockHeader) {
+    throw new Error('EVM receipt MPT proof is required');
   }
-  rememberHeader(chainState, block);
+  const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || helperData.evmRpc || 'http://evm-node:8545');
+  const proofHeader = normalizeHeader(proofEnvelope.blockHeader);
+  if (Number(proofHeader.number) !== Number(ref.blockNumber)) throw new Error('EVM proof header blockNumber mismatch');
+  if (!sameHex(proofHeader.hash, ref.blockHash)) throw new Error('EVM proof header blockHash mismatch');
+  if (!sameHex(proofEnvelope.receiptsRoot, proofHeader.receiptsRoot)) throw new Error('EVM proof receiptsRoot mismatch');
+
+  const storedHeader = await maintainHeaderWindow({
+    provider,
+    chainState,
+    targetBlockNumber: ref.blockNumber,
+    targetBlockHash: ref.blockHash,
+    proofHeader,
+  });
+
+  const receipt = proofEnvelope.receipt;
+  if (!sameHex(receipt.transactionHash || receipt.hash, ref.txHash)) throw new Error('EVM receipt txHash mismatch');
+  if (Number(BigInt(receipt.blockNumber)) !== Number(ref.blockNumber)) throw new Error('EVM receipt blockNumber mismatch');
+  if (!sameHex(receipt.blockHash, ref.blockHash)) throw new Error('EVM receipt blockHash mismatch');
+  await verifyReceiptProof({
+    receiptsRoot: storedHeader.receiptsRoot,
+    transactionIndex: Number(receipt.transactionIndex ?? receipt.index),
+    proof: proofEnvelope.receiptProof,
+    expectedReceipt: receipt,
+  });
 
   const latestBlock = await provider.getBlockNumber();
   const confirmations = Math.max(0, Number(latestBlock) - Number(ref.blockNumber) + 1);
   if (confirmations < Number(hxmsg.verification.requiredConfirmations || policy.requiredConfirmations)) {
     throw new Error(`EVM confirmations insufficient: got=${confirmations}`);
   }
+  if (chainState.evm?.finalizedHeight && Number(ref.blockNumber) > Number(chainState.evm.finalizedHeight)) {
+    throw new Error(`EVM block is not finalized by maintained checkpoint: block=${ref.blockNumber}, finalized=${chainState.evm.finalizedHeight}`);
+  }
 
-  const log = (receipt.logs || [])[Number(ref.logIndex)];
+  const log = (receipt.logs || []).find((item, index) => {
+    const globalIndex = item.logIndex ?? item.index;
+    if (globalIndex !== undefined && Number(BigInt(globalIndex)) === Number(ref.logIndex)) return true;
+    return index === Number(ref.logIndex);
+  });
   if (!log) throw new Error('EVM logIndex not found in receipt');
   if (!sameHex(log.address, ref.sourceContract)) throw new Error('EVM log address mismatch');
   if (!sameHex(log.topics?.[0], CROSS_CHAIN_CALL_TOPIC)) throw new Error('EVM event signature mismatch');
@@ -156,11 +265,19 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     blockNumber: Number(receipt.blockNumber),
     blockHash: receipt.blockHash,
     confirmations,
-    headerMaintainer: process.env.MELV_HEADER_HELPER_URL ? 'helper-tee' : 'local-tee',
+    receiptProof: 'mpt-verified',
+    headerMaintainer: 'tee-sliding-header-window',
     lightClientTip: chainState.evm.tipHeight,
+    finalizedHeight: chainState.evm.finalizedHeight || 0,
     logIndex: Number(ref.logIndex),
     sourceContract: ethers.getAddress(ref.sourceContract),
   };
 }
 
-module.exports = { verifyMelvEf };
+module.exports = {
+  adapterID: 'tee-adapter-evm-melv-ef-v1',
+  sourceChainType: ChainType.EVM,
+  verificationMethod: VerificationMethod.EVM_LIGHT_CLIENT,
+  verifySourceFact: verifyMelvEf,
+  verifyMelvEf,
+};

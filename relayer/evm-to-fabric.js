@@ -2,6 +2,8 @@ const path = require('path');
 const fs = require('fs-extra');
 const axios = require('axios');
 const { Gateway, Wallets } = require('fabric-network');
+const { ethers } = require('ethers');
+const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
 
 async function getFabricContract(projectRoot) {
@@ -36,8 +38,18 @@ async function main() {
     throw new Error(`Missing ${relPath}`);
   }
 
+  const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || 'http://127.0.0.1:8545');
+  const receiptProof = await buildReceiptProof({
+    provider,
+    blockNumber: xmsg.srcHeight,
+    txHash: xmsg.txId,
+  });
+
   const teeBase = process.env.TEE_URL || 'http://127.0.0.1:9000';
-  const teeResp = await axios.post(`${teeBase}/attest`, { hxmsg: xmsg }, { timeout: 30000 });
+  const teeResp = await axios.post(`${teeBase}/attest`, {
+    hxmsg: xmsg,
+    helperData: { evmReceiptProof: receiptProof },
+  }, { timeout: 30000 });
   const voucher = teeResp.data.teeClusterCertification || teeResp.data.teeCertification;
 
   const { gateway, contract } = await getFabricContract(projectRoot);

@@ -5,14 +5,13 @@ const { buildHXMsgFromEvmReceipt, CROSS_CHAIN_CALL_EVENT } = require('../hxmsg-b
 function normalizeArgv(argv) {
   const options = {
     rpc: process.env.EVM_RPC || 'http://127.0.0.1:8545',
-    mode: process.env.EVM_LISTENER_MODE || 'forward'
+    mode: 'forward'
   };
 
   const args = [...argv];
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === '--rpc') options.rpc = args[++i];
-    else if (arg === '--mode') options.mode = args[++i];
   }
   return options;
 }
@@ -32,57 +31,14 @@ function getForwardEventConfig(deployment) {
   };
 }
 
-function getAckEventConfig(deployment) {
-  if (!deployment.targetContract) {
-    throw new Error('deployment.json missing targetContract; run deploy first');
-  }
-  return {
-    address: deployment.targetContract,
-    abi: ['event BusinessExecuted(bytes32 indexed requestID,address indexed caller,string op,string recordId,string actor,string amount,bool requireAck)'],
-    eventName: 'BusinessExecuted',
-    dstChainName: 'fabric-mychannel',
-    dstContract: ethers.ZeroAddress,
-    captureFile: 'evm-ack-captured-event.json',
-    xmsgFile: 'latest-ack-xmsg.json'
-  };
-}
-
-async function handleLog(provider, deployment, config, mode, log) {
+async function handleLog(provider, deployment, config, log) {
   const iface = new ethers.Interface(config.abi);
   const parsed = iface.parseLog(log);
   const block = await provider.getBlock(log.blockNumber);
   const receipt = await provider.getTransactionReceipt(log.transactionHash);
   const listenerReceivedAtMs = nowMs();
 
-  let rawPayload;
-  let nonce;
-  if (mode === 'forward') {
-    rawPayload = readJSON('latest-evm-business-payload.json') || {};
-    nonce = Number(parsed.args.nonce);
-  } else {
-    if (!parsed.args.requireAck) {
-      console.log(JSON.stringify({
-        ok: true,
-        mode,
-        txHash: log.transactionHash,
-        skipped: true,
-        reason: 'requireAck=false'
-      }));
-      return;
-    }
-    rawPayload = {
-      op: 'ack_confirm',
-      originRequestID: parsed.args.requestID,
-      status: 'success',
-      relayTxHash: log.transactionHash,
-      targetOp: parsed.args.op,
-      targetRecordId: parsed.args.recordId,
-      targetActor: parsed.args.actor,
-      targetAmount: parsed.args.amount,
-      requireAck: false
-    };
-    nonce = Number(log.index);
-  }
+  const rawPayload = readJSON('latest-evm-business-payload.json') || {};
 
   const captured = {
     networkName: 'evm-localhost',
@@ -93,7 +49,7 @@ async function handleLog(provider, deployment, config, mode, log) {
     blockNumber: log.blockNumber,
     blockHash: log.blockHash,
     logIndex: log.index,
-    nonce,
+    nonce: Number(parsed.args.nonce),
     dstChainName: config.dstChainName,
     dstContract: config.dstContract,
     listenerTiming: {
@@ -119,7 +75,7 @@ async function handleLog(provider, deployment, config, mode, log) {
   writeJSON(config.xmsgFile, xmsg);
   console.log(JSON.stringify({
     ok: true,
-    mode,
+    mode: 'forward',
     txHash: captured.txHash,
     requestID: xmsg.requestID,
     srcHeight: xmsg.srcHeight,
@@ -137,12 +93,12 @@ async function main() {
     throw new Error('deployment.json not found; run deploy first');
   }
   const provider = new ethers.JsonRpcProvider(options.rpc);
-  const config = options.mode === 'ack' ? getAckEventConfig(deployment) : getForwardEventConfig(deployment);
+  const config = getForwardEventConfig(deployment);
   const iface = new ethers.Interface(config.abi);
   const topic = iface.getEvent(config.eventName).topicHash;
   let nextBlock = await provider.getBlockNumber();
 
-  console.log(`Listening EVM ${options.mode} events on ${config.address}:${config.eventName}`);
+  console.log(`Listening EVM forward events on ${config.address}:${config.eventName}`);
 
   while (true) {
     try {
@@ -155,7 +111,7 @@ async function main() {
           toBlock: latestBlock
         });
         for (const log of logs) {
-          await handleLog(provider, deployment, config, options.mode, log);
+          await handleLog(provider, deployment, config, log);
         }
         nextBlock = latestBlock + 1;
       }

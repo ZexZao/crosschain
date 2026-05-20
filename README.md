@@ -14,15 +14,15 @@ h-xmsg + h-FSV + MELV-EF + 4 节点模拟 TEE 集群 + 目标链轻量验证
 2. 完成 Fabric → EVM 正向链路。
 3. Fabric 源链侧采用 h-FSV 思路，将跨链事件状态化。
 4. TEE 模拟服务通过 Fabric adapter 获取 h-FSV 状态视图，验证 Fabric peer endorsement、MSP 身份、验证策略、具体交易存在性、交易有效性和写集内容。
-5. EVM 目标链不再验证 Fabric 复杂证明，只验证 TEE 对完整 `hmsgDigest` 与压缩执行字段组成的 `deliveryDigest` 的签名、防重放、过期时间和目标执行摘要。
-6. 完成 EVM → Fabric 主线：EVM 源合约发标准事件，TEE 通过 MELV-EF adapter 验证 receipt/log/header/finality，Fabric 链码验证 TEE quorum 后执行。
+5. EVM 目标链不再验证 Fabric 复杂证明，只验证 TEE quorum 对完整 `hmsgDigest` 与压缩执行字段组成的 `deliveryDigest` 的签名、防重放、过期时间和目标执行摘要。
+6. 完成 EVM → Fabric 主线：EVM 源合约发标准事件，TEE 通过 MELV-EF adapter 验证 receipt MPT proof、log、有限 header window 和 finalized/confirmation checkpoint，Fabric 链码验证 TEE quorum 后执行。
 7. TEE 从单节点升级为 4 节点模拟集群，节点地位平等，任意节点均可作为本轮 proposer 发起共识，默认阈值为 3/4。
 
 当前未实现的部分：
 
-- h-xmsg 已加入协议级 `feedback` 策略字段；ACK / RESPONSE 的闭环执行器仍将在后续阶段接入。
+- h-xmsg 已加入协议级 `feedback` 策略字段；旧 ACK relay / legacy xmsg 入口已禁用，新的 ACK / RESPONSE 闭环执行器仍将在后续阶段接入。
 - 当前 TEE 仍为 Node.js 模拟服务，接口按后续真实 TEE/服务器部署预留；共识层已经实现 Raft 风格的 RequestVote、AppendEntries、leader election、heartbeat、日志复制和 commitIndex。
-- Mercury 中的辅助 TEE 轮换委员会当前由单节点 `tee-header-helper` 替代，后续可替换为正式委员会方案。
+- Mercury 中的辅助 TEE 轮换委员会没有保留单节点替代服务；当前由每个模拟 TEE 独立维护有限 EVM header window，并通过 receipt MPT proof 验证交易存在性。后续可在此边界内接入正式辅助委员会。
 - Fabric MSP 多组织背书策略目前按本地单组织 Fabric 网络实现为 `Org1MSP` 策略，接口保留多组织扩展。
 
 ## 当前实现程度
@@ -44,8 +44,10 @@ h-xmsg + h-FSV + MELV-EF + 4 节点模拟 TEE 集群 + 目标链轻量验证
 | EVM gas 第三阶段优化 | 已实现，轻量目标合约 + payload hash-first + 压缩链上 h-xmsg |
 | TEE 注册表 | 已实现，`contracts/TEERegistry.sol` |
 | EVM → Fabric h-xmsg builder | 已实现，位于 `hxmsg-builder/evm-to-fabric.js` |
-| MELV-EF TEE adapter | 已实现，位于 `tee-verifier/adapters/evm-melv-adapter.js` |
-| EVM header helper | 已实现，`tee-verifier/header-helper.js`，当前为单节点辅助 TEE 替代物 |
+| MELV-EF TEE adapter | 已实现，验证 EVM receipt MPT proof、log、header window 和 finality policy |
+| EVM receipt MPT proof | 已实现，位于 `shared/evm/receipt-proof.js` |
+| EVM header window | 已实现，TEE 维护有限数量 EVM headers，默认窗口 128 |
+| EVM header window | 已实现，主验证以 TEE 本地 header window + receipt proof 为准 |
 | 4 TEE / Raft 集群 | 已实现，4 个 TEE 节点，支持 leader election、heartbeat、日志复制、commitIndex，默认 3/4 quorum |
 | Fabric h-xmsg 入站执行 | 已实现，`ExecuteHXMsg` |
 | Fabric TEE registry | 已实现，`RegisterTrustedTEE / QueryTrustedTEE` |
@@ -99,16 +101,17 @@ EVM 不直接验证 Fabric block、Fabric endorsement、MSP 证书或 FabricView
 TEE 的 EVM adapter 参考 Mercury 的轻客户端思想，不信任 relayer 直接提交的证明材料，而是执行以下检查：
 
 1. 根据 `h-xmsg.sourceRef.encodedRef` 定位 EVM `txHash / blockNumber / blockHash / logIndex / sourceContract`。
-2. 通过 EVM RPC 获取 receipt 和 block。
-3. 调用 `tee-header-helper` 检查区块头哈希，并维护本地 EVM header state。
-4. 检查 receipt 的 `blockHash / blockNumber` 与 sourceRef 一致。
-5. 检查确认数满足 EVM finality policy。
-6. 解析指定 log。
-7. 检查 log address 是可信 `EvmSourceContract`。
-8. 检查 topic0 是 `CrossChainCallRequested`。
-9. 检查事件参数与 h-xmsg 的 `header / target / targetAction / payloadBinding` 一致。
-10. 重新计算 `sourcePayloadHash` 和 `targetExecutionHash`。
-11. 4 个 TEE 节点通过 Raft 复制同一 h-xmsg 共识日志；leader election 后由 leader 发起 AppendEntries，达到 Raft majority 后提交，提交节点才签名并形成 `teeClusterCertification`。
+2. 要求 relayer 提供 receipt MPT proof。
+3. TEE 维护有限 EVM header window，默认只保留近期 128 个 header。
+4. 使用 header 中的 `receiptsRoot` 验证 receipt proof。
+5. 检查 receipt 的 `blockHash / blockNumber / txHash` 与 sourceRef 一致。
+6. 检查 confirmations 或 finalized checkpoint 满足 EVM finality policy。
+7. 解析指定 log。
+8. 检查 log address 是可信 `EvmSourceContract`。
+9. 检查 topic0 是 `CrossChainCallRequested`。
+10. 检查事件参数与 h-xmsg 的 `header / target / targetAction / payloadBinding` 一致。
+11. 重新计算 `sourcePayloadHash` 和 `targetExecutionHash`。
+12. 4 个 TEE 节点通过 Raft 复制同一 h-xmsg 共识日志；leader election 后由 leader 发起 AppendEntries，达到 Raft majority 后提交，提交节点才签名并形成 `teeClusterCertification`。
 
 Fabric 目标链只验证 TEE quorum、`hmsgDigest`、防重放、过期时间、目标 Fabric chainID/domain、目标 chaincode、`callDataHash` 和 `targetExecutionHash`。
 
@@ -152,7 +155,7 @@ TargetContract.execute()
 | `hxmsg-builder/evm-to-fabric.js` | EVM receipt/log 到 h-xmsg 的构造逻辑 |
 | `tee-verifier/adapters/fabric-hfsv-adapter.js` | h-FSV 验证主逻辑 |
 | `tee-verifier/adapters/evm-melv-adapter.js` | MELV-EF 验证主逻辑 |
-| `tee-verifier/header-helper.js` | 模拟辅助 TEE 区块头维护节点 |
+| `shared/evm/receipt-proof.js` | EVM receipt trie proof 生成与验证 |
 | `tee-verifier/adapters/fabric-block.js` | Fabric block / transaction / rwset 解码验证 |
 | `tee-verifier/core/certification.js` | TEE 证明签名生成 |
 | `contracts/HXMsgGateway.sol` | EVM 目标链轻量验证网关 |
@@ -167,6 +170,7 @@ TargetContract.execute()
 | `docs/mercury-like-equal-tee-consensus.md` | 平等 TEE quorum 共识改造说明 |
 | `docs/raft-tee-cluster-implementation.md` | Raft TEE 集群实现说明 |
 | `docs/raft-unimplemented-items.md` | Raft 未实现与待增强项 |
+| `docs/evm-receipt-mpt-proof-and-header-window.md` | EVM receipt MPT proof 与 TEE header window 说明 |
 
 ## h-xmsg 结构
 
@@ -421,8 +425,8 @@ TEE quorum: 4/3 reached
 Peer 背书: 4
 MSP: Org1MSP
 交易写集检查: checked
-Gas区间: 130,982 - 132,491
-稳定区间: 约 131k - 132k
+Gas区间: 130,316 - 181,568
+稳定区间: 约 130k - 132k；首笔包含 TEE 注册等冷启动成本
 
 h-xmsg / MELV-EF EVM → Fabric: 1/1 PASS
 TEE adapter: evm-melv-ef
@@ -443,14 +447,14 @@ Fabric 状态: executed
 
 | 用例 | 业务 | 金额 | Fabric 区块 | EVM Gas | TEE 验证 | TEE Quorum | Peer 背书 | MSP | 交易写集 | 目标执行 | 状态 |
 |---|---|---:|---:|---:|---|---:|---:|---|---|---|---|
-| FABRIC-001 | asset_lock | 128.50 | 190 | 130,982 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
-| FABRIC-002 | mint_confirm | 980.00 | 191 | 132,491 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
-| FABRIC-003 | receivable_attest | 285000.00 | 192 | 131,597 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
-| FABRIC-004 | logistics_sync | -18.6 | 193 | 131,465 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
-| FABRIC-005 | medical_consent | 30 | 194 | 131,583 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
-| FABRIC-006 | oracle_update | 0.1387 | 195 | 131,369 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
-| FABRIC-007 | approval_commit | 2 | 196 | 130,982 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
-| FABRIC-008 | subsidy_confirm | 46250.00 | 197 | 131,679 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
+| FABRIC-001 | asset_lock | 128.50 | 11 | 181,568 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
+| FABRIC-002 | mint_confirm | 980.00 | 12 | 131,800 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
+| FABRIC-003 | receivable_attest | 285000.00 | 13 | 131,052 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
+| FABRIC-004 | logistics_sync | -18.6 | 14 | 130,726 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
+| FABRIC-005 | medical_consent | 30 | 15 | 130,869 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
+| FABRIC-006 | oracle_update | 0.1387 | 16 | 130,750 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
+| FABRIC-007 | approval_commit | 2 | 17 | 130,316 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
+| FABRIC-008 | subsidy_confirm | 46250.00 | 18 | 131,099 | fabric-hfsv | 4/3 | 4 | Org1MSP | checked | requestID/payloadHash | PASS |
 
 ## 常用命令
 
@@ -461,7 +465,7 @@ npm run deploy
 npm run hxmsg:test:forward
 npm run hxmsg:test:evm-fabric
 npm run fabric:test
-docker compose up -d evm-node tee-header-helper tee-verifier tee-verifier-2 tee-verifier-3 tee-verifier-4
+docker compose up -d evm-node tee-verifier tee-verifier-2 tee-verifier-3 tee-verifier-4
 docker compose -f docker-compose.fabric.yml up -d fabric-tools
 docker compose -f docker-compose.fabric.yml down -v
 ```
@@ -475,7 +479,7 @@ docker compose -f docker-compose.fabric.yml down -v
 - 旧 V3 / BLS / MPC 测试脚本
 - Windows PowerShell 启动脚本
 
-`relayer/index.js` 目前只保留为 legacy guard。当前测试脚本直接完成 h-xmsg 构造、TEE attestation 和 EVM submit。后续阶段会将它整理为正式 h-xmsg router。
+当前测试脚本直接完成 h-xmsg 构造、TEE attestation 和目标链提交。旧 `relayer/index.js`、ACK relay、validator 多签节点、consensus aggregator、BLS 辅助代码和 Fabric 模拟 source 已删除；后续若需要常驻服务，应基于当前 h-xmsg / TEE quorum 主线重新实现 router。
 
 ## 下一阶段计划
 
@@ -483,7 +487,7 @@ docker compose -f docker-compose.fabric.yml down -v
 
 1. ACK / RESPONSE 统一建模。
 2. 补齐生产级 Raft 能力：故障注入、snapshot、log compaction、InstallSnapshot、WAL 和网络分区恢复测试，详见 `docs/raft-unimplemented-items.md`。
-3. Mercury 辅助 TEE 轮换委员会替换当前单节点 header-helper。
+3. 在当前 TEE header window 边界内接入 Mercury 风格辅助 TEE 轮换委员会。
 4. 多 TEE threshold / cluster key 上链验证，减少目标链逐签名管理。
-5. EVM receipt MPT proof 或 finalized checkpoint 验证。
+5. 接入生产级 beacon light client finalized checkpoint；当前本地链使用 RPC `finalized` 标签或确认数策略。
 6. h-xmsg 安全测试套件：篡改、重放、未注册 TEE、源链事实不存在、最终性不足。

@@ -344,9 +344,7 @@ async function verifyHFsv({ hxmsg, helperData = {} }) {
   validatePayloadBinding({ hxmsg, ref, hfsv });
 
   const expectedWriteKey = ref.expectedStateKey;
-  const blockBytes = helperData.signedBlockBytes
-    ? Buffer.from(helperData.signedBlockBytes, 'hex')
-    : await queryFabricBlockByTxID(hfsv.payload.sourceTxID, ref.channelID);
+  const blockBytes = await queryFabricBlockByTxID(hfsv.payload.sourceTxID, ref.channelID);
   const txVerification = verifyFabricBlockContainsTx({
     blockBytes,
     expectedTxId: hfsv.payload.sourceTxID,
@@ -381,4 +379,10 @@ async function verifyHFsv({ hxmsg, helperData = {} }) {
   };
 }
 
-module.exports = { verifyHFsv };
+module.exports = {
+  adapterID: 'tee-adapter-fabric-hfsv-v1',
+  sourceChainType: ChainType.FABRIC,
+  verificationMethod: VerificationMethod.H_FSV,
+  verifySourceFact: verifyHFsv,
+  verifyHFsv,
+};

@@ -1,6 +1,6 @@
 # Mercury-like 平等 TEE 共识改造说明
 
-> 更新：当前项目已经在此基础上继续实现了 Raft 风格的 RequestVote、AppendEntries、leader election、heartbeat、日志复制和 commitIndex。最新实现说明见 `docs/raft-tee-cluster-implementation.md`。本文保留为从单节点 TEE 过渡到多 TEE 平等验证的设计记录。
+> 更新：当前项目已经在此基础上继续实现了 Raft 风格的 RequestVote、AppendEntries、leader election、heartbeat、日志复制和 commitIndex，并删除了本文中的临时 `/internal/consensus/*` 接口。最新实现说明见 `docs/raft-tee-cluster-implementation.md`。本文保留为从单节点 TEE 过渡到多 TEE 平等验证的设计记录。
 
 ## 目标
 
@@ -16,9 +16,9 @@ TEE 集群包含 4 个节点，默认阈值为 3/4。任意 TEE 都可以接收 
 
 1. proposer 独立验证完整 h-xmsg。
 2. proposer 构造共识 entry。
-3. proposer 将 entry 发送给其他 TEE 的 `/internal/consensus/append`。
+3. proposer 将 entry 发送给其他 TEE 的 `/internal/raft/append-entries`。
 4. 每个 TEE 重新计算 entry 摘要，并独立执行 h-FSV 或 MELV-EF 验证。
-5. append 达到阈值后，proposer 发送 `/internal/consensus/commit`。
+5. AppendEntries 达到 Raft majority 后推进 `commitIndex`。
 6. 每个 TEE 只有在本地 entry committed 后才签名。
 7. proposer 汇总 committed TEE 的签名，返回 `teeClusterCertification`。
 

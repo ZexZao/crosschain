@@ -19,7 +19,7 @@ TEE deliveryDigest 签名
 |---|---|
 | `contracts/TargetContract.sol` | 改为轻量执行确认合约，只记录 `lastRequestID`、`lastPayloadHash`、`executionCount` |
 | `contracts/HXMsgLib.sol` | 新增 `HXMsgMinimal`、`hashDelivery()`、`hashDeliveryFromFull()` |
-| `contracts/HXMsgGateway.sol` | 新增 `executeHXMsgMinimal()` 主路径，验证压缩消息和 TEE delivery 签名 |
+| `contracts/HXMsgGateway.sol` | 新增轻量 h-xmsg 执行路径；当前主线已收敛为 `executeHXMsgMinimalCluster()` |
 | `shared/hxmsg/hash.js` | 新增 `toMinimalHXMsg()`、`computeHXMsgDeliveryDigest()` |
 | `tee-verifier/core/certification.js` | TEE 改为签名 `deliveryDigest`，同时保留 `hmsgDigest` |
 | `scripts/deploy.js` | 调整部署顺序，先部署 Gateway，再把 Gateway 地址注入 Target |
@@ -184,7 +184,7 @@ requestIDsByActorHash
 
 ### 6.4 减少了链上完整 h-xmsg 重算
 
-主路径 `executeHXMsgMinimal()` 不再链上重算完整 h-xmsg 的 header、endpoint、verification、binding、feedback 多层摘要。
+轻量主路径不再链上重算完整 h-xmsg 的 header、endpoint、verification、binding、feedback 多层摘要；当前项目通过 `executeHXMsgMinimalCluster()` 验证多 TEE quorum。
 
 链上只重算：
 

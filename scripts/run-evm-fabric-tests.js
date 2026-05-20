@@ -5,6 +5,7 @@ const axios = require('axios');
 const { ethers } = require('ethers');
 const { Gateway, Wallets } = require('fabric-network');
 const { buildHXMsgFromEvmReceipt } = require('../hxmsg-builder/evm-to-fabric');
+const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { writeJSON } = require('../shared/utils');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
@@ -76,6 +77,11 @@ async function main() {
         const invoke = requestEvmFabricCall(projectRoot, tc.payload);
         const receipt = await provider.getTransactionReceipt(invoke.txHash);
         const block = await provider.getBlock(receipt.blockNumber);
+        const receiptProof = await buildReceiptProof({
+          provider,
+          blockNumber: receipt.blockNumber,
+          txHash: invoke.txHash,
+        });
         const hxmsg = buildHXMsgFromEvmReceipt({
           deployment,
           receipt,
@@ -83,7 +89,10 @@ async function main() {
           businessPayload: tc.payload,
         });
         writeJSON('latest-evm-xmsg.json', hxmsg);
-        const teeResp = await axios.post(`${TEE_URL}/attest`, { hxmsg }, { timeout: 30000 });
+        const teeResp = await axios.post(`${TEE_URL}/attest`, {
+          hxmsg,
+          helperData: { evmReceiptProof: receiptProof },
+        }, { timeout: 30000 });
         const voucher = teeResp.data.teeClusterCertification || teeResp.data.teeCertification;
         const certs = voucher.certifications || [voucher];
         for (const cert of certs) {

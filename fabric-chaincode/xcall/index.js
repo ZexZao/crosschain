@@ -205,6 +205,14 @@ async function isTrustedTEE(ctx, address) {
   return data && data.length > 0;
 }
 
+function assertTEERegistrar(ctx) {
+  const allowedMSPs = ['Org1MSP'];
+  const mspid = ctx.clientIdentity.getMSPID();
+  if (!allowedMSPs.includes(mspid)) {
+    throw new Error(`MSP ${mspid} is not allowed to register TEE`);
+  }
+}
+
 async function verifyTEECertification(ctx, hxmsg, certEnvelope) {
   const hmsgDigest = computeHXMsgDigest(hxmsg);
   const certs = certEnvelope.certifications || (
@@ -320,6 +328,7 @@ class XCallContract extends Contract {
   }
 
   async RegisterTrustedTEE(ctx, teeAddress) {
+    assertTEERegistrar(ctx);
     const address = ethers.getAddress(teeAddress);
     await ctx.stub.putState(`trustedTEE:${address}`, Buffer.from(JSON.stringify({
       address,
@@ -401,118 +410,6 @@ class XCallContract extends Contract {
     ctx.stub.setEvent('HXMSG_EXECUTED', Buffer.from(JSON.stringify(record)));
 
     return JSON.stringify({ ok: true, requestID, status: 'executed', validTEECount: certResult.validTEECount });
-  }
-
-  async ExecuteInboundXMsg(ctx, xmsgJson, voucherJson) {
-    const xmsg = parseJson(xmsgJson, 'xmsgJson');
-    const voucher = parseJson(voucherJson, 'voucherJson');
-
-    if (ethers.keccak256(xmsg.payload) !== xmsg.payloadHash) {
-      throw new Error('payload hash mismatch');
-    }
-    if (
-      ethers.keccak256(voucher.teeReport) !==
-      ethers.keccak256(ethers.solidityPacked(['string', 'address'], ['SIM_TEE_REPORT', voucher.teePubKey]))
-    ) {
-      throw new Error('bad tee report');
-    }
-
-    const consumedKey = `inbound-consumed:${xmsg.requestID}`;
-    const consumed = await ctx.stub.getState(consumedKey);
-    if (consumed && consumed.length > 0) {
-      throw new Error('replay requestID');
-    }
-
-    const digest = computeDigest(xmsg, voucher.ctr, voucher.prevDigest, voucher.teePubKey);
-    const signer = ethers.recoverAddress(digest, voucher.teeSig);
-    if (ethers.getAddress(signer) !== ethers.getAddress(voucher.teePubKey)) {
-      throw new Error('invalid tee signature');
-    }
-
-    const parsedPayload = decodeBusinessPayload(xmsg.payload);
-    const record = {
-      requestID: xmsg.requestID,
-      txId: ctx.stub.getTxID(),
-      callerMSP: ctx.clientIdentity.getMSPID(),
-      srcChainID: xmsg.srcChainID,
-      srcHeight: xmsg.srcHeight,
-      payloadHash: xmsg.payloadHash,
-      op: parsedPayload.op,
-      recordId: parsedPayload.recordId,
-      actor: parsedPayload.actor,
-      amount: parsedPayload.amount,
-      metadata: parsedPayload.metadata,
-      requireAck: Boolean(parsedPayload.requireAck),
-      status: 'executed',
-      updatedAt: new Date().toISOString()
-    };
-
-    await ctx.stub.putState(consumedKey, Buffer.from('1'));
-    await ctx.stub.putState(`inbound:${xmsg.requestID}`, Buffer.from(JSON.stringify(record)));
-    ctx.stub.setEvent('INBOUND_XCALL_EXECUTED', Buffer.from(JSON.stringify(record)));
-
-    return JSON.stringify({
-      ok: true,
-      requestID: xmsg.requestID,
-      status: 'executed'
-    });
-  }
-
-  async ConfirmAckXMsg(ctx, xmsgJson, voucherJson) {
-    const xmsg = parseJson(xmsgJson, 'xmsgJson');
-    const voucher = parseJson(voucherJson, 'voucherJson');
-
-    if (ethers.keccak256(xmsg.payload) !== xmsg.payloadHash) {
-      throw new Error('payload hash mismatch');
-    }
-
-    // Legacy ACK path retained only until ACK is reintroduced as h-xmsg RESPONSE/ACK.
-    // attestDigest = keccak256(abi.encode(reportHash, teePubKey))
-    if (voucher.reportHash && voucher.teeSig) {
-      const attestDigest = ethers.keccak256(
-        ABI.encode(['bytes32', 'address'], [voucher.reportHash, voucher.teePubKey])
-      );
-      const signer = ethers.recoverAddress(attestDigest, voucher.teeSig);
-      if (ethers.getAddress(signer) !== ethers.getAddress(voucher.teePubKey)) {
-        throw new Error('invalid tee signature (attestDigest)');
-      }
-    }
-    // ── Legacy ECDSA path ( /verify-sign ) ──
-    else if (voucher.ctr !== undefined && voucher.prevDigest !== undefined) {
-      if (
-        ethers.keccak256(voucher.teeReport) !==
-        ethers.keccak256(ethers.solidityPacked(['string', 'address'], ['SIM_TEE_REPORT', voucher.teePubKey]))
-      ) {
-        throw new Error('bad tee report');
-      }
-      const digest = computeDigest(xmsg, voucher.ctr, voucher.prevDigest, voucher.teePubKey);
-      const signer = ethers.recoverAddress(digest, voucher.teeSig);
-      if (ethers.getAddress(signer) !== ethers.getAddress(voucher.teePubKey)) {
-        throw new Error('invalid tee signature (legacy)');
-      }
-    } else {
-      throw new Error('unrecognized voucher format');
-    }
-
-    const parsedPayload = decodeBusinessPayload(xmsg.payload);
-    const ackMetadata = parseJson(parsedPayload.metadata, 'ack metadata');
-    const ackRecord = {
-      ackRequestID: xmsg.requestID,
-      originRequestID: ackMetadata.originRequestID || parsedPayload.recordId,
-      status: ackMetadata.status || 'success',
-      relayTxHash: ackMetadata.relayTxHash || '',
-      targetOp: ackMetadata.targetOp || parsedPayload.op,
-      updatedAt: new Date().toISOString()
-    };
-
-    await ctx.stub.putState(`ack:${ackRecord.originRequestID}`, Buffer.from(JSON.stringify(ackRecord)));
-    ctx.stub.setEvent('XACK_CONFIRMED', Buffer.from(JSON.stringify(ackRecord)));
-
-    return JSON.stringify({
-      ok: true,
-      originRequestID: ackRecord.originRequestID,
-      status: ackRecord.status
-    });
   }
 
   async GetInboundStatus(ctx, requestID) {

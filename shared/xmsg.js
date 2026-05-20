@@ -1,5 +1,4 @@
 const { ethers } = require('ethers');
-const { bytes32FromText, nowMs } = require('./utils');
 
 function firstDefined(...values) {
   for (const value of values) {
@@ -89,54 +88,7 @@ function encodeBusinessPayload(rawPayload) {
   };
 }
 
-function createRequestId(namespace, nonce, srcHeight) {
-  return ethers.keccak256(
-    ethers.solidityPacked(
-      ['string', 'uint64', 'uint64'],
-      [namespace, Number(nonce), Number(srcHeight)]
-    )
-  );
-}
-
-function createBaseXmsg({
-  deployment,
-  rawPayload,
-  requestID,
-  srcChainName,
-  srcEmitterName,
-  dstChainName,
-  dstContract,
-  srcHeight,
-  nonce,
-  txId,
-  createdAt
-}) {
-  const { normalized, payloadHex } = encodeBusinessPayload(rawPayload);
-  const payloadHash = ethers.keccak256(payloadHex);
-
-  return {
-    version: 1,
-    chainType: (srcChainName || '').startsWith('fabric-') ? 0 : ((srcChainName || '').startsWith('evm-') ? 1 : 255),
-    finalityModel: (srcChainName || '').startsWith('fabric-') ? 0 : 1,
-    requiredConfirmations: (srcChainName || '').startsWith('fabric-') ? 1 : 6,
-    requestID,
-    srcChainID: bytes32FromText(srcChainName),
-    dstChainID: bytes32FromText(dstChainName || `evm-${deployment.chainId}`),
-    srcEmitter: bytes32FromText(srcEmitterName),
-    dstContract: dstContract || deployment.targetContract || ethers.ZeroAddress,
-    payload: payloadHex,
-    payloadHash,
-    srcHeight: Number(srcHeight),
-    nonce: Number(nonce),
-    txId,
-    createdAt: createdAt || new Date(nowMs()).toISOString(),
-    payloadDecoded: normalized
-  };
-}
-
 module.exports = {
   normalizeBusinessPayload,
-  encodeBusinessPayload,
-  createRequestId,
-  createBaseXmsg
+  encodeBusinessPayload
 };

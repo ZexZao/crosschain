@@ -194,7 +194,6 @@ async function main() {
 
       const captured = await waitForCapturedEvent(txId);
       const hxmsg = buildHXMsgFromFabricEvent({ deployment, ...captured });
-      hxmsg._blockData = { signedBlockBytes: captured.signedBlockBytes || '' };
       caseResult.requestID = hxmsg.header.requestID;
       caseResult.srcHeight = hxmsg.srcHeight;
       caseResult.hmsgDigest = hxmsg.hmsgDigest;

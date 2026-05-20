@@ -151,7 +151,7 @@ TEE 验证时（/attest，EVM路径）:
 | `tee-verifier/msp-certs/` | 新增：Fabric MSP 证书 |
 | `proof-builder/v3-proof-builder.js` | Fabric 附加 SignedBlock，EVM 附加 Block+Receipt |
 | `source-chain/fabric-listener.js` | 捕获 BlockEvent 保存区块 |
-| `consensus-aggregator/` | 无需修改 |
+| `consensus-aggregator/` | 已删除，当前主线不再使用旧 validator 多签聚合 |
 | `contracts/` | 无需修改 |
 | `relayer/` | 无需修改 |
 | `scripts/` | 更新 TEE 请求格式 |

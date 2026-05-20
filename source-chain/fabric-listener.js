@@ -73,18 +73,6 @@ function mapCapturedEvent(contractEvent, options) {
     throw new Error('Fabric listener could not extract txId or blockNumber from the contract event');
   }
 
-  // Capture raw block bytes from blockEvent if available
-  // (for TEE local verification without network requests)
-  let signedBlockBytes = '';
-  if (blockEvent) {
-    try {
-      const blockData = blockEvent.getBlockData ? blockEvent.getBlockData() : null;
-      if (blockData) {
-        signedBlockBytes = Buffer.isBuffer(blockData) ? blockData.toString('hex') : '';
-      }
-    } catch (_) { /* block data not available from this SDK version */ }
-  }
-
   const txEnvelopeBase64 = contractEvent.transactionData
     ? Buffer.from(contractEvent.transactionData).toString('base64')
     : '';
@@ -111,7 +99,6 @@ function mapCapturedEvent(contractEvent, options) {
     creatorIdBase64: txEvent?.identity?.idBytes
       ? Buffer.from(txEvent.identity.idBytes).toString('base64')
       : '',
-    signedBlockBytes,
     endorsements: [],
     rwsetHash: '',
     ordererMspId: 'OrdererMSP',

@@ -27,12 +27,12 @@
 
 | 模块 | 当前职责 | 改造方向 |
 |---|---|---|
-| `shared/xmsg.js` | 生成旧版 `XMsg`，编码业务 payload | 升级为 `shared/hxmsg/`，拆分 schema、hash、codec、binding |
+| `shared/xmsg.js` | 仅保留业务 payload ABI 编码 | h-xmsg 主结构已迁移到 `shared/hxmsg/` |
 | `proof-builder/` | 从 Fabric/EVM event 构造旧 XMsg 和 V3 proof | 改为 `hxmsg-builder/`，只构造 h-xmsg，不直接构造链上证明 |
 | `tee-verifier/server.js` | 模拟 TEE，查询 Fabric/EVM 并签名 | 拆为 TEE HTTP 层、dispatcher、Fabric adapter、EVM adapter、policy store |
 | `contracts/VerifierContractV3.sol` | ECDSA threshold + TEE 双路径验证 | 改为轻量 `HXMsgGateway`，只验证 TEE 证明、防重放、过期和执行摘要 |
 | `fabric-chaincode/xcall` | 发 Fabric event、处理 ACK | 增加状态化跨链记录、h-xmsg 入站执行、TEE 证明验证 |
-| `validator-node/` / `consensus-aggregator/` | 多签验证者签名路径 | 不作为新主线，可保留为对比实验或历史兼容 |
+| `validator-node/` / `consensus-aggregator/` | 旧多签验证者签名路径 | 已从当前项目删除 |
 | `source-chain/*-listener.js` | 监听源链并写 runtime 文件 | 改为链监听器 + h-xmsg builder + relayer 队列，减少文件耦合 |
 | `relayer/` | 提交旧 XMsg 到目标链或 Fabric | 改为通用 router，根据 target.chainType 选择提交器 |
 | `scripts/` | 部署、测试、实验脚本 | 增加 Ubuntu 主路径脚本，收敛重复 V3/MPC/legacy 脚本 |
@@ -462,7 +462,7 @@ runtime/requests/{requestID}/relay-result.json
 3. 增加 `InvokeHXMsg(hxmsgCompactJson, actualArgsJson, teeCertJson)`。
 4. 增加 TEE registry 状态，例如 `trustedTEE:{teeID}`。
 5. 增加 `crosschainExec:{requestID}` 执行记录。
-6. 保留 `ConfirmAckXMsg` 兼容旧 ACK，后续迁移为 `InvokeHXMsg` 的 RESPONSE/ACK 类型。
+6. 不保留旧 `ConfirmAckXMsg` ACK 路径；后续 ACK/RESPONSE 统一走 h-xmsg 入站执行模型。
 
 ## 10. 策略与配置管理
 
@@ -627,11 +627,11 @@ start:linux:forward
 | `proof-builder/evm-proof-builder.js` | legacy | 生成 `hybrid-v1` BLS proof |
 | `proof-builder/v3-proof-builder.js` | migration baseline | 可迁移为 h-xmsg builder |
 | `proof-builder/mpc-proof-builder.js` | comparison | MPC 实验路径 |
-| `consensus-aggregator/` | comparison/optional | 新主线不再依赖 validator 多签，可保留对比 |
-| `validator-node/` | comparison/optional | 同上 |
-| `evm-validator-node/` | comparison/optional | 同上 |
-| `relayer/index.js` | migrate | 旧多分支 relayer，后续拆 router/submitter |
-| `relayer/ack-to-fabric.js` | migrate | ACK 应统一为 h-xmsg msgType |
+| `consensus-aggregator/` | deleted | 新主线不再依赖 validator 多签 |
+| `validator-node/` | deleted | 新主线不再依赖 validator 多签 |
+| `evm-validator-node/` | deleted | 新主线不再依赖 validator 多签 |
+| `relayer/index.js` | deleted | 旧多分支 relayer 已删除，后续 router 基于 h-xmsg 主线重建 |
+| `relayer/ack-to-fabric.js` | deleted | 旧 ACK relay 已删除，ACK 应统一为 h-xmsg msgType |
 | `scripts/run-v3-test.js` | legacy/test-risk | ABI 可能已与 V3 合约不一致 |
 | `scripts/run-mpc-*` | comparison | MPC 对比实验保留 |
 | `start.ps1` | windows legacy | Ubuntu 不作为主入口 |

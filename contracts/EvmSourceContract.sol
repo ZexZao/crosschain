@@ -43,12 +43,6 @@ contract EvmSourceContract {
 
     event RequestStatusChanged(bytes32 indexed requestID, RequestStatus status);
 
-    event FabricCallRequested(
-        uint64 indexed nonce,
-        address indexed requester,
-        string payloadJson
-    );
-
     function submitRequest(
         bytes32 targetChainID,
         bytes32 targetDomainID,
@@ -128,10 +122,4 @@ contract EvmSourceContract {
         emit RequestStatusChanged(requestID, RequestStatus.Refunded);
     }
 
-    // Legacy event path retained for old scripts; stage 4 uses submitRequest().
-    function requestFabricCall(string calldata payloadJson) external returns (uint64) {
-        nonce += 1;
-        emit FabricCallRequested(nonce, msg.sender, payloadJson);
-        return nonce;
-    }
 }

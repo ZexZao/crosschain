@@ -16,7 +16,6 @@ services:
       - TEE_CLUSTER_THRESHOLD=3
       - TEE_CLUSTER_PEERS=http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000
       - EVM_RPC=http://evm-node:8545
-      - MELV_HEADER_HELPER_URL=http://tee-header-helper:9000
     volumes:
       - ./:/app
     command: sh -c "npm install && node tee-verifier/server.js"
@@ -33,7 +32,6 @@ services:
       - TEE_CLUSTER_THRESHOLD=3
       - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000
       - EVM_RPC=http://evm-node:8545
-      - MELV_HEADER_HELPER_URL=http://tee-header-helper:9000
     volumes:
       - ./:/app
     command: sh -c "npm install && node tee-verifier/server.js"
@@ -50,7 +48,6 @@ services:
       - TEE_CLUSTER_THRESHOLD=3
       - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-4:9000
       - EVM_RPC=http://evm-node:8545
-      - MELV_HEADER_HELPER_URL=http://tee-header-helper:9000
     volumes:
       - ./:/app
     command: sh -c "npm install && node tee-verifier/server.js"
@@ -67,27 +64,11 @@ services:
       - TEE_CLUSTER_THRESHOLD=3
       - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000
       - EVM_RPC=http://evm-node:8545
-      - MELV_HEADER_HELPER_URL=http://tee-header-helper:9000
     volumes:
       - ./:/app
     command: sh -c "npm install && node tee-verifier/server.js"
     ports:
       - "9003:9000"
-    depends_on:
-      - evm-node
-
-  tee-header-helper:
-    image: node:20
-    working_dir: /app
-    environment:
-      - TEE_NODE_ID=tee-header-helper
-      - PORT=9000
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "npm install && node tee-verifier/header-helper.js"
-    ports:
-      - "9010:9000"
     depends_on:
       - evm-node
 
@@ -112,59 +93,3 @@ services:
     depends_on:
       - evm-node
       - tee-verifier
-
-  evm-validator-node-1:
-    image: node:20
-    working_dir: /app
-    environment:
-      - PORT=9301
-      - VALIDATOR_ID=evm-validator-node-1
-      - VALIDATOR_LABEL=evm-localhost-validator-1
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "npm install && node evm-validator-node/server.js"
-    depends_on:
-      - evm-node
-
-  evm-validator-node-2:
-    image: node:20
-    working_dir: /app
-    environment:
-      - PORT=9302
-      - VALIDATOR_ID=evm-validator-node-2
-      - VALIDATOR_LABEL=evm-localhost-validator-2
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "npm install && node evm-validator-node/server.js"
-    depends_on:
-      - evm-node
-
-  evm-validator-node-3:
-    image: node:20
-    working_dir: /app
-    environment:
-      - PORT=9303
-      - VALIDATOR_ID=evm-validator-node-3
-      - VALIDATOR_LABEL=evm-localhost-validator-3
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "npm install && node evm-validator-node/server.js"
-    depends_on:
-      - evm-node
-
-  evm-validator-node-4:
-    image: node:20
-    working_dir: /app
-    environment:
-      - PORT=9304
-      - VALIDATOR_ID=evm-validator-node-4
-      - VALIDATOR_LABEL=evm-localhost-validator-4
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "npm install && node evm-validator-node/server.js"
-    depends_on:
-      - evm-node
