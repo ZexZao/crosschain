@@ -4,7 +4,7 @@
 
 ## 1. EVM 源端状态机测试
 
-| 用例编号 | 测试内容 | 最终状态 | 是否通过 | 耗时(ms) | submitAtomicRequest Gas | startChallenge Gas | completeWithResponse Gas | compensateAfterChallenge Gas | 总 Gas |
+| 用例编号 | 测试内容 | 最终状态 | 是否通过 | 耗时(ms) | submitHXMsgRequest Gas | startChallenge Gas | completeWithResponse Gas | compensateAfterChallenge Gas | 总 Gas |
 |---|---|---:|---|---:|---:|---:|---:|---:|---:|
 | CR-EVM-001 | Pending -> Completed | 3 | PASS | 15 | 367624 | - | 81979 | - | 449603 |
 | CR-EVM-002 | Pending -> Challenged -> Completed | 3 | PASS | 15 | 350536 | 32504 | 82115 | - | 465155 |

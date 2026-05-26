@@ -9,6 +9,10 @@ const {
   hashJson,
   hashBytes,
   buildDefaultFabricHFsvPolicy,
+  computeAtomicityHash,
+  computeFeedbackHash,
+  normalizeAtomicity,
+  normalizeFeedback,
 } = require('../../shared/hxmsg');
 
 function buildFabricSourceRecordHash(record) {
@@ -26,6 +30,8 @@ function buildFabricSourceRecordHash(record) {
     nonce: Number(record.nonce),
     expireAt: Number(record.expireAt),
     status: record.status,
+    feedbackHash: record.feedbackHash || computeFeedbackHash(record.feedback),
+    atomicityHash: record.atomicityHash || computeAtomicityHash(record.atomicity),
   });
 }
 
@@ -68,6 +74,8 @@ function buildFabricSourceFact({
     nonce: Number(rawPayload.nonce || nonce || 0),
     expireAt: Number(rawPayload.expireAt),
     status: rawPayload.status || 'COMMITTED',
+    feedbackHash: rawPayload.feedbackHash || computeFeedbackHash(rawPayload.feedback),
+    atomicityHash: rawPayload.atomicityHash || computeAtomicityHash(rawPayload.atomicity),
   };
   const fabricRef = buildFabricViewRef({ channelName, chaincodeId, requestID });
   const encodedRef = encodeJsonRef(fabricRef);
@@ -109,8 +117,29 @@ function buildFabricSourceFact({
   };
 }
 
+function assertFabricPolicyBinding({ rawPayload, feedback, atomicity }) {
+  const normalizedFeedback = normalizeFeedback(feedback);
+  const recordFeedback = normalizeFeedback(rawPayload.feedback);
+  if (normalizedFeedback.required !== recordFeedback.required
+      || normalizedFeedback.expectedMsgType !== recordFeedback.expectedMsgType
+      || normalizedFeedback.timeout !== recordFeedback.timeout
+      || String(normalizedFeedback.callbackRefHash).toLowerCase() !== String(recordFeedback.callbackRefHash).toLowerCase()) {
+    throw new Error('Fabric source feedback policy mismatch');
+  }
+  const feedbackHash = rawPayload.feedbackHash || computeFeedbackHash(recordFeedback);
+  if (computeFeedbackHash(normalizedFeedback).toLowerCase() !== String(feedbackHash).toLowerCase()) {
+    throw new Error('Fabric source feedback hash mismatch');
+  }
+  const atomicityHash = rawPayload.atomicityHash || computeAtomicityHash(rawPayload.atomicity);
+  const expectedAtomicityHash = computeAtomicityHash(normalizeAtomicity(atomicity));
+  if (expectedAtomicityHash.toLowerCase() !== String(atomicityHash).toLowerCase()) {
+    throw new Error('Fabric source atomicity policy mismatch');
+  }
+}
+
 module.exports = {
   buildFabricSourceRecordHash,
   buildFabricViewRef,
   buildFabricSourceFact,
+  assertFabricPolicyBinding,
 };

@@ -115,6 +115,34 @@ function normalizeAtomicity(atomicity = {}) {
   };
 }
 
+function computeFeedbackHash(feedback = {}) {
+  const normalized = normalizeFeedback(feedback);
+  return ethers.keccak256(
+    ABI.encode(
+      ['bool', 'uint8', 'uint64', 'bytes32'],
+      [normalized.required, normalized.expectedMsgType, normalized.timeout, normalized.callbackRefHash]
+    )
+  );
+}
+
+function computeAtomicityHash(atomicity = {}) {
+  const normalized = normalizeAtomicity(atomicity);
+  return ethers.keccak256(
+    ABI.encode(
+      ['bool', 'uint8', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'uint64'],
+      [
+        normalized.required,
+        normalized.mode,
+        normalized.commitmentType,
+        normalized.commitmentRefHash,
+        normalized.successActionHash,
+        normalized.failureActionHash,
+        normalized.challengeWindow
+      ]
+    )
+  );
+}
+
 function computeResponseDigest(response) {
   return ethers.keccak256(
     ABI.encode(
@@ -406,6 +434,16 @@ class XCallContract extends Contract {
     }
     const expireAt = Number(payload.expireAt || (createdAt + 3600));
 
+    const feedback = normalizeFeedback(payload.feedback || {
+      required: Boolean(businessPayload.requireAck || payload.requireAck),
+      expectedMsgType: businessPayload.requireAck || payload.requireAck ? 2 : 0,
+      timeout: businessPayload.requireAck || payload.requireAck ? expireAt : 0,
+      callbackRefHash: payload.callbackRefHash || ethers.ZeroHash
+    });
+    const atomicity = normalizeAtomicity(payload.atomicity);
+    const feedbackHash = computeFeedbackHash(feedback);
+    const atomicityHash = computeAtomicityHash(atomicity);
+
     const eventRecord = {
       requestID,
       sourceTxID: txId,
@@ -421,7 +459,11 @@ class XCallContract extends Contract {
       createdAt,
       expireAt,
       status: 'COMMITTED',
-      businessPayload
+      businessPayload,
+      feedback,
+      feedbackHash,
+      atomicity,
+      atomicityHash
     };
     const executionTargetChainID = payload.targetChainID || ethers.ZeroHash;
     const targetExecutionHash = ethers.keccak256(
@@ -430,14 +472,6 @@ class XCallContract extends Contract {
         [requestID, executionTargetChainID, targetObject, functionSelector, callDataHash, receiver]
       )
     );
-    const feedback = normalizeFeedback(payload.feedback || {
-      required: Boolean(businessPayload.requireAck || payload.requireAck),
-      expectedMsgType: businessPayload.requireAck || payload.requireAck ? 2 : 0,
-      timeout: businessPayload.requireAck || payload.requireAck ? expireAt : 0,
-      callbackRefHash: payload.callbackRefHash || ethers.ZeroHash
-    });
-    const atomicity = normalizeAtomicity(payload.atomicity);
-
     const eventPayload = {
       ...eventRecord,
       fabricTxId: txId,

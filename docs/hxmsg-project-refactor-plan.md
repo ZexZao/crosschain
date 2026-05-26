@@ -301,7 +301,7 @@ Pending -> Challenged -> Refunded
 并提供：
 
 ```text
-submitRequest(...)
+submitHXMsgRequest(..., policy)
 startChallenge(requestID)
 respondChallenge(requestID, teeResponse)
 refund(requestID)

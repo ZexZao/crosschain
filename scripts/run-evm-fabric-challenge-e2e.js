@@ -9,6 +9,7 @@ const {
   hashJson,
   AtomicityMode,
   CommitmentType,
+  FeedbackType,
 } = require('../shared/hxmsg');
 const { buildHXMsgFromEvmReceipt, FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 const { buildReceiptProof } = require('../shared/evm/receipt-proof');
@@ -96,7 +97,7 @@ async function main() {
     timing: { stageMs: stageTimings },
     gas: {
       evm: {
-        submitAtomicRequest: 0,
+        submitHXMsgRequest: 0,
         registerTEE: 0,
         completeWithResponse: 0,
         total: 0,
@@ -109,7 +110,7 @@ async function main() {
     const source = new ethers.Contract(
       deployment.evmSourceContract,
       [
-        'function submitAtomicRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,uint64,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64)) external returns (bytes32)',
+        'function submitHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
         'function completeWithResponse(bytes32,(bytes32,bytes32,uint8,bytes32,bytes32,bytes32),(bytes32,bytes32,address,uint64,bytes)[],uint256) external',
       ],
       signer
@@ -132,7 +133,16 @@ async function main() {
     const now = Number(latest.timestamp);
     const failureData = 'evm-fabric-failure';
     const receipt = await timed(stageTimings, 'evmSubmitAtomicRequestMs', async () => {
-      const tx = await source.submitAtomicRequest(
+      const atomicity = [
+        true,
+        AtomicityMode.COMMIT_OR_COMPENSATE,
+        CommitmentType.INTENT_ONLY,
+        ethers.keccak256(ethers.toUtf8Bytes('evm-fabric-commitment')),
+        ethers.keccak256(ethers.toUtf8Bytes('evm-fabric-success')),
+        ethers.keccak256(ethers.toUtf8Bytes(failureData)),
+        60,
+      ];
+      const tx = await source.submitHXMsgRequest(
         bytes32FromText(`fabric-${channelID}`),
         bytes32FromText('fabric-local-domain'),
         buildFabricTargetObject(channelID, chaincodeName),
@@ -141,20 +151,11 @@ async function main() {
         hashJson(normalized),
         bytes32FromText(normalized.actor),
         now + 3600,
-        now + 3600,
-        [
-          true,
-          AtomicityMode.COMMIT_OR_COMPENSATE,
-          CommitmentType.INTENT_ONLY,
-          ethers.keccak256(ethers.toUtf8Bytes('evm-fabric-commitment')),
-          ethers.keccak256(ethers.toUtf8Bytes('evm-fabric-success')),
-          ethers.keccak256(ethers.toUtf8Bytes(failureData)),
-          60,
-        ]
+        [true, FeedbackType.RESPONSE, now + 3600, ethers.ZeroHash, atomicity]
       );
       return tx.wait();
     });
-    result.gas.evm.submitAtomicRequest = gasOf(receipt);
+    result.gas.evm.submitHXMsgRequest = gasOf(receipt);
     const block = await timed(stageTimings, 'evmGetSourceBlockMs', () =>
       provider.getBlock(receipt.blockNumber));
     const sourceProof = await timed(stageTimings, 'buildEvmReceiptProofMs', () =>
@@ -233,7 +234,7 @@ async function main() {
         Number(responseVoucher.threshold)
       )).wait());
     result.gas.evm.completeWithResponse = gasOf(completeReceipt);
-    result.gas.evm.total = result.gas.evm.submitAtomicRequest + result.gas.evm.registerTEE + result.gas.evm.completeWithResponse;
+    result.gas.evm.total = result.gas.evm.submitHXMsgRequest + result.gas.evm.registerTEE + result.gas.evm.completeWithResponse;
     result.gas.totalEvmGas = result.gas.evm.total;
     const sourceView = new ethers.Contract(
       deployment.evmSourceContract,

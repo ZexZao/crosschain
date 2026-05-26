@@ -10,6 +10,7 @@ const {
   buildFabricSourceRecordHash,
   buildFabricViewRef,
   buildFabricSourceFact,
+  assertFabricPolicyBinding,
 } = require('./source-builders/fabric');
 
 function normalizeFabricEventPayload(rawPayload) {
@@ -68,9 +69,10 @@ function buildHXMsgFromFabricEvent({
     expectedMsgType: atomicity?.required ? FeedbackType.RESPONSE : (feedbackRequired ? FeedbackType.ACK : FeedbackType.NONE),
     timeout: atomicity?.required
       ? Number(rawPayload.feedback?.timeout || rawPayload.feedbackTimeout || rawPayload.expireAt)
-      : (feedbackRequired ? Number(rawPayload.feedbackTimeout || rawPayload.ackTimeout || rawPayload.expireAt) : 0),
-    callbackRefHash: rawPayload.callbackRefHash || ethers.ZeroHash,
+      : (feedbackRequired ? Number(rawPayload.feedback?.timeout || rawPayload.feedbackTimeout || rawPayload.ackTimeout || rawPayload.expireAt) : 0),
+    callbackRefHash: rawPayload.feedback?.callbackRefHash || rawPayload.callbackRefHash || ethers.ZeroHash,
   };
+  assertFabricPolicyBinding({ rawPayload, feedback, atomicity });
 
   return composeHXMsg({
     header: {
@@ -106,5 +108,6 @@ module.exports = {
   TARGET_EXECUTE_SELECTOR,
   buildFabricSourceRecordHash,
   buildFabricViewRef,
+  assertFabricPolicyBinding,
   buildHXMsgFromFabricEvent,
 };

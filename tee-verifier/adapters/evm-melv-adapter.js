@@ -6,7 +6,11 @@ const {
   decodeJsonRef,
   hashJson,
   buildDefaultEvmMelvPolicy,
+  computeAtomicityHash,
+  computeFeedbackHash,
   computeTargetExecutionHash,
+  normalizeAtomicity,
+  normalizeFeedback,
 } = require('../../shared/hxmsg');
 const {
   CROSS_CHAIN_CALL_TOPIC,
@@ -253,6 +257,19 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
   if (!sameHex(event.businessPayloadHash, hxmsg.payloadBinding.businessPayloadHash)) {
     throw new Error('EVM event businessPayloadHash mismatch');
   }
+  const feedback = normalizeFeedback(hxmsg.feedback);
+  if (feedback.required !== event.feedback.required
+      || feedback.expectedMsgType !== event.feedback.expectedMsgType
+      || feedback.timeout !== event.feedback.timeout
+      || !sameHex(feedback.callbackRefHash, event.feedback.callbackRefHash)) {
+    throw new Error('EVM event feedback policy mismatch');
+  }
+  if (!sameHex(computeFeedbackHash(feedback), event.feedbackHash)) {
+    throw new Error('EVM event feedback hash mismatch');
+  }
+  if (!sameHex(computeAtomicityHash(normalizeAtomicity(hxmsg.atomicity)), event.atomicityHash)) {
+    throw new Error('EVM event atomicity policy mismatch');
+  }
 
   const sourcePayloadHash = buildEvmSourcePayloadHash({
     requestID: event.requestID,
@@ -264,6 +281,8 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     callDataHash: event.callDataHash,
     nonce: event.nonce,
     expireAt: event.expireAt,
+    feedbackHash: event.feedbackHash,
+    atomicityHash: event.atomicityHash,
   });
   if (!sameHex(sourcePayloadHash, hxmsg.payloadBinding.sourcePayloadHash)) {
     throw new Error('EVM sourcePayloadHash mismatch');

@@ -22,6 +22,39 @@ function normalizeAtomicity(atomicity = {}) {
   };
 }
 
+function computeFeedbackHash(feedback = {}) {
+  const normalized = normalizeFeedback(feedback);
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bool', 'uint8', 'uint64', 'bytes32'],
+      [
+        normalized.required,
+        normalized.expectedMsgType,
+        normalized.timeout,
+        normalized.callbackRefHash,
+      ]
+    )
+  );
+}
+
+function computeAtomicityHash(atomicity = {}) {
+  const normalized = normalizeAtomicity(atomicity);
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bool', 'uint8', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'uint64'],
+      [
+        normalized.required,
+        normalized.mode,
+        normalized.commitmentType,
+        normalized.commitmentRefHash,
+        normalized.successActionHash,
+        normalized.failureActionHash,
+        normalized.challengeWindow,
+      ]
+    )
+  );
+}
+
 function hashJson(value) {
   return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(value)));
 }
@@ -105,32 +138,8 @@ function computeHXMsgDigest(hxmsg) {
     )
   );
   const feedback = normalizeFeedback(hxmsg.feedback);
-  const feedbackHash = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bool', 'uint8', 'uint64', 'bytes32'],
-      [
-        feedback.required,
-        feedback.expectedMsgType,
-        feedback.timeout,
-        feedback.callbackRefHash,
-      ]
-    )
-  );
-  const atomicity = normalizeAtomicity(hxmsg.atomicity);
-  const atomicityHash = ethers.keccak256(
-    ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bool', 'uint8', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'uint64'],
-      [
-        atomicity.required,
-        atomicity.mode,
-        atomicity.commitmentType,
-        atomicity.commitmentRefHash,
-        atomicity.successActionHash,
-        atomicity.failureActionHash,
-        atomicity.challengeWindow,
-      ]
-    )
-  );
+  const feedbackHash = computeFeedbackHash(feedback);
+  const atomicityHash = computeAtomicityHash(hxmsg.atomicity);
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ['bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32'],
@@ -250,6 +259,8 @@ module.exports = {
   hashBytes,
   normalizeFeedback,
   normalizeAtomicity,
+  computeFeedbackHash,
+  computeAtomicityHash,
   computeTargetExecutionHash,
   computeHXMsgDigest,
   computeHXMsgDeliveryDigest,

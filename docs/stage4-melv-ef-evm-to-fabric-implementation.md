@@ -31,7 +31,7 @@ TEE 独立验证源链交易和事件存在性
 
 | 文件 | 说明 |
 |---|---|
-| `contracts/EvmSourceContract.sol` | 新增 `submitRequest()`、标准事件、请求状态机和挑战响应接口骨架 |
+| `contracts/EvmSourceContract.sol` | 新增统一 `submitHXMsgRequest(..., policy)`、标准事件、请求状态机和挑战响应接口骨架 |
 | `hxmsg-builder/compose.js` | 通用 h-xmsg 组装器 |
 | `hxmsg-builder/source-builders/evm.js` | 从 EVM receipt/log 构造源链事实、sourceRef 和 MELV-EF policy |
 | `hxmsg-builder/target-builders/fabric.js` | 构造 Fabric 目标链 chaincode invoke 动作 |
@@ -40,7 +40,7 @@ TEE 独立验证源链交易和事件存在性
 | `tee-verifier/server.js` | 增加 source chain dispatcher、Raft RequestVote / AppendEntries / heartbeat / commit、`/raft/status` 和 committed signing 接口 |
 | `tee-verifier/core/certification.js` | Fabric 目标链签名 `hmsgDigest`，EVM 目标链签名 `deliveryDigest` |
 | `fabric-chaincode/xcall/index.js` | 新增 h-xmsg 入站执行、TEE 签名阈值验证、执行记录 |
-| `scripts/request-evm-fabric-call.js` | 调用新的 EVM `submitRequest()` |
+| `scripts/request-evm-fabric-call.js` | 调用统一 EVM `submitHXMsgRequest(..., policy)`，普通消息和 RESPONSE 消息仅策略字段不同 |
 | `scripts/run-evm-fabric-tests.js` | EVM -> Fabric 自动化测试 |
 | `scripts/run-evm-fabric-tests.js` | 当前 EVM -> Fabric 主线测试入口，直接完成 `/attest` + `ExecuteHXMsg` |
 | `docker-compose.yml` | 增加 4 个 TEE 节点 |

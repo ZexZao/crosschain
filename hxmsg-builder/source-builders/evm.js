@@ -9,10 +9,14 @@ const {
   bytes32FromText,
   chainIdToBytes32,
   buildEvmMelvPolicyRef,
+  computeAtomicityHash,
+  computeFeedbackHash,
+  normalizeAtomicity,
+  normalizeFeedback,
 } = require('../../shared/hxmsg');
 
-const CROSS_CHAIN_CALL_EVENT = 'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt)';
-const CROSS_CHAIN_CALL_TOPIC = ethers.id('CrossChainCallRequested(bytes32,address,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,uint64)');
+const CROSS_CHAIN_CALL_EVENT = 'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)';
+const CROSS_CHAIN_CALL_TOPIC = ethers.id('CrossChainCallRequested(bytes32,address,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,uint64,bool,uint8,uint64,bytes32,bytes32)');
 
 function buildEvmEventRef({
   txHash,
@@ -45,7 +49,7 @@ function buildEvmEventRefHash(ref) {
 function buildEvmSourcePayloadHash(record) {
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'address', 'address', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'uint64', 'uint64'],
+      ['bytes32', 'address', 'address', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'uint64', 'uint64', 'bytes32', 'bytes32'],
       [
         record.requestID,
         record.sender,
@@ -56,6 +60,8 @@ function buildEvmSourcePayloadHash(record) {
         record.callDataHash,
         record.nonce,
         record.expireAt,
+        record.feedbackHash,
+        record.atomicityHash,
       ]
     )
   );
@@ -76,6 +82,19 @@ function parseCrossChainCallLog(log) {
     receiver: parsed.args.receiver,
     nonce: Number(parsed.args.nonce),
     expireAt: Number(parsed.args.expireAt),
+    feedback: {
+      required: Boolean(parsed.args.feedbackRequired),
+      expectedMsgType: Number(parsed.args.expectedFeedbackMsgType),
+      timeout: Number(parsed.args.feedbackTimeout),
+      callbackRefHash: parsed.args.callbackRefHash,
+    },
+    feedbackHash: computeFeedbackHash({
+      required: Boolean(parsed.args.feedbackRequired),
+      expectedMsgType: Number(parsed.args.expectedFeedbackMsgType),
+      timeout: Number(parsed.args.feedbackTimeout),
+      callbackRefHash: parsed.args.callbackRefHash,
+    }),
+    atomicityHash: parsed.args.atomicityHash,
   };
 }
 
@@ -119,6 +138,8 @@ function buildEvmSourceFact({
     callDataHash: targetAction.callDataHash,
     nonce: parsed.nonce,
     expireAt: parsed.expireAt,
+    feedbackHash: parsed.feedbackHash,
+    atomicityHash: parsed.atomicityHash,
   };
   const { policy, policyID, policyHash } = buildEvmMelvPolicyRef({
     sourceChainID: `eip155:${chainId}`,
@@ -159,6 +180,20 @@ function buildEvmSourceFact({
   };
 }
 
+function assertEvmPolicyBinding({ parsed, feedback, atomicity }) {
+  const normalizedFeedback = normalizeFeedback(feedback);
+  if (normalizedFeedback.required !== parsed.feedback.required
+      || normalizedFeedback.expectedMsgType !== parsed.feedback.expectedMsgType
+      || normalizedFeedback.timeout !== parsed.feedback.timeout
+      || String(normalizedFeedback.callbackRefHash).toLowerCase() !== String(parsed.feedback.callbackRefHash).toLowerCase()) {
+    throw new Error('EVM event feedback policy mismatch');
+  }
+  const expectedAtomicityHash = computeAtomicityHash(normalizeAtomicity(atomicity));
+  if (expectedAtomicityHash.toLowerCase() !== String(parsed.atomicityHash).toLowerCase()) {
+    throw new Error('EVM event atomicity policy mismatch');
+  }
+}
+
 module.exports = {
   CROSS_CHAIN_CALL_EVENT,
   CROSS_CHAIN_CALL_TOPIC,
@@ -168,4 +203,5 @@ module.exports = {
   parseCrossChainCallLog,
   findCrossChainCallLog,
   buildEvmSourceFact,
+  assertEvmPolicyBinding,
 };

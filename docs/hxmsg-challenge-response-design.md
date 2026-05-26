@@ -10,7 +10,7 @@
 
 1. `shared/hxmsg` 已增加 `atomicity` 规范化与摘要计算，`atomicity` 参与 `hmsgDigest`。
 2. `shared/hxmsg` 已增加 `ResponseProof` 摘要计算。
-3. `contracts/EvmSourceContract.sol` 已实现 `submitAtomicRequest / startChallenge / completeWithResponse / compensateAfterChallenge`。
+3. `contracts/EvmSourceContract.sol` 已实现统一源链入口 `submitHXMsgRequest(..., policy)`，普通消息和需要 RESPONSE 的消息只通过 `feedback / atomicity` 策略字段区分，并保留 `startChallenge / completeWithResponse / compensateAfterChallenge` 状态收束接口。
 4. `fabric-chaincode/xcall/index.js` 已实现 `commitment:{requestID}`、`StartChallenge / CompleteWithResponse / CompensateAfterChallenge / QueryCommitment`。
 5. `tee-verifier/server.js` 已增加 `/attest-response`，对 `ResponseProof` 进行 TEE quorum certification。
 6. `scripts/run-challenge-response-tests.js` 已覆盖 EVM 侧核心状态机路径，结果保存到 `runtime/hxmsg-challenge-response-results.json`。
@@ -144,7 +144,7 @@ Application-managed atomicity
 也就是由具体源链业务合约或 Fabric chaincode 自己实现：
 
 ```text
-submitRequest / createCommitment
+submitHXMsgRequest / createCommitment
 completeWithResponse
 startChallenge
 compensateAfterChallenge

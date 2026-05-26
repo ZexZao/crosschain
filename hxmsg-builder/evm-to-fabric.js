@@ -4,6 +4,7 @@ const {
   MsgType,
   FeedbackType,
   hashJson,
+  normalizeFeedback,
 } = require('../shared/hxmsg');
 const { composeHXMsg } = require('./compose');
 const {
@@ -20,6 +21,7 @@ const {
   parseCrossChainCallLog,
   findCrossChainCallLog,
   buildEvmSourceFact,
+  assertEvmPolicyBinding,
 } = require('./source-builders/evm');
 
 function buildHXMsgFromEvmReceipt({
@@ -60,6 +62,14 @@ function buildHXMsgFromEvmReceipt({
   if (parsed.targetObject !== targetPart.targetAction.targetObject) throw new Error('event targetObject mismatch');
   if (parsed.functionSelector !== targetPart.targetAction.functionSelector) throw new Error('event functionSelector mismatch');
 
+  const feedback = normalizeFeedback(feedbackOverride || parsed.feedback || {
+    required: Boolean(normalized.requireAck),
+    expectedMsgType: normalized.requireAck ? FeedbackType.ACK : FeedbackType.NONE,
+    timeout: 0,
+    callbackRefHash: ethers.ZeroHash,
+  });
+  assertEvmPolicyBinding({ parsed, feedback, atomicity });
+
   const sourcePart = buildEvmSourceFact({
     chainId: deployment.chainId,
     sourceContract,
@@ -90,12 +100,7 @@ function buildHXMsgFromEvmReceipt({
       businessPayloadHash,
       targetExecutionHash: targetPart.targetExecutionHash,
     },
-    feedback: feedbackOverride || {
-      required: Boolean(normalized.requireAck),
-      expectedMsgType: normalized.requireAck ? FeedbackType.ACK : FeedbackType.NONE,
-      timeout: 0,
-      callbackRefHash: ethers.ZeroHash,
-    },
+    feedback,
     atomicity,
     callData: payloadHex,
     callDataDecoded: normalized,
@@ -115,5 +120,6 @@ module.exports = {
   buildEvmEventRefHash,
   buildEvmSourcePayloadHash,
   parseCrossChainCallLog,
+  assertEvmPolicyBinding,
   buildHXMsgFromEvmReceipt,
 };

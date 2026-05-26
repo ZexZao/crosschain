@@ -12,6 +12,10 @@ const {
   hashBytes,
   hashJson,
   buildDefaultFabricHFsvPolicy,
+  computeAtomicityHash,
+  computeFeedbackHash,
+  normalizeAtomicity,
+  normalizeFeedback,
   normalizePem,
 } = require('../../shared/hxmsg');
 const { buildFabricSourceRecordHash } = require('../../hxmsg-builder/fabric-to-evm');
@@ -307,12 +311,22 @@ function validatePayloadBinding({ hxmsg, ref, hfsv }) {
     throw new Error('businessPayloadHash mismatch');
   }
   if (record.businessPayload && hxmsg.feedback) {
-    const atomicRequired = Boolean(hxmsg.atomicity?.required);
-    const expectedFeedback = Boolean(record.businessPayload.requireAck) || atomicRequired;
-    if (Boolean(hxmsg.feedback.required) !== expectedFeedback) {
+    const feedback = normalizeFeedback(hxmsg.feedback);
+    const recordFeedback = normalizeFeedback(record.feedback);
+    if (feedback.required !== recordFeedback.required
+        || feedback.expectedMsgType !== recordFeedback.expectedMsgType
+        || feedback.timeout !== recordFeedback.timeout
+        || String(feedback.callbackRefHash).toLowerCase() !== String(recordFeedback.callbackRefHash).toLowerCase()) {
       throw new Error('feedback.required mismatch');
     }
-    if (atomicRequired && Number(hxmsg.feedback.expectedMsgType) !== 2) {
+    if (computeFeedbackHash(feedback).toLowerCase() !== String(record.feedbackHash).toLowerCase()) {
+      throw new Error('Fabric feedback hash mismatch');
+    }
+    if (computeAtomicityHash(normalizeAtomicity(hxmsg.atomicity)).toLowerCase() !== String(record.atomicityHash).toLowerCase()) {
+      throw new Error('Fabric atomicity policy mismatch');
+    }
+    const atomicRequired = Boolean(hxmsg.atomicity?.required);
+    if (atomicRequired && Number(feedback.expectedMsgType) !== 2) {
       throw new Error('atomic h-FSV message requires RESPONSE feedback');
     }
   }

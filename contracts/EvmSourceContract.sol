@@ -25,6 +25,7 @@ contract EvmSourceContract {
     }
 
     uint8 public constant RESPONSE_STATUS_EXECUTED = 1;
+    uint8 public constant MSG_TYPE_RESPONSE = 2;
 
     struct RequestRecord {
         address sender;
@@ -48,6 +49,14 @@ contract EvmSourceContract {
         RequestStatus status;
     }
 
+    struct RequestPolicy {
+        bool feedbackRequired;
+        uint8 expectedFeedbackMsgType;
+        uint64 feedbackTimeout;
+        bytes32 callbackRefHash;
+        HXMsgLib.Atomicity atomicity;
+    }
+
     uint64 public nonce;
     TEERegistry public immutable teeRegistry;
     mapping(bytes32 => RequestRecord) public requests;
@@ -64,7 +73,12 @@ contract EvmSourceContract {
         bytes32 businessPayloadHash,
         bytes32 receiver,
         uint64 nonce,
-        uint64 expireAt
+        uint64 expireAt,
+        bool feedbackRequired,
+        uint8 expectedFeedbackMsgType,
+        uint64 feedbackTimeout,
+        bytes32 callbackRefHash,
+        bytes32 atomicityHash
     );
 
     event RequestStatusChanged(bytes32 indexed requestID, RequestStatus from, RequestStatus to);
@@ -76,39 +90,7 @@ contract EvmSourceContract {
         teeRegistry = TEERegistry(registry);
     }
 
-    function submitRequest(
-        bytes32 targetChainID,
-        bytes32 targetDomainID,
-        bytes32 targetObject,
-        bytes4 functionSelector,
-        bytes32 callDataHash,
-        bytes32 businessPayloadHash,
-        bytes32 receiver,
-        uint64 expireAt
-    ) external returns (bytes32) {
-        return _submitRequest(
-            targetChainID,
-            targetDomainID,
-            targetObject,
-            functionSelector,
-            callDataHash,
-            businessPayloadHash,
-            receiver,
-            expireAt,
-            expireAt,
-            HXMsgLib.Atomicity({
-                required: false,
-                mode: 0,
-                commitmentType: uint8(CommitmentType.NONE),
-                commitmentRefHash: bytes32(0),
-                successActionHash: bytes32(0),
-                failureActionHash: bytes32(0),
-                challengeWindow: 0
-            })
-        );
-    }
-
-    function submitAtomicRequest(
+    function submitHXMsgRequest(
         bytes32 targetChainID,
         bytes32 targetDomainID,
         bytes32 targetObject,
@@ -117,14 +99,10 @@ contract EvmSourceContract {
         bytes32 businessPayloadHash,
         bytes32 receiver,
         uint64 expireAt,
-        uint64 feedbackTimeout,
-        HXMsgLib.Atomicity calldata atomicity
+        RequestPolicy calldata policy
     ) external returns (bytes32) {
-        require(atomicity.required, "atomicity required");
-        require(atomicity.mode == 1, "bad atomicity mode");
-        require(atomicity.challengeWindow > 0, "bad challenge window");
-        require(feedbackTimeout > block.timestamp, "bad feedback timeout");
-        return _submitRequest(
+        _validatePolicy(policy);
+        return _createRequest(
             targetChainID,
             targetDomainID,
             targetObject,
@@ -133,12 +111,36 @@ contract EvmSourceContract {
             businessPayloadHash,
             receiver,
             expireAt,
-            feedbackTimeout,
-            atomicity
+            policy
         );
     }
 
-    function _submitRequest(
+    function _validatePolicy(RequestPolicy calldata policy) internal view {
+        if (policy.feedbackRequired) {
+            require(policy.expectedFeedbackMsgType == MSG_TYPE_RESPONSE, "bad feedback type");
+            require(policy.feedbackTimeout > block.timestamp, "bad feedback timeout");
+        } else {
+            require(policy.expectedFeedbackMsgType == 0, "unexpected feedback type");
+            require(policy.feedbackTimeout == 0, "unexpected feedback timeout");
+            require(policy.callbackRefHash == bytes32(0), "unexpected callback ref");
+        }
+
+        if (policy.atomicity.required) {
+            require(policy.feedbackRequired, "atomicity requires feedback");
+            require(policy.expectedFeedbackMsgType == MSG_TYPE_RESPONSE, "atomicity requires response");
+            require(policy.atomicity.mode == 1, "bad atomicity mode");
+            require(policy.atomicity.challengeWindow > 0, "bad challenge window");
+        } else {
+            require(policy.atomicity.mode == 0, "unexpected atomicity mode");
+            require(policy.atomicity.commitmentType == uint8(CommitmentType.NONE), "unexpected commitment type");
+            require(policy.atomicity.commitmentRefHash == bytes32(0), "unexpected commitment ref");
+            require(policy.atomicity.successActionHash == bytes32(0), "unexpected success action");
+            require(policy.atomicity.failureActionHash == bytes32(0), "unexpected failure action");
+            require(policy.atomicity.challengeWindow == 0, "unexpected challenge window");
+        }
+    }
+
+    function _createRequest(
         bytes32 targetChainID,
         bytes32 targetDomainID,
         bytes32 targetObject,
@@ -147,8 +149,7 @@ contract EvmSourceContract {
         bytes32 businessPayloadHash,
         bytes32 receiver,
         uint64 expireAt,
-        uint64 feedbackTimeout,
-        HXMsgLib.Atomicity memory atomicity
+        RequestPolicy calldata policy
     ) internal returns (bytes32) {
         require(expireAt > block.timestamp, "expired request");
         nonce += 1;
@@ -181,15 +182,15 @@ contract EvmSourceContract {
             businessPayloadHash: businessPayloadHash,
             receiver: receiver,
             targetExecutionHash: targetExecutionHash,
-            commitmentRefHash: atomicity.commitmentRefHash,
-            successActionHash: atomicity.successActionHash,
-            failureActionHash: atomicity.failureActionHash,
+            commitmentRefHash: policy.atomicity.commitmentRefHash,
+            successActionHash: policy.atomicity.successActionHash,
+            failureActionHash: policy.atomicity.failureActionHash,
             nonce: nonce,
             expireAt: expireAt,
-            feedbackTimeout: feedbackTimeout,
-            challengeWindow: atomicity.challengeWindow,
+            feedbackTimeout: policy.feedbackTimeout,
+            challengeWindow: policy.atomicity.challengeWindow,
             challengeDeadline: 0,
-            commitmentType: CommitmentType(atomicity.commitmentType),
+            commitmentType: CommitmentType(policy.atomicity.commitmentType),
             status: RequestStatus.Pending
         });
 
@@ -204,7 +205,12 @@ contract EvmSourceContract {
             businessPayloadHash,
             receiver,
             nonce,
-            expireAt
+            expireAt,
+            policy.feedbackRequired,
+            policy.expectedFeedbackMsgType,
+            policy.feedbackTimeout,
+            policy.callbackRefHash,
+            HXMsgLib.hashAtomicity(policy.atomicity)
         );
         emit RequestStatusChanged(requestID, RequestStatus.None, RequestStatus.Pending);
         return requestID;

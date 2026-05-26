@@ -1,7 +1,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { ethers, network } = require('hardhat');
-const { computeResponseDigest, CommitmentType, AtomicityMode, ResponseStatus } = require('../shared/hxmsg');
+const { computeResponseDigest, CommitmentType, AtomicityMode, FeedbackType, ResponseStatus } = require('../shared/hxmsg');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 
@@ -44,7 +44,7 @@ async function submitAtomic(source, params = {}) {
     failureActionHash,
     params.challengeWindow || 5,
   ];
-  const tx = await source.submitAtomicRequest(
+  const tx = await source.submitHXMsgRequest(
     targetChainID,
     targetDomainID,
     targetObject,
@@ -53,8 +53,7 @@ async function submitAtomic(source, params = {}) {
     businessPayloadHash,
     receiver,
     now + 3600,
-    now + 2,
-    atomicity
+    [true, FeedbackType.RESPONSE, now + 2, ethers.ZeroHash, atomicity]
   );
   const receipt = await tx.wait();
   const event = receipt.logs
@@ -133,7 +132,7 @@ async function main() {
     test.status = Number(finalRecord.status);
     test.durationMs = nowMs() - startedMs;
     test.gas = {
-      submitAtomicRequest: req.submitGas,
+      submitHXMsgRequest: req.submitGas,
       completeWithResponse: gasOf(completeReceipt),
       total: req.submitGas + gasOf(completeReceipt),
     };
@@ -156,7 +155,7 @@ async function main() {
     test.status = Number(finalRecord.status);
     test.durationMs = nowMs() - startedMs;
     test.gas = {
-      submitAtomicRequest: req.submitGas,
+      submitHXMsgRequest: req.submitGas,
       startChallenge: gasOf(challengeReceipt),
       completeWithResponse: gasOf(completeReceipt),
       total: req.submitGas + gasOf(challengeReceipt) + gasOf(completeReceipt),
@@ -177,7 +176,7 @@ async function main() {
     test.status = Number(finalRecord.status);
     test.durationMs = nowMs() - startedMs;
     test.gas = {
-      submitAtomicRequest: req.submitGas,
+      submitHXMsgRequest: req.submitGas,
       startChallenge: gasOf(challengeReceipt),
       compensateAfterChallenge: gasOf(compensateReceipt),
       total: req.submitGas + gasOf(challengeReceipt) + gasOf(compensateReceipt),
@@ -198,7 +197,7 @@ async function main() {
       caseId: 'CR-EVM-004',
       ...result,
       durationMs: nowMs() - startedMs,
-      gas: { submitAtomicRequest: req.submitGas, revertedTxGas: 0, total: req.submitGas },
+      gas: { submitHXMsgRequest: req.submitGas, revertedTxGas: 0, total: req.submitGas },
     });
   }
 
@@ -219,7 +218,7 @@ async function main() {
       ...result,
       durationMs: nowMs() - startedMs,
       gas: {
-        submitAtomicRequest: req.submitGas,
+        submitHXMsgRequest: req.submitGas,
         startChallenge: gasOf(challengeReceipt),
         compensateAfterChallenge: gasOf(compensateReceipt),
         revertedTxGas: 0,
