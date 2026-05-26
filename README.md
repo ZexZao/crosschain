@@ -163,8 +163,11 @@ TargetContract.execute()
 | 路径 | 说明 |
 |---|---|
 | `shared/hxmsg/` | h-xmsg 枚举、编码、摘要计算和链上 tuple 转换 |
-| `hxmsg-builder/fabric-to-evm.js` | Fabric event/state 到 h-xmsg 的构造逻辑 |
-| `hxmsg-builder/evm-to-fabric.js` | EVM receipt/log 到 h-xmsg 的构造逻辑 |
+| `hxmsg-builder/compose.js` | 通用 h-xmsg 组装器，统一计算 `hmsgDigest` |
+| `hxmsg-builder/source-builders/` | 源链事实 builder，当前包含 Fabric h-FSV 与 EVM MELV-EF source fact |
+| `hxmsg-builder/target-builders/` | 目标链动作 builder，当前包含 EVM contract call 与 Fabric chaincode invoke |
+| `hxmsg-builder/fabric-to-evm.js` | Fabric -> EVM 兼容入口，内部组合 Fabric source builder 与 EVM target builder |
+| `hxmsg-builder/evm-to-fabric.js` | EVM -> Fabric 兼容入口，内部组合 EVM source builder 与 Fabric target builder |
 | `tee-verifier/adapters/fabric-hfsv-adapter.js` | h-FSV 验证主逻辑 |
 | `tee-verifier/adapters/evm-melv-adapter.js` | MELV-EF 验证主逻辑 |
 | `shared/evm/receipt-proof.js` | EVM receipt trie proof 生成与验证 |

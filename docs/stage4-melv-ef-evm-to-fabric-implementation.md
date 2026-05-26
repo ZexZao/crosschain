@@ -17,7 +17,7 @@ TEE 独立验证源链交易和事件存在性
 | 能力 | 当前状态 |
 |---|---|
 | EVM 标准源事件 | 已实现 `CrossChainCallRequested` |
-| EVM -> Fabric h-xmsg builder | 已实现 `hxmsg-builder/evm-to-fabric.js` |
+| EVM -> Fabric h-xmsg builder | 已实现 `hxmsg-builder/evm-to-fabric.js` 兼容入口，内部使用 `source-builders/evm.js` 和 `target-builders/fabric.js` |
 | MELV-EF TEE adapter | 已实现 `tee-verifier/adapters/evm-melv-adapter.js`，要求 receipt MPT proof |
 | EVM receipt MPT proof | 已实现 `shared/evm/receipt-proof.js` |
 | TEE header window | 已实现，每个 TEE 独立维护有限 EVM header window |
@@ -32,7 +32,10 @@ TEE 独立验证源链交易和事件存在性
 | 文件 | 说明 |
 |---|---|
 | `contracts/EvmSourceContract.sol` | 新增 `submitRequest()`、标准事件、请求状态机和挑战响应接口骨架 |
-| `hxmsg-builder/evm-to-fabric.js` | 从 EVM receipt/log 构造完整 h-xmsg |
+| `hxmsg-builder/compose.js` | 通用 h-xmsg 组装器 |
+| `hxmsg-builder/source-builders/evm.js` | 从 EVM receipt/log 构造源链事实、sourceRef 和 MELV-EF policy |
+| `hxmsg-builder/target-builders/fabric.js` | 构造 Fabric 目标链 chaincode invoke 动作 |
+| `hxmsg-builder/evm-to-fabric.js` | EVM -> Fabric 兼容入口，组合 EVM source builder 与 Fabric target builder |
 | `tee-verifier/adapters/evm-melv-adapter.js` | 验证 EVM receipt MPT proof、block header window、log、确认数/finalized checkpoint 和 h-xmsg 绑定关系 |
 | `tee-verifier/server.js` | 增加 source chain dispatcher、Raft RequestVote / AppendEntries / heartbeat / commit、`/raft/status` 和 committed signing 接口 |
 | `tee-verifier/core/certification.js` | Fabric 目标链签名 `hmsgDigest`，EVM 目标链签名 `deliveryDigest` |
