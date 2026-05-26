@@ -10,6 +10,18 @@ function normalizeFeedback(feedback = {}) {
   };
 }
 
+function normalizeAtomicity(atomicity = {}) {
+  return {
+    required: Boolean(atomicity.required),
+    mode: Number(atomicity.mode || 0),
+    commitmentType: Number(atomicity.commitmentType || 0),
+    commitmentRefHash: atomicity.commitmentRefHash || ethers.ZeroHash,
+    successActionHash: atomicity.successActionHash || ethers.ZeroHash,
+    failureActionHash: atomicity.failureActionHash || ethers.ZeroHash,
+    challengeWindow: Number(atomicity.challengeWindow || 0),
+  };
+}
+
 function hashJson(value) {
   return ethers.keccak256(ethers.toUtf8Bytes(stableStringify(value)));
 }
@@ -104,10 +116,25 @@ function computeHXMsgDigest(hxmsg) {
       ]
     )
   );
+  const atomicity = normalizeAtomicity(hxmsg.atomicity);
+  const atomicityHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bool', 'uint8', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'uint64'],
+      [
+        atomicity.required,
+        atomicity.mode,
+        atomicity.commitmentType,
+        atomicity.commitmentRefHash,
+        atomicity.successActionHash,
+        atomicity.failureActionHash,
+        atomicity.challengeWindow,
+      ]
+    )
+  );
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32'],
-      [headerHash, endpointHash, actionHash, verificationHash, bindingHash, feedbackHash]
+      ['bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32'],
+      [headerHash, endpointHash, actionHash, verificationHash, bindingHash, feedbackHash, atomicityHash]
     )
   );
 }
@@ -131,6 +158,22 @@ function toMinimalHXMsg(hxmsg) {
     feedback.callbackRefHash,
     hxmsg.header.expireAt,
   ];
+}
+
+function computeResponseDigest(response) {
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'bytes32'],
+      [
+        response.originRequestID,
+        response.originHmsgDigest,
+        Number(response.responseStatus || 0),
+        response.targetExecutionHash,
+        response.targetProofRefHash || ethers.ZeroHash,
+        response.responsePayloadHash || ethers.ZeroHash,
+      ]
+    )
+  );
 }
 
 function computeHXMsgDeliveryDigest(hxmsg) {
@@ -206,9 +249,11 @@ module.exports = {
   hashJson,
   hashBytes,
   normalizeFeedback,
+  normalizeAtomicity,
   computeTargetExecutionHash,
   computeHXMsgDigest,
   computeHXMsgDeliveryDigest,
+  computeResponseDigest,
   toMinimalHXMsg,
   toOnChainHXMsg,
 };

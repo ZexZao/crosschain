@@ -3,9 +3,11 @@ const { ethers } = require('ethers');
 const fs = require('fs-extra');
 const path = require('path');
 const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
-const { ChainType, computeHXMsgDigest, computeHXMsgDeliveryDigest } = require('../shared/hxmsg');
+const { ChainType, computeHXMsgDigest, computeHXMsgDeliveryDigest, computeResponseDigest } = require('../shared/hxmsg');
 const { verifySourceFact } = require('./adapters');
-const { buildCertification } = require('./core/certification');
+const { buildCertification, buildDigestCertification } = require('./core/certification');
+const { verifyReceiptProof } = require('../shared/evm/receipt-proof');
+const { maintainHeaderWindow } = require('./adapters/evm-melv-adapter');
 
 ensureRuntime();
 const app = express();
@@ -66,15 +68,12 @@ let state = readJSON(teeStateFile);
 if (!state) {
   const configuredKey = process.env.TEE_PRIVATE_KEY;
   const wallet = configuredKey ? new ethers.Wallet(configuredKey) : ethers.Wallet.createRandom();
-  state = { privateKey: wallet.privateKey, address: wallet.address, ctr: 0, lastDigest: ethers.ZeroHash, mode: 'normal' };
+  state = { privateKey: wallet.privateKey, address: wallet.address };
   writeJSON(teeStateFile, state);
 } else if (!state.privateKey && state.sessions?.default?.privateKey) {
   state = {
     privateKey: state.sessions.default.privateKey,
     address: state.sessions.default.address,
-    ctr: state.sessions.default.ctr || 0,
-    lastDigest: state.sessions.default.lastDigest || ethers.ZeroHash,
-    mode: state.mode || 'normal',
     sessions: state.sessions,
   };
   writeJSON(teeStateFile, state);
@@ -194,6 +193,32 @@ function makeConsensusEntry({ hxmsg, helperData, proposerID }) {
   };
 }
 
+function makeDigestConsensusEntry({ requestID, digest, response, helperData, proposerID }) {
+  const index = lastLogIndex() + 1;
+  const term = Number(consensusState.currentTerm || 1);
+  const signatureDigestType = 'responseDigest';
+  const entryDigest = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
+      [term, index, requestID, digest, signatureDigestType]
+    )
+  );
+  return {
+    index,
+    term,
+    proposerID,
+    requestID,
+    hmsgDigest: digest,
+    signingDigest: digest,
+    signatureDigestType,
+    entryDigest,
+    status: 'pending',
+    response,
+    helperData: helperData || {},
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+}
+
 function appendConsensusEntry(entry) {
   const existing = consensusState.log.find((item) => item.entryDigest === entry.entryDigest);
   if (existing) return existing;
@@ -242,6 +267,99 @@ function assertEntryMatchesHXMsg(entry, hxmsg) {
   }
 }
 
+function assertEntryMatchesDigest(entry, requestID, digest) {
+  if (entry.requestID !== requestID) throw new Error('consensus request mismatch');
+  if (String(entry.hmsgDigest).toLowerCase() !== String(digest).toLowerCase()) {
+    throw new Error('consensus digest mismatch');
+  }
+  if (String(entry.signingDigest).toLowerCase() !== String(digest).toLowerCase()) {
+    throw new Error('consensus signing digest mismatch');
+  }
+  const expectedEntryDigest = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
+      [Number(entry.term), Number(entry.index), requestID, digest, entry.signatureDigestType]
+    )
+  );
+  if (String(entry.entryDigest).toLowerCase() !== expectedEntryDigest.toLowerCase()) {
+    throw new Error('consensus entry digest mismatch');
+  }
+}
+
+function sameHex(a, b) {
+  return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+}
+
+async function verifyResponseFactLocally({ response, helperData = {} }) {
+  if (!response) throw new Error('response is required');
+  const responseDigest = computeResponseDigest(response);
+  const originHxmsg = helperData.originHxmsg;
+  if (originHxmsg) {
+    const originDigest = originHxmsg.hmsgDigest || computeHXMsgDigest(originHxmsg);
+    if (!sameHex(originDigest, response.originHmsgDigest)) throw new Error('response originHmsgDigest mismatch');
+    if (!sameHex(originHxmsg.header.requestID, response.originRequestID)) throw new Error('response originRequestID mismatch');
+    if (!sameHex(originHxmsg.payloadBinding.targetExecutionHash, response.targetExecutionHash)) {
+      throw new Error('response targetExecutionHash mismatch');
+    }
+  }
+  if (Number(response.responseStatus) !== 1) throw new Error('only EXECUTED responses are currently supported');
+
+  if (helperData.evmExecutionReceipt) {
+    const proofEnvelope = helperData.evmExecutionReceipt;
+    const receipt = proofEnvelope.receipt || proofEnvelope;
+    if (proofEnvelope.receiptProof && proofEnvelope.blockHeader) {
+      const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || helperData.evmRpc || 'http://evm-node:8545');
+      const storedHeader = await maintainHeaderWindow({
+        provider,
+        chainState,
+        targetBlockNumber: Number(receipt.blockNumber),
+        targetBlockHash: receipt.blockHash,
+        committeeHeaderUpdate: helperData.committeeHeaderUpdate || proofEnvelope.committeeHeaderUpdate,
+        expectedChainID: helperData.evmChainID || `eip155:${Number(process.env.EVM_CHAIN_ID || 31337)}`,
+      });
+      await verifyReceiptProof({
+        receiptsRoot: storedHeader.receiptsRoot,
+        transactionIndex: Number(receipt.transactionIndex ?? receipt.index),
+        proof: proofEnvelope.receiptProof,
+        expectedReceipt: receipt,
+      });
+      saveChainState();
+    } else if (!helperData.allowUnprovedExecutionReceipt) {
+      throw new Error('EVM execution receipt proof is required');
+    }
+    if (Number(receipt.status) !== 1) throw new Error('EVM target execution receipt failed');
+    const eventTopic = ethers.id('HXMsgAccepted(bytes32,address,address)');
+    const accepted = (receipt.logs || []).find((log) => {
+      if (!sameHex((log.topics || [])[0], eventTopic)) return false;
+      return sameHex((log.topics || [])[1], response.originRequestID);
+    });
+    if (!accepted) throw new Error('EVM HXMsgAccepted log for response origin not found');
+    const proofRef = ethers.keccak256(
+      ethers.AbiCoder.defaultAbiCoder().encode(
+        ['bytes32', 'uint64', 'bytes32'],
+        [receipt.transactionHash || receipt.hash, Number(receipt.blockNumber), receipt.blockHash]
+      )
+    );
+    if (!sameHex(response.targetProofRefHash, proofRef)) throw new Error('response targetProofRefHash mismatch');
+  } else if (helperData.fabricExecutionRecord) {
+    const record = helperData.fabricExecutionRecord;
+    if (record.requestID !== response.originRequestID) throw new Error('Fabric execution record requestID mismatch');
+    if (record.status !== 'executed') throw new Error('Fabric execution record is not executed');
+    const proofRef = ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(record)));
+    if (!sameHex(response.targetProofRefHash, proofRef)) throw new Error('response targetProofRefHash mismatch');
+  } else if (!helperData.allowDigestOnlyResponse) {
+    throw new Error('response target execution proof is required');
+  }
+
+  return {
+    adapter: 'response-proof',
+    verified: true,
+    responseDigest,
+    originRequestID: response.originRequestID,
+    responseStatus: response.responseStatus,
+  };
+}
+
 async function verifyHXMsgLocally({ hxmsg, helperData }) {
   hxmsg.hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
   if (Number(hxmsg.header.expireAt) < Math.floor(Date.now() / 1000)) {
@@ -265,6 +383,20 @@ function buildCommittedCertification({ hxmsg, entry }) {
   return buildCertification({
     hxmsg,
     privateKey: state.privateKey,
+  });
+}
+
+function buildCommittedDigestCertification({ requestID, digest, entry }) {
+  const committedEntry = consensusState.log.find((item) => item.entryDigest === entry.entryDigest);
+  if (!committedEntry || committedEntry.status !== 'committed') {
+    throw new Error('cannot sign before consensus commit');
+  }
+  assertEntryMatchesDigest(committedEntry, requestID, digest);
+  return buildDigestCertification({
+    requestID,
+    digest,
+    privateKey: state.privateKey,
+    signatureDigestType: committedEntry.signatureDigestType || 'responseDigest',
   });
 }
 
@@ -306,13 +438,13 @@ async function startElection() {
   return { elected: false, votes, voteResponses };
 }
 
-async function ensureRaftLeaderOrForward(originalBody) {
+async function ensureRaftLeaderOrForward(originalBody, routePath = '/attest') {
   if (consensusState.role === 'leader') return { localLeader: true };
   const leader = consensusState.leaderID
     ? clusterPeerDefs().find((peer) => peer.id === consensusState.leaderID)
     : null;
   if (leader) {
-    const resp = await fetch(`${leader.url}/attest`, {
+    const resp = await fetch(`${leader.url}${routePath}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(originalBody),
@@ -420,7 +552,13 @@ async function replicateEntryToRaftQuorum(entry) {
 }
 
 async function collectCommittedCertifications({ hxmsg, committedEntry, commitAcks }) {
-  const localCommitCert = buildCommittedCertification({ hxmsg, entry: committedEntry });
+  const localCommitCert = hxmsg
+    ? buildCommittedCertification({ hxmsg, entry: committedEntry })
+    : buildCommittedDigestCertification({
+      requestID: committedEntry.requestID,
+      digest: committedEntry.hmsgDigest,
+      entry: committedEntry,
+    });
   const certifications = [localCommitCert];
   const certAcks = [{ nodeID: teeNodeID, signed: true, teeCertification: localCommitCert }];
   await Promise.all(clusterPeerDefs().map(async (peer) => {
@@ -441,6 +579,66 @@ async function collectCommittedCertifications({ hxmsg, committedEntry, commitAck
     }
   }));
   return { certifications, certAcks };
+}
+
+async function collectClusterDigestCertifications({ response, helperData, localResult }) {
+  const threshold = clusterThreshold();
+  const requestID = response.originRequestID;
+  const digest = computeResponseDigest(response);
+  const entry = makeDigestConsensusEntry({
+    requestID,
+    digest,
+    response,
+    helperData,
+    proposerID: teeNodeID,
+  });
+  const raftResult = await replicateEntryToRaftQuorum(entry);
+  const verificationResults = [{ nodeID: teeNodeID, ...localResult.verificationResult }];
+  const accepted = (raftResult.appendAcks || []).filter((ack) => ack.accepted);
+  if (!raftResult.committed || accepted.length < raftMajority()) {
+    return {
+      algorithm: 'mercury-raft-tee-cluster-response',
+      proposerID: teeNodeID,
+      term: entry.term,
+      index: entry.index,
+      entryDigest: entry.entryDigest,
+      threshold,
+      raftMajority: raftMajority(),
+      totalConfigured: clusterSize(),
+      reached: accepted.length,
+      quorumReached: false,
+      hmsgDigest: digest,
+      certifications: [],
+      appendAcks: raftResult.appendAcks || [],
+      verificationResults,
+    };
+  }
+  const { certifications, certAcks } = await collectCommittedCertifications({
+    hxmsg: null,
+    committedEntry: raftResult.committedEntry,
+    commitAcks: raftResult.commitAcks || [],
+  });
+  return {
+    algorithm: 'mercury-raft-tee-cluster-response',
+    proposerID: teeNodeID,
+    leaderID: teeNodeID,
+    term: raftResult.committedEntry.term,
+    index: raftResult.committedEntry.index,
+    entryDigest: raftResult.committedEntry.entryDigest,
+    threshold,
+    raftMajority: raftMajority(),
+    totalConfigured: clusterSize(),
+    reached: certifications.length,
+    quorumReached: certifications.length >= threshold,
+    hmsgDigest: digest,
+    signingDigest: digest,
+    signatureDigestType: 'responseDigest',
+    certifications,
+    appendAcks: raftResult.appendAcks || [],
+    commitAcks: raftResult.commitAcks || [],
+    certAcks,
+    verificationResults,
+  };
 }
 
 async function collectClusterAttestations({ hxmsg, helperData, localResult }) {
@@ -525,27 +723,6 @@ app.get('/raft/status', (_req, res) => {
   });
 });
 
-app.post('/mode', (req, res) => {
-  state.mode = req.body.mode || 'normal';
-  writeJSON(teeStateFile, state);
-  res.json({ ok: true, mode: state.mode });
-});
-
-app.post('/internal/attest-node', async (req, res) => {
-  try {
-    const hxmsg = req.body.hxmsg;
-    if (!hxmsg) throw new Error('hxmsg is required');
-    const result = await verifyHXMsgLocally({
-      hxmsg,
-      helperData: req.body.helperData || req.body.blockData || {},
-    });
-    res.json({ nodeID: teeNodeID, ...result });
-  } catch (error) {
-    console.error(`[${teeNodeID}] internal attest error:`, error.message);
-    res.status(500).json({ nodeID: teeNodeID, error: error.message });
-  }
-});
-
 app.post('/internal/raft/request-vote', (req, res) => {
   try {
     const {
@@ -610,12 +787,23 @@ app.post('/internal/raft/append-entries', async (req, res) => {
 
     const verificationResults = [];
     for (const entry of entries) {
-      if (!entry.hxmsg) throw new Error('raft entry missing hxmsg');
-      assertEntryMatchesHXMsg(entry, entry.hxmsg);
-      const localResult = await verifyHXMsgLocally({
-        hxmsg: entry.hxmsg,
-        helperData: entry.helperData || {},
-      });
+      let localResult;
+      if (entry.hxmsg) {
+        assertEntryMatchesHXMsg(entry, entry.hxmsg);
+        localResult = await verifyHXMsgLocally({
+          hxmsg: entry.hxmsg,
+          helperData: entry.helperData || {},
+        });
+      } else if (entry.response) {
+        const digest = computeResponseDigest(entry.response);
+        assertEntryMatchesDigest(entry, entry.response.originRequestID, digest);
+        localResult = { verificationResult: await verifyResponseFactLocally({
+          response: entry.response,
+          helperData: entry.helperData || {},
+        }) };
+      } else {
+        throw new Error('raft entry missing hxmsg or response');
+      }
       verificationResults.push({ entryDigest: entry.entryDigest, ...localResult.verificationResult });
       appendConsensusEntry(entry);
     }
@@ -654,7 +842,9 @@ app.post('/internal/raft/sign-committed', (req, res) => {
     const entry = consensusState.log.find((item) => item.entryDigest === entryDigest);
     if (!entry) throw new Error(`entry not found: ${entryDigest}`);
     if (entry.status !== 'committed') throw new Error('entry is not committed');
-    const teeCertification = buildCommittedCertification({ hxmsg: entry.hxmsg, entry });
+    const teeCertification = entry.hxmsg
+      ? buildCommittedCertification({ hxmsg: entry.hxmsg, entry })
+      : buildCommittedDigestCertification({ requestID: entry.requestID, digest: entry.hmsgDigest, entry });
     res.json({
       nodeID: teeNodeID,
       entryDigest,
@@ -699,6 +889,40 @@ app.post('/attest', async (req, res) => {
     throw new Error('h-xmsg is required');
   } catch (error) {
     console.error('[attest] Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/attest-response', async (req, res) => {
+  try {
+    if (!req.body?.response) throw new Error('response is required');
+    const leaderRoute = await ensureRaftLeaderOrForward(req.body, '/attest-response');
+    if (!leaderRoute.localLeader) {
+      res.status(leaderRoute.status).json(leaderRoute.body);
+      return;
+    }
+    const response = req.body.response;
+    const localVerification = await verifyResponseFactLocally({
+      response,
+      helperData: req.body.helperData || {},
+    });
+    const teeClusterCertification = await collectClusterDigestCertifications({
+      response,
+      helperData: req.body.helperData || {},
+      localResult: { verificationResult: localVerification },
+    });
+    if (!teeClusterCertification.quorumReached) {
+      throw new Error(`TEE cluster quorum not reached: ${teeClusterCertification.reached}/${teeClusterCertification.threshold}`);
+    }
+    res.json({
+      responseDigest: computeResponseDigest(response),
+      teePubKey: teeClusterCertification.certifications[0].teeAddress,
+      teeCertification: teeClusterCertification.certifications[0],
+      teeClusterCertification,
+      verificationResult: localVerification,
+    });
+  } catch (error) {
+    console.error('[attest-response] Error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

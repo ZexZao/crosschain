@@ -30,6 +30,28 @@ const FeedbackType = Object.freeze({
   CUSTOM: 255,
 });
 
+const AtomicityMode = Object.freeze({
+  NONE: 0,
+  COMMIT_OR_COMPENSATE: 1,
+  CUSTOM: 255,
+});
+
+const CommitmentType = Object.freeze({
+  NONE: 0,
+  INTENT_ONLY: 1,
+  STATE_LOCK: 2,
+  TOKEN_ESCROW: 3,
+  PERMISSION_LOCK: 4,
+  CUSTOM: 255,
+});
+
+const ResponseStatus = Object.freeze({
+  UNKNOWN: 0,
+  EXECUTED: 1,
+  FAILED: 2,
+  REVERTED: 3,
+});
+
 const ActionType = Object.freeze({
   UNKNOWN: 0,
   CONTRACT_CALL: 1,
@@ -73,6 +95,9 @@ module.exports = {
   RefType,
   MsgType,
   FeedbackType,
+  AtomicityMode,
+  CommitmentType,
+  ResponseStatus,
   ActionType,
   FinalityModel,
   VerificationMethod,

@@ -18,8 +18,9 @@ function buildEvmMelvPolicy({
     allowedEventSignatures: ['CrossChainCallRequested'],
     requiredConfirmations: Number(requiredConfirmations),
     finalityMode,
-    receiptProofRequired: false,
-    headerMaintainer: process.env.MELV_HEADER_MAINTAINER || 'single-simulated-helper-tee',
+    receiptProofRequired: true,
+    headerMaintainer: process.env.MELV_HEADER_MAINTAINER || 'committee-certified-header-window',
+    headerCommitteeID: process.env.HEADER_COMMITTEE_ID || 'evm-header-committee-local-v1',
   };
 }
 

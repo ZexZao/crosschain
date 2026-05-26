@@ -5,6 +5,8 @@ const { encodeBusinessPayload } = require('../shared/xmsg');
 const {
   bytes32FromText,
   hashJson,
+  AtomicityMode,
+  CommitmentType,
 } = require('../shared/hxmsg');
 const { FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 
@@ -29,23 +31,54 @@ async function main() {
   );
   const contract = new ethers.Contract(
     deployment.evmSourceContract,
-    ['function submitRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt) external returns (bytes32)'],
+    [
+      'function submitRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt) external returns (bytes32)',
+      'function submitAtomicRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt,uint64 feedbackTimeout,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64)) external returns (bytes32)'
+    ],
     signer
   );
 
   const channelID = process.env.FABRIC_CHANNEL || 'mychannel';
   const chaincodeName = process.env.FABRIC_CHAINCODE || 'xcall';
   const { normalized, payloadHex } = encodeBusinessPayload(payload);
-  const tx = await contract.submitRequest(
-    bytes32FromText(`fabric-${channelID}`),
-    bytes32FromText('fabric-local-domain'),
-    buildFabricTargetObject(channelID, chaincodeName),
-    FABRIC_INVOKE_SELECTOR,
-    ethers.keccak256(payloadHex),
-    hashJson(normalized),
-    bytes32FromText(normalized.actor),
-    Math.floor(Date.now() / 1000) + 3600
-  );
+  const expireAt = Math.floor(Date.now() / 1000) + 3600;
+  const targetChainID = bytes32FromText(`fabric-${channelID}`);
+  const targetDomainID = bytes32FromText('fabric-local-domain');
+  const targetObject = buildFabricTargetObject(channelID, chaincodeName);
+  const callDataHash = ethers.keccak256(payloadHex);
+  const businessPayloadHash = hashJson(normalized);
+  const receiver = bytes32FromText(normalized.actor);
+  const tx = payload.atomicity?.required
+    ? await contract.submitAtomicRequest(
+      targetChainID,
+      targetDomainID,
+      targetObject,
+      FABRIC_INVOKE_SELECTOR,
+      callDataHash,
+      businessPayloadHash,
+      receiver,
+      expireAt,
+      Number(payload.feedbackTimeout || expireAt),
+      [
+        true,
+        payload.atomicity.mode || AtomicityMode.COMMIT_OR_COMPENSATE,
+        payload.atomicity.commitmentType || CommitmentType.INTENT_ONLY,
+        payload.atomicity.commitmentRefHash || ethers.keccak256(ethers.toUtf8Bytes(`commitment:${normalized.recordId}`)),
+        payload.atomicity.successActionHash || ethers.keccak256(ethers.toUtf8Bytes(`success:${normalized.recordId}`)),
+        payload.atomicity.failureActionHash || ethers.keccak256(ethers.toUtf8Bytes(payload.failureData || `failure:${normalized.recordId}`)),
+        Number(payload.atomicity.challengeWindow || 60),
+      ]
+    )
+    : await contract.submitRequest(
+      targetChainID,
+      targetDomainID,
+      targetObject,
+      FABRIC_INVOKE_SELECTOR,
+      callDataHash,
+      businessPayloadHash,
+      receiver,
+      expireAt
+    );
   const receipt = await tx.wait();
   const event = receipt.logs
     .map((log) => {
@@ -59,7 +92,10 @@ async function main() {
   console.log(JSON.stringify({
     txHash: receipt.hash,
     blockNumber: receipt.blockNumber,
+    gasUsed: receipt.gasUsed.toString(),
     requestID: event?.args?.requestID,
+    feedbackRequired: false,
+    atomicityRequired: Boolean(payload.atomicity?.required),
     payload,
     normalized,
     callData: payloadHex

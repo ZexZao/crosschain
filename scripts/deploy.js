@@ -7,13 +7,13 @@ async function main() {
   ensureRuntime();
   const [deployer] = await ethers.getSigners();
 
-  const Source = await ethers.getContractFactory('EvmSourceContract');
-  const source = await Source.deploy();
-  await source.waitForDeployment();
-
   const TEERegistry = await ethers.getContractFactory('TEERegistry');
   const teeRegistry = await TEERegistry.deploy();
   await teeRegistry.waitForDeployment();
+
+  const Source = await ethers.getContractFactory('EvmSourceContract');
+  const source = await Source.deploy(await teeRegistry.getAddress());
+  await source.waitForDeployment();
 
   const HXMsgGateway = await ethers.getContractFactory('HXMsgGateway');
   const hxmsgGateway = await HXMsgGateway.deploy(await teeRegistry.getAddress());

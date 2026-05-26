@@ -108,6 +108,8 @@ function buildHXMsgFromEvmReceipt({
   receipt,
   block,
   businessPayload,
+  feedbackOverride,
+  atomicity,
   channelID = process.env.FABRIC_CHANNEL || 'mychannel',
   chaincodeName = process.env.FABRIC_CHAINCODE || 'xcall',
 }) {
@@ -217,12 +219,13 @@ function buildHXMsgFromEvmReceipt({
       businessPayloadHash,
       targetExecutionHash,
     },
-    feedback: {
+    feedback: feedbackOverride || {
       required: Boolean(normalized.requireAck),
       expectedMsgType: normalized.requireAck ? FeedbackType.ACK : FeedbackType.NONE,
       timeout: 0,
       callbackRefHash: ethers.ZeroHash,
     },
+    atomicity,
     callData: payloadHex,
     callDataDecoded: normalized,
     txId: receipt.hash,

@@ -19,4 +19,18 @@ function buildCertification({ hxmsg, privateKey, verifiedAt }) {
   };
 }
 
-module.exports = { buildCertification };
+function buildDigestCertification({ requestID, digest, privateKey, verifiedAt, signatureDigestType = 'responseDigest' }) {
+  const wallet = new ethers.Wallet(privateKey);
+  const signature = wallet.signingKey.sign(digest).serialized;
+  return {
+    requestID,
+    hmsgDigest: digest,
+    signingDigest: digest,
+    signatureDigestType,
+    teeAddress: wallet.address,
+    verifiedAt: verifiedAt || Math.floor(Date.now() / 1000),
+    signature,
+  };
+}
+
+module.exports = { buildCertification, buildDigestCertification };

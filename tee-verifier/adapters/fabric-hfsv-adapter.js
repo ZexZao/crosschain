@@ -307,9 +307,13 @@ function validatePayloadBinding({ hxmsg, ref, hfsv }) {
     throw new Error('businessPayloadHash mismatch');
   }
   if (record.businessPayload && hxmsg.feedback) {
-    const expectedAck = Boolean(record.businessPayload.requireAck);
-    if (Boolean(hxmsg.feedback.required) !== expectedAck) {
+    const atomicRequired = Boolean(hxmsg.atomicity?.required);
+    const expectedFeedback = Boolean(record.businessPayload.requireAck) || atomicRequired;
+    if (Boolean(hxmsg.feedback.required) !== expectedFeedback) {
       throw new Error('feedback.required mismatch');
+    }
+    if (atomicRequired && Number(hxmsg.feedback.expectedMsgType) !== 2) {
+      throw new Error('atomic h-FSV message requires RESPONSE feedback');
     }
   }
 }

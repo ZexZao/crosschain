@@ -126,12 +126,13 @@ function buildHXMsgFromFabricEvent({
   const policyID = bytes32FromText(hfsvPolicy.policyID);
   const policyHash = hashJson(hfsvPolicy);
   const feedbackRequired = Boolean(normalized.requireAck || rawPayload.requireAck);
+  const atomicity = rawPayload.atomicity || null;
   const feedback = {
-    required: feedbackRequired,
-    expectedMsgType: feedbackRequired ? FeedbackType.ACK : FeedbackType.NONE,
-    timeout: feedbackRequired
-      ? Number(rawPayload.feedbackTimeout || rawPayload.ackTimeout || rawPayload.expireAt)
-      : 0,
+    required: atomicity?.required ? true : feedbackRequired,
+    expectedMsgType: atomicity?.required ? FeedbackType.RESPONSE : (feedbackRequired ? FeedbackType.ACK : FeedbackType.NONE),
+    timeout: atomicity?.required
+      ? Number(rawPayload.feedback?.timeout || rawPayload.feedbackTimeout || rawPayload.expireAt)
+      : (feedbackRequired ? Number(rawPayload.feedbackTimeout || rawPayload.ackTimeout || rawPayload.expireAt) : 0),
     callbackRefHash: rawPayload.callbackRefHash || ethers.ZeroHash,
   };
 
@@ -183,6 +184,7 @@ function buildHXMsgFromFabricEvent({
       targetExecutionHash,
     },
     feedback,
+    atomicity: atomicity || undefined,
     callData: payloadHex,
     callDataDecoded: normalized,
     txId,

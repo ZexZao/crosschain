@@ -39,7 +39,7 @@ TEE 独立验证源链交易和事件存在性
 | `fabric-chaincode/xcall/index.js` | 新增 h-xmsg 入站执行、TEE 签名阈值验证、执行记录 |
 | `scripts/request-evm-fabric-call.js` | 调用新的 EVM `submitRequest()` |
 | `scripts/run-evm-fabric-tests.js` | EVM -> Fabric 自动化测试 |
-| `relayer/evm-to-fabric.js` | 改为 `/attest` + `ExecuteHXMsg` 主路径 |
+| `scripts/run-evm-fabric-tests.js` | 当前 EVM -> Fabric 主线测试入口，直接完成 `/attest` + `ExecuteHXMsg` |
 | `docker-compose.yml` | 增加 4 个 TEE 节点 |
 | `shared/hxmsg/evm-melv-policy.js` | 新增 EVM finality policy 构造 |
 
@@ -97,7 +97,7 @@ TEE 的 EVM adapter 会执行：
 17. Raft AppendEntries 成功复制到 majority 后提交同一条共识 entry。
 18. 节点只在 entry committed 后签名。
 
-当前没有保留单节点 header-helper 替代服务。每个 TEE 节点通过 EVM RPC 拉取并维护本地有限 header window，再用 header 中的 `receiptsRoot` 验证 receipt MPT proof；后续辅助 TEE 轮换委员会应接入到这个 header 更新边界，而不是绕过 TEE 本地验证。
+当前没有保留单节点 header-helper 替代服务。每个 TEE 节点维护本地有限 header window，但写入窗口的 header 必须先通过模拟 Header Committee 的阈值签名认证。TEE 使用委员会认证 header 的 `receiptsRoot` 验证 receipt MPT proof；relayer 单独提交的 `blockHeader` 只能作为一致性辅助检查，不能成为 header 信任来源。后续辅助 TEE 轮换委员会应替换当前模拟 Header Committee，并接入到这个 header 更新边界。
 
 ## 6. 4 TEE / Raft 共识
 

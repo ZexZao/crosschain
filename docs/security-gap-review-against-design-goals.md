@@ -58,24 +58,22 @@ EVM 目标链和 Fabric 目标链都检查：
 
 ## 3. 未达标点
 
-### 3.1 EVM receipt proof 的 header 锚定仍不严格
+### 3.1 EVM receipt proof 的 header 锚定已切换为模拟委员会认证
 
-当前 `tee-verifier/adapters/evm-melv-adapter.js` 中，TEE 会在目标 block header 尚未存在于本地 header window 时，将 relayer 提供的 `proofHeader` 写入 header window，然后用该 header 的 `receiptsRoot` 验证 receipt MPT proof。
+当前 `tee-verifier/adapters/evm-melv-adapter.js` 已不再把 relayer 单独提交的 `blockHeader / proofHeader` 写入 header window。EVM -> Fabric 主线要求 relayer 提供：
 
-这会造成一个安全缺口：
+- `evmReceiptProof.receipt`
+- `evmReceiptProof.receiptProof`
+- `committeeHeaderUpdate`
 
-- receipt proof 只证明 receipt 属于某个 `receiptsRoot`。
-- 如果 `receiptsRoot` 来自 relayer 提交的未验证 header，那么攻击者理论上可以构造伪 header、伪 receiptsRoot 和自洽的伪 receipt proof。
-- TEE 没有强制要求目标 block header 必须已经由自己维护的可信 header 链得到。
+其中 `committeeHeaderUpdate` 由当前模拟 Header Committee 对 EVM header/finality 摘要签名。TEE 会验证 committeeID、chainID、阈值签名、header 摘要和 finality 信息，只有认证通过的 header 才会写入本地有限 header window。receipt MPT proof 只能绑定到该窗口中委员会认证 header 的 `receiptsRoot`。
 
-这不满足 Mercury / MELV-EF 的核心要求。TEE 应独立维护可信区块头窗口，receipt proof 只能挂到 TEE 已验证或已维护的 header 上。
+因此，原先“缺 header 时接受 relayer proofHeader 写入窗口”的缺口已经关闭。relayer 仍可转发证明材料，但不再是 header 信任来源。
 
-整改要求：
+当前仍保留的边界：
 
-- 删除“缺 header 时接受 relayer proofHeader 写入窗口”的路径。
-- TEE 应从自身 header 管理模块获取目标 header。
-- receipt proof 的 root 必须等于 TEE 已维护 header 的 `receiptsRoot`。
-- relayer 只允许提交 receipt proof 和 receipt，不应成为 header 信任来源。
+- Header Committee 当前是本地模拟实现，文件为 `shared/evm/header-committee.js`。
+- 后续应替换为正式区块头管理委员会，并由 TEE 验证委员会签名后接受 header update。
 
 ### 3.2 TEE quorum threshold 由调用者提供
 
@@ -160,16 +158,17 @@ Fabric 侧 `ExecuteHXMsg(...)` 也从 `certEnvelope.threshold` 读取阈值。
 - 删除上述未使用函数。
 - 保留的验证逻辑必须集中在 `adapters/fabric-hfsv-adapter.js`、`adapters/fabric-block.js`、`adapters/evm-melv-adapter.js`、`shared/evm/receipt-proof.js` 中。
 
-### 3.7 Fabric listener 仍保留 mock-file 输入
+### 3.7 旧 listener / relayer 落盘路径已删除
 
-`source-chain/fabric-listener.js` 仍保留 `--mock-file` 分支，用于从本地文件生成 h-xmsg。
+旧 `source-chain/*listener.js`、`relayer/evm-to-fabric.js` 和 `scripts/run-evm-fabric-demo.js` 已删除。
 
-当前 TEE 主线会重新查询 h-FSV，能够挡住多数伪造输入。但该入口仍不适合作为严肃主线的一部分，容易在后续实验或脚本中被误用。
+当前主线测试脚本直接完成源链交易、h-xmsg 构造、TEE attestation 和目标链提交，避免误用旧 listener/relayer 落盘路径绕过新的证明材料要求。
 
-整改要求：
+后续要求：
 
-- 从主线 listener 中删除 `--mock-file`。
-- 如果需要测试 mock，应放入独立 test helper，并明确不能用于生产 / 严格安全实验。
+- 若重新实现常驻 watcher/router，必须基于当前 h-xmsg / TEE quorum 主线。
+- EVM -> Fabric 必须显式携带 receipt MPT proof 和 `committeeHeaderUpdate`。
+- Fabric -> EVM 必须走 h-FSV view 和 TEE quorum。
 
 ## 4. 达标前必须完成的最低整改清单
 
@@ -181,7 +180,7 @@ Fabric 侧 `ExecuteHXMsg(...)` 也从 `certEnvelope.threshold` 读取阈值。
 4. 严格模式下禁用 confirmation fallback，必须使用 finalized checkpoint 或等价可验证机制。
 5. 修复或删除 `EvmSourceContract.markCompleted` 等未受控状态函数。
 6. 删除 TEE server 中未使用的旧验证函数。当前 `queryFabricBlock`、`queryEvmTransaction`、`verifyFabricBlockLocally`、`verifyEvmBlockLocally` 已删除。
-7. 删除 Fabric listener 的 `--mock-file` 主线入口。
+7. 旧 listener/relayer 落盘路径已删除；后续 watcher/router 需要按当前证明主线重建。
 
 ## 5. 当前达成度判断
 

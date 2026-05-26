@@ -25,6 +25,7 @@ TEE 的 MELV-EF adapter 现在要求：
 
 ```text
 helperData.evmReceiptProof
+helperData.committeeHeaderUpdate
 ```
 
 其中包含：
@@ -42,8 +43,9 @@ TEE 验证流程：
 
 1. 检查 h-xmsg sourceRef 与 EVM tx/block/log 定位信息一致。
 2. 检查 block header 的 `hash / number / receiptsRoot`。
-3. 将 header 写入 TEE 本地维护的有限 header window。
-4. 用 header window 中的 `receiptsRoot` 验证 receipt MPT proof。
+3. 验证 `committeeHeaderUpdate` 中的模拟 Header Committee 签名。
+4. 只有委员会认证通过的 header 才会写入 TEE 本地维护的有限 header window。
+5. 用 header window 中的 `receiptsRoot` 验证 receipt MPT proof。
 5. 检查 receipt 的 `txHash / blockNumber / blockHash`。
 6. 从已验证 receipt 中解析目标 log。
 7. 检查 source contract、topic0、event 字段与 h-xmsg 绑定一致。
@@ -81,9 +83,36 @@ header.parentHash == previousHeader.hash
 
 目标交易所在区块必须位于当前窗口中，否则 TEE 拒绝验证。
 
-## 4. Finalized Checkpoint
+窗口中的目标 header 必须带有 `committeeCertified = true` 标记。旧版本写入的、或 relayer 单独提交的未认证 header 不会被当作可信锚使用。
 
-TEE 会尝试通过 JSON-RPC 的 finalized tag 获取 finalized header：
+## 4. 模拟 Header Committee
+
+当前阶段尚未实现真实区块头管理委员会，因此项目内置了本地模拟委员会：
+
+```text
+shared/evm/header-committee.js
+```
+
+模拟委员会负责：
+
+1. 对 EVM header 摘要签名。
+2. 输出 `committeeHeaderUpdate`。
+3. 声明 simulated finalized height/hash。
+
+TEE 负责：
+
+1. 验证 `committeeID` 是否可信。
+2. 验证委员会签名达到阈值。
+3. 检查 header 与 h-xmsg sourceRef 的 `blockNumber / blockHash` 一致。
+4. 只使用委员会认证 header 的 `receiptsRoot` 验证 receipt MPT proof。
+
+relayer 仍然可以转发 `committeeHeaderUpdate`，但不能通过未认证 `blockHeader` 直接污染 TEE header window。
+
+## 5. Finalized Checkpoint
+
+当前严格路径中，finalized height/hash 由模拟 Header Committee 在 `committeeHeaderUpdate.finality` 中给出。后续真实部署时，应将该模拟委员会替换为正式区块头管理委员会。
+
+旧版本会尝试通过 JSON-RPC 的 finalized tag 获取 finalized header：
 
 ```text
 eth_getBlockByNumber("finalized", false)
@@ -106,19 +135,19 @@ MELV_LOCAL_FINALITY_CONFIRMATIONS
 
 作为本地确认数回退。真实 EVM / PoS 环境部署时，应使用 finalized checkpoint 或 beacon light client update 替换该回退。
 
-## 5. 安全边界
+## 6. 安全边界
 
 已补齐：
 
 1. 不再接受没有 receipt MPT proof 的 EVM -> Fabric h-xmsg。
 2. 不再仅凭 RPC receipt/log 判断交易存在。
-3. TEE 使用 header `receiptsRoot` 验证 receipt 属于该 block。
-4. TEE 维护有限 header window，而不是无界保存所有 header。
+3. 不再接受 relayer 未认证 blockHeader 作为 header window 的信任锚。
+4. TEE 使用委员会认证 header 的 `receiptsRoot` 验证 receipt 属于该 block。
+5. TEE 维护有限 header window，而不是无界保存所有 header。
 
 仍需后续增强：
 
-1. 使用真实 PoS beacon light client update 验证 finalized execution header。
-2. 将 finalized checkpoint 的来源从普通 RPC 升级为独立可验证的 consensus proof。
+1. 将当前模拟 Header Committee 替换为正式区块头管理委员会。
+2. 委员会侧实现真实 PoS beacon light client update 或等价 finalized checkpoint 验证。
 3. 为 header window 增加 snapshot / 持久化校验。
 4. 增加篡改 receipt proof、篡改 receiptsRoot、过期 header window 的安全测试。
-

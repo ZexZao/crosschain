@@ -15,22 +15,13 @@ const {
   buildEvmSourcePayloadHash,
 } = require('../../hxmsg-builder/evm-to-fabric');
 const { verifyReceiptProof } = require('../../shared/evm/receipt-proof');
+const {
+  normalizeHeader,
+  verifyCommitteeHeaderUpdate,
+} = require('../../shared/evm/header-committee');
 
 function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
-}
-
-function normalizeHeader(header) {
-  return {
-    number: Number(header.number),
-    hash: header.hash,
-    parentHash: header.parentHash,
-    stateRoot: header.stateRoot,
-    transactionsRoot: header.transactionsRoot,
-    receiptsRoot: header.receiptsRoot,
-    logsBloom: header.logsBloom,
-    timestamp: Number(header.timestamp || 0),
-  };
 }
 
 function rememberHeader(chainState, header, { finalized = false, windowSize = 128 } = {}) {
@@ -65,6 +56,9 @@ function findStoredHeader(chainState, blockNumber, blockHash) {
   if (!header) return null;
   if (!sameHex(header.hash, blockHash)) {
     throw new Error('stored EVM header hash mismatch');
+  }
+  if (!header.committeeCertified) {
+    throw new Error('stored EVM header is not committee-certified');
   }
   return header;
 }
@@ -103,39 +97,61 @@ async function fetchFinalizedHeader(provider) {
   }
 }
 
-async function maintainHeaderWindow({ provider, chainState, targetBlockNumber, targetBlockHash, proofHeader }) {
+function rememberCommitteeHeader(chainState, committeeUpdate, { expectedChainID } = {}) {
+  const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
+  const verified = verifyCommitteeHeaderUpdate(committeeUpdate, { expectedChainID });
+  const header = rememberHeader(chainState, verified.header, { windowSize });
+  header.committeeCertified = true;
+  header.committeeID = verified.committeeID;
+  header.committeeDigest = verified.digest;
+  if (verified.finalizedHeight >= Number(chainState.evm?.finalizedHeight || 0)) {
+    chainState.evm.finalizedHeight = verified.finalizedHeight;
+    chainState.evm.finalizedHash = verified.finalizedHash;
+  }
+  chainState.evm.headerCommittee = {
+    committeeID: verified.committeeID,
+    threshold: verified.threshold,
+    signerCount: verified.signerCount,
+    lastDigest: verified.digest,
+  };
+  return header;
+}
+
+async function maintainHeaderWindow({ provider, chainState, targetBlockNumber, targetBlockHash, committeeHeaderUpdate, expectedChainID }) {
   const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
   const state = chainState.evm || { tipHeight: 0, tipHash: null, headers: [] };
   chainState.evm = state;
-  const latestNumber = await provider.getBlockNumber();
-  const start = Math.max(
-    Number(targetBlockNumber),
-    Math.max(0, Number(state.tipHeight || 0) + 1)
-  );
-  const end = Math.max(Number(targetBlockNumber), Number(latestNumber));
 
-  if (!findStoredHeader(chainState, targetBlockNumber, targetBlockHash)) {
-    rememberHeader(chainState, proofHeader, { windowSize });
+  let stored = null;
+  try {
+    stored = findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
+  } catch (error) {
+    if (error.message !== 'stored EVM header is not committee-certified' || !committeeHeaderUpdate) {
+      throw error;
+    }
   }
-  for (let n = start; n <= end; n += 1) {
-    const existing = (chainState.evm.headers || []).find((h) => Number(h.number) === n);
-    if (existing) continue;
-    const header = await fetchRpcHeader(provider, n);
-    rememberHeader(chainState, header, { windowSize });
-  }
-
-  const finalizedHeader = await fetchFinalizedHeader(provider);
-  if (finalizedHeader) {
-    rememberHeader(chainState, finalizedHeader, { finalized: true, windowSize });
-  } else {
-    const required = Number(process.env.MELV_LOCAL_FINALITY_CONFIRMATIONS || 1);
-    const finalizedHeight = Math.max(0, Number(latestNumber) - required + 1);
-    const header = (chainState.evm.headers || []).find((h) => Number(h.number) === finalizedHeight)
-      || (finalizedHeight > 0 ? await fetchRpcHeader(provider, finalizedHeight) : null);
-    if (header) rememberHeader(chainState, header, { finalized: true, windowSize });
+  if (!stored) {
+    if (!committeeHeaderUpdate) {
+      throw new Error('target EVM header is not committee-certified in local header window');
+    }
+    const certified = rememberCommitteeHeader(chainState, committeeHeaderUpdate, { expectedChainID });
+    if (Number(certified.number) !== Number(targetBlockNumber) || !sameHex(certified.hash, targetBlockHash)) {
+      throw new Error('committee-certified header does not match target EVM block');
+    }
+    stored = findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
   }
 
-  const stored = findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
+  if (process.env.MELV_ALLOW_RPC_HEADER_SYNC === 'true') {
+    const latestNumber = await provider.getBlockNumber();
+    for (let n = Number(state.tipHeight || 0) + 1; n <= latestNumber; n += 1) {
+      const existing = (chainState.evm.headers || []).find((h) => Number(h.number) === n);
+      if (existing) continue;
+      const header = await fetchRpcHeader(provider, n);
+      rememberHeader(chainState, header, { windowSize });
+    }
+    const finalizedHeader = await fetchFinalizedHeader(provider);
+    if (finalizedHeader) rememberHeader(chainState, finalizedHeader, { finalized: true, windowSize });
+  }
   if (!stored) throw new Error('target EVM header is outside maintained header window');
   return stored;
 }
@@ -173,22 +189,28 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
   }
 
   const proofEnvelope = helperData.evmReceiptProof;
-  if (!proofEnvelope?.receipt || !proofEnvelope?.receiptProof || !proofEnvelope?.blockHeader) {
+  if (!proofEnvelope?.receipt || !proofEnvelope?.receiptProof) {
     throw new Error('EVM receipt MPT proof is required');
   }
   const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || helperData.evmRpc || 'http://evm-node:8545');
-  const proofHeader = normalizeHeader(proofEnvelope.blockHeader);
-  if (Number(proofHeader.number) !== Number(ref.blockNumber)) throw new Error('EVM proof header blockNumber mismatch');
-  if (!sameHex(proofHeader.hash, ref.blockHash)) throw new Error('EVM proof header blockHash mismatch');
-  if (!sameHex(proofEnvelope.receiptsRoot, proofHeader.receiptsRoot)) throw new Error('EVM proof receiptsRoot mismatch');
 
   const storedHeader = await maintainHeaderWindow({
     provider,
     chainState,
     targetBlockNumber: ref.blockNumber,
     targetBlockHash: ref.blockHash,
-    proofHeader,
+    committeeHeaderUpdate: helperData.committeeHeaderUpdate || proofEnvelope.committeeHeaderUpdate,
+    expectedChainID: `eip155:${Number(BigInt(hxmsg.source.chainID))}`,
   });
+  if (proofEnvelope.blockHeader) {
+    const untrustedHeader = normalizeHeader(proofEnvelope.blockHeader);
+    if (Number(untrustedHeader.number) !== Number(ref.blockNumber)) throw new Error('EVM proof header blockNumber mismatch');
+    if (!sameHex(untrustedHeader.hash, ref.blockHash)) throw new Error('EVM proof header blockHash mismatch');
+    if (!sameHex(untrustedHeader.receiptsRoot, storedHeader.receiptsRoot)) throw new Error('EVM proof header receiptsRoot mismatch');
+  }
+  if (proofEnvelope.receiptsRoot && !sameHex(proofEnvelope.receiptsRoot, storedHeader.receiptsRoot)) {
+    throw new Error('EVM proof receiptsRoot mismatch');
+  }
 
   const receipt = proofEnvelope.receipt;
   if (!sameHex(receipt.transactionHash || receipt.hash, ref.txHash)) throw new Error('EVM receipt txHash mismatch');
@@ -266,9 +288,10 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     blockHash: receipt.blockHash,
     confirmations,
     receiptProof: 'mpt-verified',
-    headerMaintainer: 'tee-sliding-header-window',
+    headerMaintainer: 'committee-certified-header-window',
     lightClientTip: chainState.evm.tipHeight,
     finalizedHeight: chainState.evm.finalizedHeight || 0,
+    headerCommittee: chainState.evm.headerCommittee || null,
     logIndex: Number(ref.logIndex),
     sourceContract: ethers.getAddress(ref.sourceContract),
   };
@@ -280,4 +303,7 @@ module.exports = {
   verificationMethod: VerificationMethod.EVM_LIGHT_CLIENT,
   verifySourceFact: verifyMelvEf,
   verifyMelvEf,
+  maintainHeaderWindow,
+  rememberCommitteeHeader,
+  normalizeHeader,
 };

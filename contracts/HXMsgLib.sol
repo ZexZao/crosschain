@@ -68,6 +68,25 @@ library HXMsgLib {
         bytes signature;
     }
 
+    struct Atomicity {
+        bool required;
+        uint8 mode;
+        uint8 commitmentType;
+        bytes32 commitmentRefHash;
+        bytes32 successActionHash;
+        bytes32 failureActionHash;
+        uint64 challengeWindow;
+    }
+
+    struct ResponseProof {
+        bytes32 originRequestID;
+        bytes32 originHmsgDigest;
+        uint8 responseStatus;
+        bytes32 targetExecutionHash;
+        bytes32 targetProofRefHash;
+        bytes32 responsePayloadHash;
+    }
+
     function hashHXMsg(HXMsgOnChain calldata m) internal pure returns (bytes32) {
         bytes32 headerHash = keccak256(
             abi.encode(m.version, m.requestID, m.msgType, m.nonce, m.createdAt, m.expireAt)
@@ -115,8 +134,9 @@ library HXMsgLib {
                 m.callbackRefHash
             )
         );
+        bytes32 atomicityHash = keccak256(abi.encode(false, uint8(0), uint8(0), bytes32(0), bytes32(0), bytes32(0), uint64(0)));
         return keccak256(
-            abi.encode(headerHash, endpointHash, actionHash, verificationHash, bindingHash, feedbackHash)
+            abi.encode(headerHash, endpointHash, actionHash, verificationHash, bindingHash, feedbackHash, atomicityHash)
         );
     }
 
@@ -144,6 +164,33 @@ library HXMsgLib {
             abi.encode(m.feedbackRequired, m.expectedFeedbackMsgType, m.feedbackTimeout, m.callbackRefHash, m.expireAt)
         );
         return keccak256(abi.encode(chainHash, actionHash, feedbackHash));
+    }
+
+    function hashAtomicity(Atomicity memory atomicity) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                atomicity.required,
+                atomicity.mode,
+                atomicity.commitmentType,
+                atomicity.commitmentRefHash,
+                atomicity.successActionHash,
+                atomicity.failureActionHash,
+                atomicity.challengeWindow
+            )
+        );
+    }
+
+    function hashResponse(ResponseProof calldata response) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                response.originRequestID,
+                response.originHmsgDigest,
+                response.responseStatus,
+                response.targetExecutionHash,
+                response.targetProofRefHash,
+                response.responsePayloadHash
+            )
+        );
     }
 
 }
