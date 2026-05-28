@@ -16,6 +16,10 @@
 10. `commitIndex`
 11. `lastApplied`
 12. committed 后才允许 TEE 签名
+13. leader 为 follower 维护 `nextIndex / matchIndex`
+14. follower 日志落后时进行后缀补齐
+15. 内部 Raft RPC HMAC 认证
+16. Raft 专项故障测试脚本
 
 该实现已经可以支撑当前 h-xmsg 跨链实验：TEE 集群对同一条 h-xmsg 达成日志提交后，才返回可被目标链验证的 TEE quorum 证明。
 
@@ -66,7 +70,9 @@ POST /internal/raft/install-snapshot
 
 ### 2.5 网络分区恢复测试
 
-当前已实现 leader election 和 heartbeat，但尚未系统化测试网络分区。
+当前已新增 `npm run raft:test`，覆盖 leader crash、follower crash、节点重启和未认证内部 RPC 拒绝。
+
+但它仍不是完整网络分区测试。后续还需要更系统地测试：
 
 需要补充场景：
 
@@ -99,16 +105,31 @@ POST /internal/raft/install-snapshot
 
 ### 2.8 成熟的故障注入测试
 
-当前通过功能测试验证主路径，但缺少 Raft 专项测试。
+当前已经加入基础 Raft 专项测试：
 
-后续需要增加：
+1. 未认证内部 RPC 拒绝。
+2. leader election。
+3. follower crash/rejoin。
+4. leader crash/re-election/rejoin。
 
-1. 节点重启测试。
-2. leader 崩溃测试。
-3. follower 落后测试。
-4. 重复 AppendEntries 测试。
-5. 日志冲突测试。
-6. 超时和乱序网络测试。
+仍需进一步增加：
+
+1. follower 长时间落后后的大量日志追赶测试。
+2. 重复 AppendEntries 测试。
+3. 日志冲突覆盖测试。
+4. 超时和乱序网络测试。
+5. majority / minority partition 的可提交性测试。
+
+### 2.9 内部 RPC 认证的生产化
+
+当前内部 Raft RPC 已经从无认证升级为 HMAC 认证，适合论文原型和单机/多机实验。
+
+但真实 TEE 部署时仍需升级为：
+
+1. mTLS。
+2. TEE remote attestation 绑定节点证书。
+3. 代码版本 hash / measurement 绑定。
+4. 节点证书轮换与吊销。
 
 ## 3. 与真实 TEE 部署相关但不属于 Raft 本身的部分
 

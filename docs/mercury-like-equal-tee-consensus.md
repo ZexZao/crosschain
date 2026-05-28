@@ -10,7 +10,7 @@
 
 ## 当前实现
 
-TEE 集群包含 4 个节点，默认阈值为 3/4。任意 TEE 都可以接收 `/attest` 请求，并作为本轮 proposer 发起共识。proposer 不是安全根，只是本轮请求的协调者。
+TEE 集群包含 5 个节点，默认阈值为 3/5。任意 TEE 都可以接收 `/attest` 请求，并由当前 Raft leader 协调本轮日志复制和提交。leader 不是安全根，只负责本轮复制；所有 TEE 都需要独立验证事实后才会对 committed entry 签名。
 
 处理流程如下：
 
@@ -52,7 +52,7 @@ entryDigest
 
 | 项目 | 之前 | 现在 |
 |---|---|---|
-| 节点关系 | 固定 leader + follower | 4 个平等 TEE |
+| 节点关系 | 固定 leader + follower | 5 个平等 TEE |
 | 请求入口 | 默认 leader | 任意 TEE 可作为本轮 proposer |
 | follower 行为 | 验证后直接签名 | append 时独立验证，commit 后才签名 |
 | 集群结果 | 聚合认证结果 | quorum committed entry |

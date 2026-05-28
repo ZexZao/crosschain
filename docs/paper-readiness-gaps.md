@@ -1,6 +1,6 @@
 # Paper Readiness Gaps
 
-本文档整理当前项目作为论文系统发表前仍需补齐的不足。当前项目已经实现 h-xmsg / h-FSV / MELV-EF 双向主线、4 节点模拟 TEE Raft quorum、EVM receipt MPT proof、模拟 Header Committee 认证 header window，以及挑战响应原子性闭环。但若作为论文发表，仍需清晰界定实验边界，并补齐若干安全和评估缺口。
+本文档整理当前项目作为论文系统发表前仍需补齐的不足。当前项目已经实现 h-xmsg / h-FSV / MELV-EF 双向主线、5 节点模拟 TEE Raft quorum、EVM receipt MPT proof、模拟 Header Committee 认证 header window，以及挑战响应原子性闭环。但若作为论文发表，仍需清晰界定实验边界，并补齐若干安全和评估缺口。
 
 ## 1. 当前可作为论文贡献的部分
 
@@ -17,7 +17,7 @@
 2. Fabric -> EVM 方向的 h-FSV 验证。
 3. EVM -> Fabric 方向的 receipt MPT proof 验证。
 4. 目标链轻量验证，只验证 TEE quorum 和 h-xmsg 绑定摘要。
-5. 4 节点模拟 TEE Raft quorum。
+5. 5 节点模拟 TEE Raft quorum。
 6. challenge-response 原子性状态机。
 7. 普通消息与需要 RESPONSE 的原子消息分离。
 8. 删除旧 listener / relayer / validator 多签路径，避免误用旧安全模型。
@@ -62,8 +62,8 @@ const threshold = Number(certEnvelope.threshold || 1)
 问题：
 
 1. relayer 可以尝试提交较低 threshold。
-2. 测试中使用 3/4，但目标链和 Fabric chaincode 没有从可信配置中强制读取阈值。
-3. 这不满足 `2f+1` TEE 中至少 `f+1` 或项目指定 3/4 quorum 的固定安全模型。
+2. 测试中使用 3/5，但目标链和 Fabric chaincode 没有从可信配置中强制读取阈值。
+3. 这不满足 `2f+1` TEE 中至少 `f+1` 或项目指定 3/5 quorum 的固定安全模型。
 
 整改建议：
 
@@ -327,4 +327,3 @@ The system fully implements Ethereum finality.
 The system fully reproduces Mercury.
 The system supports arbitrary blockchains plug-and-play without additional adapters.
 ```
-

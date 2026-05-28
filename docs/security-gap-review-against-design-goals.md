@@ -81,7 +81,7 @@ EVM 目标链和 Fabric 目标链都检查：
 
 Fabric 侧 `ExecuteHXMsg(...)` 也从 `certEnvelope.threshold` 读取阈值。
 
-这意味着 relayer 理论上可以提交较低 threshold，例如 `threshold = 1`。即使测试中使用的是 3/4，目标链和链码本身并没有强制固定安全阈值。
+这意味着 relayer 理论上可以提交较低 threshold，例如 `threshold = 1`。即使测试中使用的是 3/5，目标链和链码本身并没有强制固定安全阈值。
 
 这不满足 Mercury 风格 `2f+1` TEE 中至少 `f+1` 通过的安全模型。
 
@@ -90,7 +90,7 @@ Fabric 侧 `ExecuteHXMsg(...)` 也从 `certEnvelope.threshold` 读取阈值。
 - EVM 侧 threshold 应由 `TEERegistry` 或固定配置读取，不允许 calldata 传入。
 - Fabric 侧 threshold 应由链码状态中的 TEE 集群配置读取，不允许 cert envelope 自声明。
 - certification 中可以携带 reached / total 等元信息，但不能决定验签阈值。
-- 对 4 个 TEE 的当前实验，应固定为至少 3/4 或明确实现 `2f+1` 下的 `f+1` 规则。
+- 对 5 个 TEE 的当前实验，应固定为至少 3/5，并明确实现 `2f+1` 下的 `f+1` 规则。
 
 ### 3.3 Fabric -> EVM helperData block bytes 旁路已删除
 

@@ -14,7 +14,8 @@ services:
     environment:
       - TEE_NODE_ID=tee-verifier-1
       - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000
+      - TEE_CLUSTER_PEERS=http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
+      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
       - EVM_RPC=http://evm-node:8545
     volumes:
       - ./:/app
@@ -30,7 +31,8 @@ services:
     environment:
       - TEE_NODE_ID=tee-verifier-2
       - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000
+      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
+      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
       - EVM_RPC=http://evm-node:8545
     volumes:
       - ./:/app
@@ -46,7 +48,8 @@ services:
     environment:
       - TEE_NODE_ID=tee-verifier-3
       - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-4:9000
+      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
+      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
       - EVM_RPC=http://evm-node:8545
     volumes:
       - ./:/app
@@ -62,13 +65,31 @@ services:
     environment:
       - TEE_NODE_ID=tee-verifier-4
       - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000
+      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-5:9000
+      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
       - EVM_RPC=http://evm-node:8545
     volumes:
       - ./:/app
     command: sh -c "npm install && node tee-verifier/server.js"
     ports:
       - "9003:9000"
+    depends_on:
+      - evm-node
+
+  tee-verifier-5:
+    image: node:20
+    working_dir: /app
+    environment:
+      - TEE_NODE_ID=tee-verifier-5
+      - TEE_CLUSTER_THRESHOLD=3
+      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000
+      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      - EVM_RPC=http://evm-node:8545
+    volumes:
+      - ./:/app
+    command: sh -c "npm install && node tee-verifier/server.js"
+    ports:
+      - "9004:9000"
     depends_on:
       - evm-node
 

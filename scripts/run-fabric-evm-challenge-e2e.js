@@ -19,7 +19,7 @@ const { buildHXMsgFromFabricEvent, TARGET_EXECUTE_SELECTOR } = require('../hxmsg
 const { buildEvmExecutionProofRef, buildExecutedResponse } = require('../hxmsg-builder/response');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
-const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003')
+const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004')
   .split(',')
   .map((url) => url.trim())
   .filter(Boolean);

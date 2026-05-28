@@ -58,6 +58,26 @@ peer lifecycle chaincode approveformyorg \
   --package-id "$PACKAGE_ID" \
   --sequence "$CC_SEQUENCE"
 
+for attempt in {1..20}; do
+  READY=$(
+    peer lifecycle chaincode checkcommitreadiness \
+      --channelID mychannel \
+      --name "$CC_NAME" \
+      --version "$CC_VERSION" \
+      --sequence "$CC_SEQUENCE" \
+      --output json 2>/dev/null || true
+  )
+  if echo "$READY" | grep -q '"Org1MSP": true'; then
+    break
+  fi
+  if [ "$attempt" -eq 20 ]; then
+    echo "Chaincode definition is not ready to commit after approveformyorg:" >&2
+    echo "$READY" >&2
+    exit 1
+  fi
+  sleep 1
+done
+
 peer lifecycle chaincode commit \
   -o orderer.example.com:7050 \
   --ordererTLSHostnameOverride orderer.example.com \

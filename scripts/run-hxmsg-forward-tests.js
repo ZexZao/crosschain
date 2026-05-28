@@ -19,7 +19,7 @@ const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 const TEST_DATA = path.join(__dirname, '..', 'test-data', 'fabric-real-cases.json');
 const RESULTS_FILE = 'hxmsg-fabric-evm-results.json';
 const SUMMARY_FILE = 'hxmsg-test-summary.md';
-const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003')
+const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004')
   .split(',')
   .map((url) => url.trim())
   .filter(Boolean);

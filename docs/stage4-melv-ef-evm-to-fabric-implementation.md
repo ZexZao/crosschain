@@ -21,7 +21,7 @@ TEE 独立验证源链交易和事件存在性
 | MELV-EF TEE adapter | 已实现 `tee-verifier/adapters/evm-melv-adapter.js`，要求 receipt MPT proof |
 | EVM receipt MPT proof | 已实现 `shared/evm/receipt-proof.js` |
 | TEE header window | 已实现，每个 TEE 独立维护有限 EVM header window |
-| 4 TEE 集群 / Raft | 已实现 4 个 TEE 节点，支持 leader election、heartbeat、日志复制、commitIndex，阈值默认 3/4 |
+| 5 TEE 集群 / Raft | 已实现 5 个 TEE 节点，支持 leader election、heartbeat、日志复制、commitIndex，阈值默认 3/5 |
 | Fabric h-xmsg 入站入口 | 已实现 `ExecuteHXMsg` |
 | Fabric TEE registry | 已实现 `RegisterTrustedTEE` / `QueryTrustedTEE` |
 | EVM -> Fabric 测试 | 已实现 `npm run hxmsg:test:evm-fabric` |
@@ -43,7 +43,7 @@ TEE 独立验证源链交易和事件存在性
 | `scripts/request-evm-fabric-call.js` | 调用统一 EVM `submitHXMsgRequest(..., policy)`，普通消息和 RESPONSE 消息仅策略字段不同 |
 | `scripts/run-evm-fabric-tests.js` | EVM -> Fabric 自动化测试 |
 | `scripts/run-evm-fabric-tests.js` | 当前 EVM -> Fabric 主线测试入口，直接完成 `/attest` + `ExecuteHXMsg` |
-| `docker-compose.yml` | 增加 4 个 TEE 节点 |
+| `docker-compose.yml` | 增加 5 个 TEE 节点 |
 | `shared/hxmsg/evm-melv-policy.js` | 新增 EVM finality policy 构造 |
 
 ## 4. EVM 源链变化
@@ -102,7 +102,7 @@ TEE 的 EVM adapter 会执行：
 
 当前没有保留单节点 header-helper 替代服务。每个 TEE 节点维护本地有限 header window，但写入窗口的 header 必须先通过模拟 Header Committee 的阈值签名认证。TEE 使用委员会认证 header 的 `receiptsRoot` 验证 receipt MPT proof；relayer 单独提交的 `blockHeader` 只能作为一致性辅助检查，不能成为 header 信任来源。后续辅助 TEE 轮换委员会应替换当前模拟 Header Committee，并接入到这个 header 更新边界。
 
-## 6. 4 TEE / Raft 共识
+## 6. 5 TEE / Raft 共识
 
 当前 Docker 中启动：
 
@@ -111,6 +111,7 @@ tee-verifier-1  equal TEE
 tee-verifier-2  equal TEE
 tee-verifier-3  equal TEE
 tee-verifier-4  equal TEE
+tee-verifier-5  equal TEE
 ```
 
 任意 TEE 节点都可以接收 `/attest`。如果当前节点不是 leader，会转发到已知 leader；如果没有 leader，会发起一轮 RequestVote 选举。leader 不是安全根，只是 Raft 协议当前 term 的日志复制协调者。
@@ -150,7 +151,7 @@ certAcks[]
 verificationResults[]
 ```
 
-当前默认阈值是 3/4，Raft majority 也是 3/4。当前实现已经具备 RequestVote、AppendEntries、leader election、heartbeat、日志一致性检查、commitIndex 和提交后签名。仍未实现生产级 Raft 的 snapshot、日志压缩、复杂网络分区恢复和长期运行压测。
+当前默认阈值是 3/5，Raft majority 也是 3/5，对应 `2f+1=5`、`f+1=3`。当前实现已经具备 RequestVote、AppendEntries、leader election、heartbeat、日志一致性检查、commitIndex 和提交后签名。仍未实现生产级 Raft 的 snapshot、日志压缩、复杂网络分区恢复和长期运行压测。
 
 ## 7. Fabric 目标链验证
 
@@ -186,7 +187,7 @@ hxmsg-consumed:{requestID}
 
 ## 8. 对 Fabric -> EVM 的影响
 
-TEE 从单节点升级为 4 节点集群后，Fabric -> EVM 也改为经过 Raft 日志复制和 commit。EVM 目标链不再使用单个 `teeCertification`，而是调用 `HXMsgGateway.executeHXMsgMinimalCluster()`，链上验证多 TEE 阈值签名。
+TEE 从单节点升级为 5 节点集群后，Fabric -> EVM 也改为经过 Raft 日志复制和 commit。EVM 目标链不再使用单个 `teeCertification`，而是调用 `HXMsgGateway.executeHXMsgMinimalCluster()`，链上验证多 TEE 阈值签名。
 
 这意味着：
 
@@ -215,7 +216,7 @@ runtime/hxmsg-evm-fabric-summary.md
 
 ```text
 TEE adapter: evm-melv-ef
-TEE quorum: 4/3 reached
+TEE quorum: 5/3 reached
 threshold: 3
 Fabric inbound status: executed
 ```

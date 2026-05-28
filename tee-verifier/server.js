@@ -2,6 +2,7 @@ const express = require('express');
 const { ethers } = require('ethers');
 const fs = require('fs-extra');
 const path = require('path');
+const crypto = require('crypto');
 const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
 const { ChainType, computeHXMsgDigest, computeHXMsgDeliveryDigest, computeResponseDigest } = require('../shared/hxmsg');
 const { verifySourceFact } = require('./adapters');
@@ -61,6 +62,7 @@ function saveConsensusState() {
 
 let lastHeartbeatAt = Date.now();
 let electionDeadlineAt = Date.now() + electionTimeoutMs();
+const peerReplicationState = new Map();
 
 // ============ TEE Identity ============
 
@@ -98,6 +100,95 @@ function peerIDFromURL(peerURL) {
 function clusterPeerDefs() {
   return clusterPeers().map((url) => ({ id: peerIDFromURL(url), url: url.replace(/\/$/, '') }));
 }
+
+function knownRaftNodeIDs() {
+  return new Set([teeNodeID, ...clusterPeerDefs().map((peer) => peer.id)]);
+}
+
+function raftSharedSecret() {
+  return process.env.TEE_RAFT_SHARED_SECRET || '';
+}
+
+function raftAuthRequired() {
+  return clusterPeers().length > 0 && process.env.TEE_RAFT_AUTH_REQUIRED !== 'false';
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+}
+
+function raftSignaturePayload({ senderID, timestamp, method, routePath, body }) {
+  return [
+    senderID,
+    String(timestamp),
+    String(method || 'POST').toUpperCase(),
+    routePath,
+    stableStringify(body || {}),
+  ].join('\n');
+}
+
+function signRaftRequest({ routePath, body }) {
+  const secret = raftSharedSecret();
+  if (!secret) return {};
+  const timestamp = Date.now();
+  const payload = raftSignaturePayload({
+    senderID: teeNodeID,
+    timestamp,
+    method: 'POST',
+    routePath,
+    body,
+  });
+  return {
+    'x-tee-node-id': teeNodeID,
+    'x-tee-raft-ts': String(timestamp),
+    'x-tee-raft-signature': crypto.createHmac('sha256', secret).update(payload).digest('hex'),
+  };
+}
+
+function verifyRaftRequest(req, res, next) {
+  if (!req.path.startsWith('/internal/raft/')) {
+    next();
+    return;
+  }
+  try {
+    if (!raftAuthRequired()) {
+      next();
+      return;
+    }
+    const secret = raftSharedSecret();
+    if (!secret) throw new Error('TEE_RAFT_SHARED_SECRET is required for Raft internal RPC');
+    const senderID = String(req.get('x-tee-node-id') || '');
+    const timestamp = Number(req.get('x-tee-raft-ts') || 0);
+    const signature = String(req.get('x-tee-raft-signature') || '');
+    if (!knownRaftNodeIDs().has(senderID) || senderID === teeNodeID) {
+      throw new Error('invalid Raft sender');
+    }
+    if (!timestamp || Math.abs(Date.now() - timestamp) > 30000) {
+      throw new Error('stale Raft RPC timestamp');
+    }
+    const payload = raftSignaturePayload({
+      senderID,
+      timestamp,
+      method: req.method,
+      routePath: req.path,
+      body: req.body,
+    });
+    const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
+    const left = Buffer.from(signature, 'hex');
+    const right = Buffer.from(expected, 'hex');
+    if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) {
+      throw new Error('invalid Raft RPC signature');
+    }
+    req.raftSenderID = senderID;
+    next();
+  } catch (error) {
+    res.status(401).json({ nodeID: teeNodeID, error: error.message });
+  }
+}
+
+app.use(verifyRaftRequest);
 
 function clusterSize() {
   return clusterPeers().length + 1;
@@ -144,6 +235,7 @@ function stepDown(term, leaderID = null) {
 function becomeLeader() {
   consensusState.role = 'leader';
   consensusState.leaderID = teeNodeID;
+  initializePeerReplicationState();
   saveConsensusState();
 }
 
@@ -222,6 +314,10 @@ function makeDigestConsensusEntry({ requestID, digest, response, helperData, pro
 function appendConsensusEntry(entry) {
   const existing = consensusState.log.find((item) => item.entryDigest === entry.entryDigest);
   if (existing) return existing;
+  const prevIndex = Number(entry.index || 0) - 1;
+  if (prevIndex > 0 && !logEntryAt(prevIndex)) {
+    throw new Error(`cannot append non-contiguous Raft entry ${entry.index}; missing ${prevIndex}`);
+  }
   const conflict = logEntryAt(entry.index);
   if (conflict && (Number(conflict.term) !== Number(entry.term) || conflict.entryDigest !== entry.entryDigest)) {
     consensusState.log = consensusState.log.filter((item) => Number(item.index) < Number(entry.index));
@@ -236,6 +332,9 @@ function appendConsensusEntry(entry) {
 function commitConsensusEntry(entryDigest) {
   const entry = consensusState.log.find((item) => item.entryDigest === entryDigest);
   if (!entry) throw new Error(`consensus entry not found: ${entryDigest}`);
+  if (Number(entry.term) !== Number(consensusState.currentTerm)) {
+    throw new Error('leader can only directly commit entries from its current term');
+  }
   entry.status = 'committed';
   entry.committedAt = Math.floor(Date.now() / 1000);
   consensusState.commitIndex = Math.max(Number(consensusState.commitIndex || 0), Number(entry.index || 0));
@@ -414,7 +513,7 @@ async function startElection() {
     try {
       const resp = await fetch(`${peer.url}/internal/raft/request-vote`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...signRaftRequest({ routePath: '/internal/raft/request-vote', body: request }) },
         body: JSON.stringify(request),
       });
       if (!resp.ok) throw new Error(`status ${resp.status}`);
@@ -471,18 +570,93 @@ function makeAppendEntriesPayload({ entries, leaderCommit }) {
   };
 }
 
-async function sendAppendEntries(peer, payload) {
-  const resp = await fetch(`${peer.url}/internal/raft/append-entries`, {
+function initializePeerReplicationState() {
+  for (const peer of clusterPeerDefs()) {
+    if (!peerReplicationState.has(peer.id)) {
+      peerReplicationState.set(peer.id, { nextIndex: lastLogIndex() + 1, matchIndex: 0 });
+    }
+  }
+}
+
+function makeAppendEntriesPayloadFromIndex({ nextIndex, leaderCommit }) {
+  const prevLogIndex = Math.max(Number(nextIndex || 1) - 1, 0);
+  const prevEntry = prevLogIndex > 0 ? logEntryAt(prevLogIndex) : null;
+  const entries = consensusState.log
+    .filter((item) => Number(item.index) >= Number(nextIndex || 1))
+    .map((item) => ({ ...item }));
+  return {
+    term: consensusState.currentTerm,
+    leaderID: teeNodeID,
+    prevLogIndex,
+    prevLogTerm: prevEntry ? Number(prevEntry.term) : 0,
+    entries,
+    leaderCommit,
+  };
+}
+
+async function sendRaftPost(peer, routePath, body) {
+  const resp = await fetch(`${peer.url}${routePath}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
+    headers: { 'content-type': 'application/json', ...signRaftRequest({ routePath, body }) },
+    body: JSON.stringify(body),
   });
   if (!resp.ok) throw new Error(`status ${resp.status}`);
   const data = await resp.json();
+  return data;
+}
+
+async function sendAppendEntries(peer, payload) {
+  const data = await sendRaftPost(peer, '/internal/raft/append-entries', payload);
   if (Number(data.term || 0) > Number(consensusState.currentTerm)) {
     stepDown(Number(data.term), data.leaderID || null);
   }
   return data;
+}
+
+async function replicateLogToPeer(peer, targetIndex) {
+  initializePeerReplicationState();
+  const progress = peerReplicationState.get(peer.id) || { nextIndex: 1, matchIndex: 0 };
+  let attempts = 0;
+  while (Number(progress.matchIndex || 0) < Number(targetIndex) && attempts < Math.max(lastLogIndex() + 2, 4)) {
+    attempts += 1;
+    const payload = makeAppendEntriesPayloadFromIndex({
+      nextIndex: Math.max(Number(progress.nextIndex || 1), 1),
+      leaderCommit: consensusState.commitIndex,
+    });
+    const data = await sendAppendEntries(peer, payload);
+    if (Number(data.term || 0) > Number(consensusState.currentTerm)) {
+      return {
+        nodeID: data.nodeID || peer.id,
+        peerURL: peer.url,
+        accepted: false,
+        matchIndex: data.matchIndex,
+        error: 'stepped down for newer term',
+      };
+    }
+    if (data.success) {
+      progress.matchIndex = Number(data.matchIndex || payload.prevLogIndex);
+      progress.nextIndex = progress.matchIndex + 1;
+      peerReplicationState.set(peer.id, progress);
+      return {
+        nodeID: data.nodeID || peer.id,
+        peerURL: peer.url,
+        accepted: progress.matchIndex >= Number(targetIndex),
+        matchIndex: progress.matchIndex,
+        attempts,
+      };
+    }
+    const conflictIndex = Number(data.conflictIndex || data.matchIndex || 1);
+    progress.nextIndex = Math.max(Math.min(Number(progress.nextIndex || 1) - 1, conflictIndex), 1);
+    peerReplicationState.set(peer.id, progress);
+  }
+  return {
+    nodeID: peer.id,
+    peerURL: peer.url,
+    accepted: false,
+    matchIndex: progress.matchIndex || 0,
+    attempts,
+    error: 'unable to catch up follower before retry limit',
+  };
 }
 
 async function replicateEntryToRaftQuorum(entry) {
@@ -490,36 +664,7 @@ async function replicateEntryToRaftQuorum(entry) {
   const appendAcks = [{ nodeID: teeNodeID, accepted: true, entryDigest: entry.entryDigest }];
   await Promise.all(clusterPeerDefs().map(async (peer) => {
     try {
-      const data = await sendAppendEntries(peer, makeAppendEntriesPayload({
-        entries: [entry],
-        leaderCommit: consensusState.commitIndex,
-      }));
-      if (!data.success && data.reason === 'log consistency check failed') {
-        const retryPayload = {
-          term: consensusState.currentTerm,
-          leaderID: teeNodeID,
-          prevLogIndex: 0,
-          prevLogTerm: 0,
-          entries: [entry],
-          leaderCommit: consensusState.commitIndex,
-        };
-        const retryData = await sendAppendEntries(peer, retryPayload);
-        appendAcks.push({
-          nodeID: retryData.nodeID || peer.id,
-          peerURL: peer.url,
-          accepted: Boolean(retryData.success),
-          matchIndex: retryData.matchIndex,
-          error: retryData.success ? undefined : retryData.reason || 'append rejected after retry',
-        });
-        return;
-      }
-      appendAcks.push({
-        nodeID: data.nodeID || peer.id,
-        peerURL: peer.url,
-        accepted: Boolean(data.success),
-        matchIndex: data.matchIndex,
-        error: data.success ? undefined : data.reason || 'append rejected',
-      });
+      appendAcks.push(await replicateLogToPeer(peer, entry.index));
     } catch (error) {
       appendAcks.push({ nodeID: peer.id, peerURL: peer.url, accepted: false, error: error.message });
     }
@@ -567,7 +712,10 @@ async function collectCommittedCertifications({ hxmsg, committedEntry, commitAck
     try {
       const resp = await fetch(`${peer.url}/internal/raft/sign-committed`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...signRaftRequest({
+          routePath: '/internal/raft/sign-committed',
+          body: { entryDigest: committedEntry.entryDigest },
+        }) },
         body: JSON.stringify({ entryDigest: committedEntry.entryDigest }),
       });
       if (!resp.ok) throw new Error(`status ${resp.status}`);
@@ -732,6 +880,9 @@ app.post('/internal/raft/request-vote', (req, res) => {
       lastLogTerm: candidateLastLogTerm,
     } = req.body;
     if (!candidateID) throw new Error('candidateID is required');
+    if (raftAuthRequired() && req.raftSenderID !== candidateID) {
+      throw new Error('candidateID does not match authenticated sender');
+    }
     let voteGranted = false;
     if (Number(term) < Number(consensusState.currentTerm)) {
       voteGranted = false;
@@ -765,6 +916,9 @@ app.post('/internal/raft/append-entries', async (req, res) => {
   try {
     const { term, leaderID, prevLogIndex, prevLogTerm, entries = [], leaderCommit = 0 } = req.body;
     if (!leaderID) throw new Error('leaderID is required');
+    if (raftAuthRequired() && req.raftSenderID !== leaderID) {
+      throw new Error('leaderID does not match authenticated sender');
+    }
     if (Number(term) < Number(consensusState.currentTerm)) {
       res.json({ nodeID: teeNodeID, term: consensusState.currentTerm, success: false, reason: 'stale term' });
       return;
@@ -774,12 +928,19 @@ app.post('/internal/raft/append-entries', async (req, res) => {
     if (Number(prevLogIndex || 0) > 0) {
       const prevEntry = logEntryAt(prevLogIndex);
       if (!prevEntry || Number(prevEntry.term) !== Number(prevLogTerm)) {
+        let conflictIndex = Math.min(Number(prevLogIndex), lastLogIndex() + 1);
+        if (prevEntry && Number(prevEntry.term) !== Number(prevLogTerm)) {
+          const conflictTerm = Number(prevEntry.term);
+          const firstConflict = consensusState.log.find((item) => Number(item.term) === conflictTerm);
+          conflictIndex = firstConflict ? Number(firstConflict.index) : conflictIndex;
+        }
         res.json({
           nodeID: teeNodeID,
           term: consensusState.currentTerm,
           success: false,
           reason: 'log consistency check failed',
           matchIndex: lastLogIndex(),
+          conflictIndex,
         });
         return;
       }

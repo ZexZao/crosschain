@@ -18,7 +18,7 @@
 | h-xmsg 通用消息结构 | 已实现，`shared/hxmsg/` |
 | Fabric -> EVM | 已实现，h-FSV view + TEE quorum + EVM gateway |
 | EVM -> Fabric | 已实现，receipt MPT proof + committee header update + TEE header window + Fabric chaincode |
-| 多 TEE quorum | 已实现 4 个模拟 TEE 节点，默认 3/4 quorum |
+| 多 TEE quorum | 已实现 5 个模拟 TEE 节点，默认 3/5 quorum |
 | Raft 风格复制 | 已实现 leader election、heartbeat、AppendEntries、commitIndex |
 | 普通消息与 RESPONSE 消息统一入口 | 已实现，策略字段驱动分支 |
 | 挑战响应 | 已实现基础闭环，支持 Completed / Challenged / Compensated |
@@ -161,7 +161,7 @@ EVM 源链的 `CrossChainCallRequested` 事件会绑定 feedback 字段和 `atom
 | `package.json` | Node.js 依赖和 npm scripts |
 | `package-lock.json` | npm 锁文件 |
 | `hardhat.config.js` | Hardhat 本地 EVM 配置 |
-| `docker-compose.yml` | EVM 节点和 4 个 TEE 模拟节点 |
+| `docker-compose.yml` | EVM 节点和 5 个 TEE 模拟节点 |
 | `docker-compose.fabric.yml` | Fabric CA、orderer、4 个 peer 和 fabric-tools |
 | `.gitignore` | Git 忽略规则 |
 
@@ -525,8 +525,8 @@ npm run hxmsg:test:challenge:evm-fabric
 
 ### TEE quorum
 
-- 当前默认 4 个 TEE 节点。
-- 默认阈值为 3/4。
+- 当前默认 5 个 TEE 节点。
+- 默认阈值为 3/5，对应 `2f+1=5`、`f+1=3` 的实验配置。
 - TEE 节点通过 Raft 风格复制提交验证结果。
 - 只有提交后的验证结果才会形成 certification。
 

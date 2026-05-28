@@ -1,6 +1,8 @@
 # 挑战响应测试结果汇总表
 
-更新时间：2026-05-25T10:28:29.415Z
+更新时间：2026-05-28T07:50:00Z
+
+说明：本文保留较早一次端到端交易明细。项目当前默认 TEE 配置已升级为 5 节点、3/5 quorum；最新一次本地运行结果已写入 `runtime/hxmsg-challenge-response-summary.md`、`runtime/hxmsg-evm-fabric-challenge-e2e-summary.md` 和 `runtime/hxmsg-fabric-evm-challenge-e2e-summary.md`。
 
 ## 1. EVM 源端状态机测试
 
