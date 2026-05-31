@@ -4,6 +4,11 @@ pragma solidity ^0.8.24;
 import "./HXMsgLib.sol";
 import "./TEERegistry.sol";
 
+interface IERC20EscrowToken {
+    function transferFrom(address from, address to, uint256 value) external returns (bool);
+    function transfer(address to, uint256 value) external returns (bool);
+}
+
 contract EvmSourceContract {
     enum RequestStatus {
         None,
@@ -57,10 +62,18 @@ contract EvmSourceContract {
         HXMsgLib.Atomicity atomicity;
     }
 
+    struct TokenEscrow {
+        address token;
+        address owner;
+        uint256 amount;
+        bool refunded;
+    }
+
     uint64 public nonce;
     TEERegistry public immutable teeRegistry;
     mapping(bytes32 => RequestRecord) public requests;
     mapping(bytes32 => bool) public consumedResponses;
+    mapping(bytes32 => TokenEscrow) public tokenEscrows;
 
     event CrossChainCallRequested(
         bytes32 indexed requestID,
@@ -85,6 +98,8 @@ contract EvmSourceContract {
     event ChallengeStarted(bytes32 indexed requestID, uint64 challengeDeadline);
     event ResponseCompleted(bytes32 indexed requestID, bytes32 responseDigest);
     event RequestCompensated(bytes32 indexed requestID, CommitmentType commitmentType);
+    event TokenEscrowLocked(bytes32 indexed requestID, address indexed token, address indexed owner, uint256 amount);
+    event TokenEscrowRefunded(bytes32 indexed requestID, address indexed token, address indexed owner, uint256 amount);
 
     constructor(address registry) {
         teeRegistry = TEERegistry(registry);
@@ -113,6 +128,46 @@ contract EvmSourceContract {
             expireAt,
             policy
         );
+    }
+
+    function submitTokenEscrowHXMsgRequest(
+        bytes32 targetChainID,
+        bytes32 targetDomainID,
+        bytes32 targetObject,
+        bytes4 functionSelector,
+        bytes32 callDataHash,
+        bytes32 businessPayloadHash,
+        bytes32 receiver,
+        uint64 expireAt,
+        RequestPolicy calldata policy,
+        address token,
+        uint256 amount
+    ) external returns (bytes32) {
+        require(token != address(0), "bad token");
+        require(amount > 0, "bad amount");
+        require(policy.atomicity.required, "atomicity required");
+        require(policy.atomicity.commitmentType == uint8(CommitmentType.TOKEN_ESCROW), "token escrow required");
+        _validatePolicy(policy);
+        bytes32 requestID = _createRequest(
+            targetChainID,
+            targetDomainID,
+            targetObject,
+            functionSelector,
+            callDataHash,
+            businessPayloadHash,
+            receiver,
+            expireAt,
+            policy
+        );
+        require(IERC20EscrowToken(token).transferFrom(msg.sender, address(this), amount), "escrow transfer failed");
+        tokenEscrows[requestID] = TokenEscrow({
+            token: token,
+            owner: msg.sender,
+            amount: amount,
+            refunded: false
+        });
+        emit TokenEscrowLocked(requestID, token, msg.sender, amount);
+        return requestID;
     }
 
     function _validatePolicy(RequestPolicy calldata policy) internal view {
@@ -258,14 +313,21 @@ contract EvmSourceContract {
         require(record.status == RequestStatus.Challenged, "not challenged");
         require(block.timestamp > record.challengeDeadline, "challenge active");
         require(keccak256(failureData) == record.failureActionHash, "bad failure data");
-        require(
-            record.commitmentType == CommitmentType.INTENT_ONLY || record.commitmentType == CommitmentType.STATE_LOCK,
-            "unsupported commitment"
-        );
+        require(record.commitmentType == CommitmentType.TOKEN_ESCROW, "unsupported commitment");
         RequestStatus from = record.status;
+        _refundTokenEscrow(requestID);
         record.status = RequestStatus.Compensated;
         emit RequestStatusChanged(requestID, from, RequestStatus.Compensated);
         emit RequestCompensated(requestID, record.commitmentType);
+    }
+
+    function _refundTokenEscrow(bytes32 requestID) internal {
+        TokenEscrow storage escrow = tokenEscrows[requestID];
+        require(escrow.token != address(0), "token escrow not found");
+        require(!escrow.refunded, "token escrow refunded");
+        escrow.refunded = true;
+        require(IERC20EscrowToken(escrow.token).transfer(escrow.owner, escrow.amount), "refund transfer failed");
+        emit TokenEscrowRefunded(requestID, escrow.token, escrow.owner, escrow.amount);
     }
 
     function _verifyTEEQuorum(

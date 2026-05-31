@@ -8,6 +8,7 @@ const { buildHXMsgFromEvmReceipt } = require('../hxmsg-builder/evm-to-fabric');
 const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { buildCommitteeHeaderUpdate } = require('../shared/evm/header-committee');
 const { FeedbackType } = require('../shared/hxmsg');
+const { normalizeBusinessPayload } = require('../shared/xmsg');
 const { writeJSON } = require('../shared/utils');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
@@ -73,6 +74,29 @@ async function queryInbound(contract, requestID) {
   return data && data.length > 0 ? JSON.parse(data.toString()) : null;
 }
 
+async function queryBusinessRecord(contract, requestID) {
+  const data = await contract.evaluateTransaction('QueryBusinessRecordByRequest', requestID);
+  return data && data.length > 0 ? JSON.parse(data.toString()) : null;
+}
+
+function expectedBusinessStatus(op) {
+  return {
+    asset_lock: 'ASSET_SETTLED',
+    mint_confirm: 'ASSET_SETTLED',
+    receivable_attest: 'RECEIVABLE_ATTESTED',
+    logistics_sync: 'LOGISTICS_SYNCED',
+    medical_consent: 'CONSENT_GRANTED',
+    oracle_update: 'ORACLE_UPDATED',
+    approval_commit: 'APPROVAL_COMMITTED',
+    subsidy_confirm: 'ASSET_SETTLED',
+    identity_attest: 'IDENTITY_ATTESTED',
+    carbon_retire: 'CARBON_RETIRED',
+    iot_alert: 'IOT_ALERT_RECORDED',
+    certificate_verify: 'CERTIFICATE_VERIFIED',
+    benchmark_store: 'BENCHMARK_STORED',
+  }[op] || 'RECORDED';
+}
+
 async function main() {
   fs.ensureDirSync(RUNTIME_DIR);
   const projectRoot = path.join(__dirname, '..');
@@ -88,11 +112,12 @@ async function main() {
     {
       caseId: 'EVM-FABRIC-001',
       payload: {
-        op: 'fabric_invoke',
-        recordId: `EVM-FABRIC-001-${Date.now()}`,
-        actor: 'evm.userA',
-        amount: '1',
-        metadata: 'stage4 melv-ef request',
+        op: 'oracle_update',
+        feed: `EVM_FABRIC_PRICE_${Date.now()}`,
+        price: '1.2345',
+        sourceAgency: 'evm-oracle-bridge',
+        roundId: Date.now(),
+        metadata: 'stage4 melv-ef oracle update',
         requireAck: false,
       },
     },
@@ -107,6 +132,7 @@ async function main() {
       const result = { caseId: tc.caseId, pass: false };
       try {
         const invoke = requestEvmFabricCall(projectRoot, tc.payload);
+        const expectedPayload = normalizeBusinessPayload(tc.payload);
         const receipt = await provider.getTransactionReceipt(invoke.txHash);
         const block = await provider.getBlock(receipt.blockNumber);
         const receiptProof = await buildReceiptProof({
@@ -149,6 +175,7 @@ async function main() {
           JSON.stringify(voucher)
         );
         const inbound = await queryInbound(contract, hxmsg.header.requestID);
+        const businessRecord = await queryBusinessRecord(contract, hxmsg.header.requestID);
         const sourceRecord = await sourceView.requests(hxmsg.header.requestID);
         result.requestID = hxmsg.header.requestID;
         result.evmTxHash = invoke.txHash;
@@ -169,9 +196,18 @@ async function main() {
         result.teeVerification = teeResp.data.verificationResult;
         result.teeCluster = teeResp.data.teeClusterCertification;
         result.inbound = inbound;
+        result.businessRecord = businessRecord;
         result.pass = Boolean(inbound)
-          && inbound.recordId === tc.payload.recordId
+          && Boolean(businessRecord)
+          && inbound.recordId === expectedPayload.recordId
+          && inbound.actor === expectedPayload.actor
+          && inbound.amount === expectedPayload.amount
           && inbound.status === 'executed'
+          && businessRecord.op === inbound.op
+          && businessRecord.recordId === inbound.recordId
+          && businessRecord.actor === inbound.actor
+          && businessRecord.amount === inbound.amount
+          && businessRecord.status === expectedBusinessStatus(inbound.op)
           && protocolCheck.feedbackDisabled
           && protocolCheck.atomicityDisabled
           && result.sourceRequest.challengeWindow === 0

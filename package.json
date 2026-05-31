@@ -16,6 +16,7 @@
     "hxmsg:test:challenge": "hardhat run scripts/run-challenge-response-tests.js",
     "hxmsg:test:challenge:fabric-evm": "node scripts/run-fabric-evm-challenge-e2e.js",
     "hxmsg:test:challenge:evm-fabric": "node scripts/run-evm-fabric-challenge-e2e.js",
+    "hxmsg:test:asset": "node scripts/run-asset-transfer-refund-tests.js",
     "raft:test": "node scripts/run-raft-cluster-tests.js",
     "evm:fabric:request": "node scripts/request-evm-fabric-call.js",
     "fabric:wallet": "node scripts/export-fabric-wallet.js",

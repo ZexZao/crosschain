@@ -21,6 +21,8 @@
 | 多 TEE quorum | 已实现 5 个模拟 TEE 节点，默认 3/5 quorum |
 | Raft 风格复制 | 已实现 leader election、heartbeat、AppendEntries、commitIndex |
 | 普通消息与 RESPONSE 消息统一入口 | 已实现，策略字段驱动分支 |
+| 目标链业务执行 | 已实现，EVM 和 Fabric 目标侧按业务类别执行真实动作 |
+| 资产转账和退款 | 已实现实验闭环：Fabric escrow 锁定扣款、EVM ERC20 发放、Fabric challenge timeout 自动退款、EVM token escrow 自动退款 |
 | 挑战响应 | 已实现基础闭环，支持 Completed / Challenged / Compensated |
 | EVM gas 优化 | 已实现 `HXMsgMinimal` 目标链提交，完整 h-xmsg 由 TEE digest 绑定 |
 | 测试结果落盘 | 已实现，输出到 `runtime/` |
@@ -31,6 +33,7 @@
 - EVM header committee 当前是模拟委员会，后续可替换为正式区块头管理委员会。
 - Fabric 网络当前是本地单组织多 peer 环境，策略按 `Org1MSP` 配置，接口保留多组织扩展。
 - 常驻 watcher / responder 尚未实现，当前由测试脚本触发 RESPONSE、challenge 和 compensation。
+- EVM 合约和 Fabric chaincode 当前仍从调用参数或 certification envelope 读取 quorum threshold；后续应改为从链上/链码可信 cluster 配置读取。
 
 ## 整体架构
 
@@ -162,7 +165,7 @@ EVM 源链的 `CrossChainCallRequested` 事件会绑定 feedback 字段和 `atom
 | `package-lock.json` | npm 锁文件 |
 | `hardhat.config.js` | Hardhat 本地 EVM 配置 |
 | `docker-compose.yml` | EVM 节点和 5 个 TEE 模拟节点 |
-| `docker-compose.fabric.yml` | Fabric CA、orderer、4 个 peer 和 fabric-tools |
+| `docker-compose.fabric.yml` | Fabric CA、orderer、4 个 peer 和 fabric-tools；链码容器网络和启动超时已按本地实验环境配置 |
 | `.gitignore` | Git 忽略规则 |
 
 ### `contracts/`
@@ -172,10 +175,13 @@ EVM 侧智能合约。
 | 文件 | 作用 |
 |---|---|
 | `EvmSourceContract.sol` | EVM 源链请求合约；统一入口 `submitHXMsgRequest(..., policy)`；维护请求状态机和挑战响应 |
+| `submitTokenEscrowHXMsgRequest` | `EvmSourceContract` 中的资产请求入口；真实锁定 ERC20，超时补偿时自动退款 |
 | `HXMsgGateway.sol` | EVM 目标链网关；验证 `HXMsgMinimal`、TEE quorum、目标绑定、防重放和过期时间 |
 | `HXMsgLib.sol` | 链上 h-xmsg 压缩结构、delivery digest、response digest、atomicity hash |
 | `TEERegistry.sol` | EVM 侧可信 TEE 地址注册表 |
-| `TargetContract.sol` | 测试用目标业务合约，只接受 gateway 调用并记录执行摘要 |
+| `TargetContract.sol` | EVM 目标业务路由器；只接受 gateway 调用，解码业务 payload 并分发到分类服务合约 |
+| `BusinessServiceContracts.sol` | EVM 分类业务服务；资产结算、应收账款、物流、授权、Oracle、多方审批 |
+| `CrossChainToken.sol` | 实验 ERC20；资产类跨链消息可在目标 EVM 发放真实 token |
 
 ### `fabric-chaincode/`
 
@@ -183,7 +189,7 @@ Fabric 链码。
 
 | 路径 | 作用 |
 |---|---|
-| `fabric-chaincode/xcall/index.js` | Fabric xcall 链码；发起 Fabric -> EVM、执行 EVM -> Fabric、维护 commitment、处理 RESPONSE/challenge/compensation |
+| `fabric-chaincode/xcall/index.js` | Fabric xcall 链码；发起 Fabric -> EVM、执行 EVM -> Fabric、维护 commitment、处理 RESPONSE/challenge/compensation，并按业务类别执行真实 Fabric 状态变化 |
 | `fabric-chaincode/xcall/package.json` | Fabric 链码 Node.js 依赖 |
 
 关键链码接口：
@@ -193,6 +199,14 @@ Fabric 链码。
 | `EmitXCall` | Fabric 源链发起跨链请求，写入 `crosschainEvents:{requestID}` |
 | `QueryCrosschainEvent` | h-FSV view 查询入口 |
 | `ExecuteHXMsg` | Fabric 目标链执行 EVM -> Fabric h-xmsg |
+| `QueryBusinessRecord` | 按 `op / recordId` 查询目标链业务状态 |
+| `QueryBusinessRecordByRequest` | 按 `requestID` 查询目标链业务状态 |
+| `InitAssetBalance` | 初始化 Fabric 实验资产余额 |
+| `LockAssetXCall` | Fabric 源链真实扣减余额并创建 escrow 后发起跨链请求 |
+| `RefundAssetEscrow` | Fabric 源链真实退回 escrow 锁定资产 |
+| `CompensateAfterChallenge` | challenge timeout 后按 commitment type 自动分发补偿；`TOKEN_ESCROW` 会触发 escrow refund |
+| `ExecuteHXMsg` | EVM -> Fabric 目标执行入口；验证 TEE quorum 后分发到资产、应收账款、物流、授权、Oracle、审批等业务服务 |
+| `QueryAssetBalance` / `QueryAssetEscrow` | 查询 Fabric 资产余额和 escrow |
 | `BindCommitmentHXMsg` | Fabric 源链把 atomic commitment 与 TEE 证明过的 `hmsgDigest` 绑定 |
 | `CompleteWithResponse` | 源链收到 TEE quorum RESPONSE 后完成请求 |
 | `StartChallenge` | feedback timeout 后进入 challenge |
@@ -315,6 +329,8 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 | `challenge-response-test-results-table.md` | 挑战响应测试结果表 |
 | `security-gap-review-against-design-goals.md` | 对设计初衷的安全差距审查 |
 | `paper-readiness-gaps.md` | 论文发表视角下的不足 |
+| `project-improvement-review-2026-05-29.md` | 按设计初衷梳理当前实现和后续改进项 |
+| `business-execution-logic.md` | 目标链真实业务执行逻辑说明 |
 
 ### `runtime/`
 
@@ -369,7 +385,8 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 16. EVM 侧提交 `HXMsgMinimal`、`callData` 和 TEE certifications 到 `HXMsgGateway.executeHXMsgMinimalCluster`。
 17. `HXMsgGateway` 检查防重放、过期时间、目标链、目标合约、`callDataHash`、`targetExecutionHash` 和 TEE quorum。
 18. 验证通过后，`HXMsgGateway` 调用 `TargetContract.execute(requestID, callData)`。
-19. 目标合约记录执行结果，普通消息流程结束。
+19. 目标合约解码 `op / recordId / actor / amount / metadata / requireAck`，写入 `businessRecords` 和业务索引。
+20. 普通消息流程结束。
 
 ### EVM -> Fabric 普通消息
 
@@ -391,7 +408,8 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 16. Fabric 侧调用 `ExecuteHXMsg(hxmsg, callData, cert)`。
 17. Fabric 链码检查防重放、过期时间、目标 Fabric chainID/domain、目标 chaincode、`callDataHash`、`targetExecutionHash` 和 TEE quorum。
 18. Fabric 链码写入 `crosschainExec:{requestID}` 和 `inbound:{requestID}`。
-19. 普通消息流程结束。
+19. Fabric 链码解码业务 payload，写入 `business:{op}:{recordId}` 和 `businessByRequest:{requestID}`。
+20. 普通消息流程结束。
 
 ### 需要 RESPONSE 的消息
 
@@ -466,6 +484,12 @@ EVM -> Fabric：
 npm run hxmsg:test:evm-fabric
 ```
 
+真实资产锁定、EVM token 发放和 Fabric 退款：
+
+```bash
+npm run hxmsg:test:asset
+```
+
 EVM 源链挑战响应状态机：
 
 ```bash
@@ -486,9 +510,11 @@ npm run hxmsg:test:challenge:evm-fabric
 | 测试 | 结果 |
 |---|---|
 | `npm run compile` | PASS |
+| `npm run raft:test` | 6/6 PASS |
 | `npm run hxmsg:test:forward` | 8/8 PASS |
 | `npm run hxmsg:test:evm-fabric` | 1/1 PASS |
-| `npm run hxmsg:test:challenge` | 5/5 PASS |
+| `npm run hxmsg:test:asset` | 2/2 PASS |
+| `npm run hxmsg:test:challenge` | 6/6 PASS |
 | `npm run hxmsg:test:challenge:fabric-evm` | PASS |
 | `npm run hxmsg:test:challenge:evm-fabric` | PASS |
 
@@ -496,10 +522,14 @@ npm run hxmsg:test:challenge:evm-fabric
 
 | 文件 | 内容 |
 |---|---|
+| `runtime/raft-cluster-test-results.json` | 5 TEE Raft 集群故障测试 |
+| `runtime/raft-cluster-test-summary.md` | 5 TEE Raft 集群测试汇总 |
 | `runtime/hxmsg-fabric-evm-results.json` | Fabric -> EVM 主线测试 |
 | `runtime/hxmsg-test-summary.md` | Fabric -> EVM 汇总 |
 | `runtime/hxmsg-evm-fabric-results.json` | EVM -> Fabric 主线测试 |
 | `runtime/hxmsg-evm-fabric-summary.md` | EVM -> Fabric 汇总 |
+| `runtime/real-asset-transfer-refund-results.json` | 真实资产锁定、发放和退款测试 |
+| `runtime/real-asset-transfer-refund-summary.md` | 真实资产测试汇总 |
 | `runtime/hxmsg-challenge-response-results.json` | 挑战响应状态机测试 |
 | `runtime/hxmsg-challenge-response-summary.md` | 挑战响应状态机汇总 |
 | `runtime/hxmsg-fabric-evm-challenge-e2e-results.json` | Fabric -> EVM RESPONSE 端到端 |
@@ -536,6 +566,30 @@ npm run hxmsg:test:challenge:evm-fabric
 - 需要 RESPONSE 的消息通过 `feedback + atomicity` 开启挑战响应。
 - 成功条件是 TEE quorum RESPONSE，而不是 HTLC preimage。
 - 失败收束是 `timeout + challengeWindow + compensation`。
+
+### 业务执行
+
+- 目标链不再只是记录 request/hash。
+- EVM 目标合约会写入 `businessRecords[requestID]`，并提供 `getBusinessRecord` / `getBusinessRecordByKey` 查询。
+- EVM 目标合约会部署实验 ERC20 `CrossChainToken`；资产类 op 可真实 mint token 到目标地址。
+- Fabric 目标链码会写入 `business:{op}:{recordId}` 和 `businessByRequest:{requestID}`。
+- Fabric 源链码支持 `LockAssetXCall`，会真实扣减余额并写入 `assetEscrow:{requestID}`。
+- Fabric `CompensateAfterChallenge` 会在 `TOKEN_ESCROW` 超时后自动分发到 escrow refund handler，真实把资产退回 owner。
+- EVM `EvmSourceContract.submitTokenEscrowHXMsgRequest` 会真实锁定 ERC20，超时补偿时自动退回用户。
+- 当前业务执行覆盖 `asset_lock`、`mint_confirm`、`receivable_attest`、`logistics_sync`、`medical_consent`、`oracle_update`、`approval_commit`、`subsidy_confirm` 等测试用例。
+- 当前 `TOKEN_ESCROW` 自动补偿已实现；解锁、撤销授权、handler registry、成功 RESPONSE 后的 release/burn/settlement 策略仍是下一步扩展点。
+
+## 当前最重要的改进项
+
+完整梳理见 `docs/project-improvement-review-2026-05-29.md`。当前优先级最高的改进是：
+
+1. 固定 TEE cluster threshold：EVM 合约和 Fabric chaincode 不应接受 relayer 传入的 threshold，应从可信 cluster 配置读取。
+2. 真实 TEE remote attestation：当前 TEE key 只是模拟服务生成的签名 key，后续需要与 TEE measurement 绑定。
+3. 正式 Header Committee：当前 EVM header update 由模拟委员会签名，后续需要 epoch、轮换、成员证明和 finalized checkpoint 来源。
+4. 生产级 Raft 增强：当前实现已覆盖主路径，但还缺少 WAL、snapshot、log compaction、动态成员变更和复杂网络分区恢复测试。
+5. 常驻 relayer / watcher / responder：当前由测试脚本驱动完整闭环，后续需要独立进程负责监听、构造 proof、投递、重试、challenge 和 response。
+6. 多组织 Fabric 实验：当前网络是单组织 `Org1MSP`，后续需要验证多组织 endorsement policy 和 peer view 不一致拒绝路径。
+7. 业务补偿执行：当前 compensation 主要完成状态收束，换币或资产锁定场景仍需要 escrow / unlock / custom executor。
 
 ## 后续扩展
 

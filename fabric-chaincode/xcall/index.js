@@ -159,6 +159,54 @@ function computeResponseDigest(response) {
   );
 }
 
+function parseAmountUnits(value) {
+  const text = String(value || '0');
+  if (!/^[0-9]+(\.[0-9]{1,4})?$/.test(text)) {
+    throw new Error(`invalid asset amount: ${text}`);
+  }
+  const [whole, frac = ''] = text.split('.');
+  return BigInt(whole) * 10000n + BigInt((frac + '0000').slice(0, 4));
+}
+
+function unitsToString(value) {
+  return String(value);
+}
+
+function assetBalanceKey(account, assetType) {
+  return `assetBalance:${assetType}:${account}`;
+}
+
+async function getAssetBalanceUnits(ctx, account, assetType) {
+  const data = await ctx.stub.getState(assetBalanceKey(account, assetType));
+  return data && data.length > 0 ? BigInt(data.toString()) : 0n;
+}
+
+async function putAssetBalanceUnits(ctx, account, assetType, value) {
+  if (value < 0n) throw new Error('negative balance');
+  await ctx.stub.putState(assetBalanceKey(account, assetType), Buffer.from(unitsToString(value)));
+}
+
+async function refundAssetEscrowRecord(ctx, requestID) {
+  const data = await ctx.stub.getState(`assetEscrow:${requestID}`);
+  if (!data || data.length === 0) throw new Error(`asset escrow not found: ${requestID}`);
+  const escrow = JSON.parse(data.toString());
+  if (escrow.status !== 'Locked') throw new Error(`escrow is not locked: ${escrow.status}`);
+  const balance = await getAssetBalanceUnits(ctx, escrow.owner, escrow.assetType);
+  const amountUnits = BigInt(escrow.amountUnits);
+  await putAssetBalanceUnits(ctx, escrow.owner, escrow.assetType, balance + amountUnits);
+  escrow.status = 'Refunded';
+  escrow.refundTxID = ctx.stub.getTxID();
+  escrow.updatedAt = new Date().toISOString();
+  await ctx.stub.putState(`assetEscrow:${requestID}`, Buffer.from(JSON.stringify(escrow)));
+  ctx.stub.setEvent('ASSET_ESCROW_REFUNDED', Buffer.from(JSON.stringify({
+    requestID,
+    owner: escrow.owner,
+    assetType: escrow.assetType,
+    amountUnits: escrow.amountUnits
+  })));
+  return escrow;
+}
+
 function computeTargetExecutionHashFromHXMsg(hxmsg) {
   return ethers.keccak256(
     ABI.encode(
@@ -313,6 +361,200 @@ function computeHXMsgDeliveryDigest(hxmsg) {
       [chainHash, actionHash, feedbackHash]
     )
   );
+}
+
+function businessKey(op, recordId) {
+  return `${op}:${recordId}`;
+}
+
+function businessStatusForOp(op) {
+  const statuses = {
+    asset_lock: 'ASSET_SETTLED',
+    mint_confirm: 'ASSET_SETTLED',
+    receivable_attest: 'RECEIVABLE_ATTESTED',
+    logistics_sync: 'LOGISTICS_SYNCED',
+    medical_consent: 'CONSENT_GRANTED',
+    oracle_update: 'ORACLE_UPDATED',
+    approval_commit: 'APPROVAL_COMMITTED',
+    subsidy_confirm: 'ASSET_SETTLED',
+    token_transfer: 'TOKEN_TRANSFERRED',
+    identity_attest: 'IDENTITY_ATTESTED',
+    carbon_retire: 'CARBON_RETIRED',
+    iot_alert: 'IOT_ALERT_RECORDED',
+    certificate_verify: 'CERTIFICATE_VERIFIED',
+    benchmark_store: 'BENCHMARK_STORED'
+  };
+  return statuses[op] || 'RECORDED';
+}
+
+function parseBusinessMetadata(metadata) {
+  if (!metadata) return {};
+  try {
+    return JSON.parse(metadata);
+  } catch (_error) {
+    return {};
+  }
+}
+
+async function applyTokenTransfer(ctx, parsedPayload, rawPayload) {
+  // Fabric 侧真实转账：从一个逻辑 Fabric 账户扣款，并给另一个账户加款。
+  // 该函数用于目标链 token_transfer 操作，不用于源链 escrow 锁定。
+  const assetType = rawPayload.assetType || 'XCST';
+  const from = rawPayload.from || rawPayload.sender || rawPayload.owner;
+  const to = rawPayload.to || rawPayload.recipient || rawPayload.targetRecipient || parsedPayload.actor;
+  if (!from || !to) throw new Error('token_transfer requires from and to');
+  const amountUnits = parseAmountUnits(parsedPayload.amount);
+  const fromBalance = await getAssetBalanceUnits(ctx, from, assetType);
+  if (fromBalance < amountUnits) {
+    throw new Error(`insufficient Fabric asset balance: ${fromBalance}/${amountUnits}`);
+  }
+  const toBalance = await getAssetBalanceUnits(ctx, to, assetType);
+  await putAssetBalanceUnits(ctx, from, assetType, fromBalance - amountUnits);
+  await putAssetBalanceUnits(ctx, to, assetType, toBalance + amountUnits);
+  const transfer = {
+    service: 'fabric-token-transfer',
+    assetType,
+    from,
+    to,
+    amountUnits: unitsToString(amountUnits),
+    fromBalanceAfter: unitsToString(fromBalance - amountUnits),
+    toBalanceAfter: unitsToString(toBalance + amountUnits)
+  };
+  await ctx.stub.putState(`fabricTransfer:${rawPayload.transferId || parsedPayload.recordId}`, Buffer.from(JSON.stringify(transfer)));
+  return transfer;
+}
+
+async function creditFabricAsset(ctx, parsedPayload, rawPayload) {
+  // Fabric 侧真实结算：在 EVM 源链事实被验证后，把规范化金额入账到接收方
+  // Fabric 资产余额中。
+  const assetType = rawPayload.assetType || 'XCST';
+  const account = rawPayload.recipient || rawPayload.targetRecipient || rawPayload.beneficiary || rawPayload.applicant || parsedPayload.actor;
+  if (!account) throw new Error(`${parsedPayload.op} requires recipient account`);
+  const amountUnits = parseAmountUnits(parsedPayload.amount);
+  const balance = await getAssetBalanceUnits(ctx, account, assetType);
+  await putAssetBalanceUnits(ctx, account, assetType, balance + amountUnits);
+  const settlement = {
+    service: 'fabric-asset-settlement',
+    assetType,
+    account,
+    amountUnits: unitsToString(amountUnits),
+    balanceAfter: unitsToString(balance + amountUnits)
+  };
+  await ctx.stub.putState(`fabricSettlement:${parsedPayload.recordId}`, Buffer.from(JSON.stringify(settlement)));
+  return settlement;
+}
+
+async function executeBusinessService(ctx, parsedPayload) {
+  // 按业务类别分发目标链动作。下面每个分支都会写入领域专属账本对象，
+  // 或真实改变 Fabric 资产余额，而不是只修改通用 inbound 状态。
+  const rawPayload = parseBusinessMetadata(parsedPayload.metadata);
+  const metadataHash = ethers.keccak256(ethers.toUtf8Bytes(parsedPayload.metadata || ''));
+  if (['asset_lock', 'mint_confirm', 'subsidy_confirm'].includes(parsedPayload.op)) {
+    return creditFabricAsset(ctx, parsedPayload, rawPayload);
+  }
+  if (parsedPayload.op === 'token_transfer') {
+    return applyTokenTransfer(ctx, parsedPayload, rawPayload);
+  }
+  if (parsedPayload.op === 'receivable_attest') {
+    const result = {
+      service: 'fabric-receivable-registry',
+      receivableId: parsedPayload.recordId,
+      supplier: parsedPayload.actor,
+      amountUnits: unitsToString(parseAmountUnits(parsedPayload.amount)),
+      metadataHash,
+      attested: true
+    };
+    await ctx.stub.putState(`receivable:${parsedPayload.recordId}`, Buffer.from(JSON.stringify(result)));
+    return result;
+  }
+  if (parsedPayload.op === 'logistics_sync') {
+    const result = {
+      service: 'fabric-logistics-tracker',
+      waybillId: parsedPayload.recordId,
+      inspector: parsedPayload.actor,
+      reading: parsedPayload.amount,
+      metadataHash
+    };
+    await ctx.stub.putState(`logistics:${parsedPayload.recordId}`, Buffer.from(JSON.stringify(result)));
+    return result;
+  }
+  if (parsedPayload.op === 'medical_consent') {
+    const durationDays = Number(parsedPayload.amount);
+    if (!Number.isInteger(durationDays) || durationDays <= 0) throw new Error('medical_consent requires positive duration');
+    const now = getTxTime(ctx);
+    const result = {
+      service: 'fabric-consent-registry',
+      consentId: parsedPayload.recordId,
+      grantee: parsedPayload.actor,
+      durationDays,
+      grantedAt: now,
+      expiresAt: now + durationDays * 24 * 3600,
+      active: true,
+      metadataHash
+    };
+    await ctx.stub.putState(`consent:${parsedPayload.recordId}`, Buffer.from(JSON.stringify(result)));
+    return result;
+  }
+  if (parsedPayload.op === 'oracle_update') {
+    const result = {
+      service: 'fabric-oracle-feed',
+      feedId: parsedPayload.recordId,
+      publisher: parsedPayload.actor,
+      priceUnits: unitsToString(parseAmountUnits(parsedPayload.amount)),
+      metadataHash
+    };
+    await ctx.stub.putState(`oracle:${parsedPayload.recordId}`, Buffer.from(JSON.stringify(result)));
+    return result;
+  }
+  if (parsedPayload.op === 'approval_commit') {
+    const threshold = Number(parsedPayload.amount);
+    if (!Number.isInteger(threshold) || threshold <= 0) throw new Error('approval_commit requires positive threshold');
+    const result = {
+      service: 'fabric-approval-workflow',
+      workflowId: parsedPayload.recordId,
+      approvers: parsedPayload.actor,
+      threshold,
+      passed: true,
+      metadataHash
+    };
+    await ctx.stub.putState(`approval:${parsedPayload.recordId}`, Buffer.from(JSON.stringify(result)));
+    return result;
+  }
+  throw new Error(`unsupported business op: ${parsedPayload.op}`);
+}
+
+async function applyBusinessAction(ctx, { requestID, hmsgDigest, callDataHash, parsedPayload, sourceChainType }) {
+  const key = businessKey(parsedPayload.op, parsedPayload.recordId);
+  const serviceResult = await executeBusinessService(ctx, parsedPayload);
+  const record = {
+    requestID,
+    businessKey: key,
+    op: parsedPayload.op,
+    recordId: parsedPayload.recordId,
+    actor: parsedPayload.actor,
+    amount: parsedPayload.amount,
+    metadataHash: ethers.keccak256(ethers.toUtf8Bytes(parsedPayload.metadata || '')),
+    requireAck: Boolean(parsedPayload.requireAck),
+    status: businessStatusForOp(parsedPayload.op),
+    service: serviceResult.service,
+    serviceResultHash: ethers.keccak256(ethers.toUtf8Bytes(stableStringify(serviceResult))),
+    serviceResult,
+    sourceChainType,
+    hmsgDigest,
+    callDataHash,
+    fabricTxId: ctx.stub.getTxID(),
+    updatedAt: new Date().toISOString()
+  };
+  await ctx.stub.putState(`business:${key}`, Buffer.from(JSON.stringify(record)));
+  await ctx.stub.putState(`businessByRequest:${requestID}`, Buffer.from(JSON.stringify(record)));
+  await ctx.stub.putState(`businessOp:${parsedPayload.op}:${requestID}`, Buffer.from(JSON.stringify({
+    requestID,
+    businessKey: key,
+    status: record.status,
+    updatedAt: record.updatedAt
+  })));
+  ctx.stub.setEvent('BUSINESS_ACTION_APPLIED', Buffer.from(JSON.stringify(record)));
+  return record;
 }
 
 async function isTrustedTEE(ctx, address) {
@@ -525,6 +767,142 @@ class XCallContract extends Contract {
     });
   }
 
+  async InitAssetBalance(ctx, account, assetType, amount) {
+    const units = parseAmountUnits(amount);
+    await putAssetBalanceUnits(ctx, account, assetType || 'XCST', units);
+    return JSON.stringify({ ok: true, account, assetType: assetType || 'XCST', balanceUnits: unitsToString(units) });
+  }
+
+  async QueryAssetBalance(ctx, account, assetType) {
+    const units = await getAssetBalanceUnits(ctx, account, assetType || 'XCST');
+    return JSON.stringify({ account, assetType: assetType || 'XCST', balanceUnits: unitsToString(units) });
+  }
+
+  async QueryAssetEscrow(ctx, requestID) {
+    const data = await ctx.stub.getState(`assetEscrow:${requestID}`);
+    return data && data.length > 0 ? data.toString() : '';
+  }
+
+  async LockAssetXCall(ctx, payloadJson) {
+    const payload = parseJson(payloadJson, 'payloadJson');
+    const businessPayload = payload.businessPayload || payload.payload || payload;
+    const owner = businessPayload.owner || businessPayload.actor;
+    if (!owner) throw new Error('asset lock owner is required');
+    const assetType = businessPayload.assetType || payload.assetType || 'XCST';
+    const amount = businessPayload.amount;
+    const amountUnits = parseAmountUnits(amount);
+    if (amountUnits <= 0n) throw new Error('asset lock amount must be positive');
+
+    const before = await getAssetBalanceUnits(ctx, owner, assetType);
+    if (before < amountUnits) {
+      throw new Error(`insufficient Fabric asset balance: ${before}/${amountUnits}`);
+    }
+
+    const nonceKey = 'xcall_nonce';
+    const nonceBytes = await ctx.stub.getState(nonceKey);
+    const nonce = nonceBytes && nonceBytes.length > 0 ? Number(nonceBytes.toString()) + 1 : 1;
+    await ctx.stub.putState(nonceKey, Buffer.from(String(nonce)));
+
+    const txId = ctx.stub.getTxID();
+    const txTime = ctx.stub.getTxTimestamp();
+    const createdAt = Number(txTime.seconds.low || txTime.seconds || Math.floor(Date.now() / 1000));
+    const requestID = payload.requestID || ethers.keccak256(
+      ethers.toUtf8Bytes(`fabric-lock:${ctx.stub.getChannelID()}:${txId}:${nonce}`)
+    );
+    const targetObject = payload.targetObject || (
+      payload.targetContract ? addressToBytes32(payload.targetContract) : ethers.ZeroHash
+    );
+    const receiver = payload.receiver || targetObject;
+    const functionSelector = payload.functionSelector || selectorOf('execute(bytes32,bytes)');
+    const callDataHash = payload.callDataHash;
+    if (!callDataHash) throw new Error('payload.callDataHash is required for h-xmsg binding');
+    const expireAt = Number(payload.expireAt || (createdAt + 3600));
+    const feedback = normalizeFeedback(payload.feedback);
+    const atomicity = normalizeAtomicity(payload.atomicity);
+    const feedbackHash = computeFeedbackHash(feedback);
+    const atomicityHash = computeAtomicityHash(atomicity);
+    const businessPayloadHash = payload.businessPayloadHash || hashJson(businessPayload);
+
+    await putAssetBalanceUnits(ctx, owner, assetType, before - amountUnits);
+    const escrow = {
+      requestID,
+      owner,
+      assetType,
+      amount,
+      amountUnits: unitsToString(amountUnits),
+      status: 'Locked',
+      sourceTxID: txId,
+      createdAt,
+      updatedAt: new Date(createdAt * 1000).toISOString()
+    };
+    await ctx.stub.putState(`assetEscrow:${requestID}`, Buffer.from(JSON.stringify(escrow)));
+
+    const eventRecord = {
+      requestID,
+      sourceTxID: txId,
+      fabricCaller: ctx.clientIdentity.getID(),
+      targetChainType: payload.targetChainType || 'EVM',
+      targetChainID: payload.targetChainID || '',
+      targetObject,
+      functionSelector,
+      callDataHash,
+      businessPayloadHash,
+      receiver,
+      nonce,
+      createdAt,
+      expireAt,
+      status: 'COMMITTED',
+      businessPayload,
+      assetLock: escrow,
+      feedback,
+      feedbackHash,
+      atomicity,
+      atomicityHash
+    };
+    const executionTargetChainID = payload.targetChainID || ethers.ZeroHash;
+    const targetExecutionHash = ethers.keccak256(
+      ABI.encode(
+        ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+        [requestID, executionTargetChainID, targetObject, functionSelector, callDataHash, receiver]
+      )
+    );
+    if (atomicity.required) {
+      await putCommitment(ctx, {
+        requestID,
+        owner: ctx.clientIdentity.getID(),
+        sourceTxID: txId,
+        hmsgDigest: payload.hmsgDigest || ethers.ZeroHash,
+        targetExecutionHash,
+        commitmentType: atomicity.commitmentType,
+        commitmentRefHash: atomicity.commitmentRefHash,
+        successActionHash: atomicity.successActionHash,
+        failureActionHash: atomicity.failureActionHash,
+        feedbackTimeout: feedback.timeout || expireAt,
+        challengeWindow: atomicity.challengeWindow,
+        challengeDeadline: 0,
+        status: 'Pending',
+        createdAt,
+        updatedAt: new Date().toISOString()
+      });
+    }
+    await ctx.stub.putState(`xcall:${txId}`, Buffer.from(JSON.stringify({ ...eventRecord, fabricTxId: txId, fabricNonce: nonce })));
+    await ctx.stub.putState(`crosschainEvents:${requestID}`, Buffer.from(JSON.stringify(eventRecord)));
+    await ctx.stub.putState(`outbound:${txId}`, Buffer.from(JSON.stringify({
+      txId,
+      requestID,
+      nonce,
+      status: 'asset_locked',
+      updatedAt: new Date().toISOString()
+    })));
+    ctx.stub.setEvent('ASSET_LOCKED_XCALL', Buffer.from(JSON.stringify({ requestID, txId, owner, assetType, amountUnits: unitsToString(amountUnits) })));
+    return JSON.stringify({ ok: true, txId, requestID, nonce, escrow });
+  }
+
+  async RefundAssetEscrow(ctx, requestID) {
+    const escrow = await refundAssetEscrowRecord(ctx, requestID);
+    return JSON.stringify({ ok: true, requestID, escrow });
+  }
+
   async QueryCrosschainEvent(ctx, requestID) {
     const data = await ctx.stub.getState(`crosschainEvents:${requestID}`);
     if (!data || data.length === 0) {
@@ -587,6 +965,13 @@ class XCallContract extends Contract {
 
     const certResult = await verifyTEECertification(ctx, hxmsg, certEnvelope);
     const parsedPayload = decodeBusinessPayload(callDataHex);
+    const businessRecord = await applyBusinessAction(ctx, {
+      requestID,
+      hmsgDigest: certResult.hmsgDigest,
+      callDataHash: hxmsg.targetAction.callDataHash,
+      parsedPayload,
+      sourceChainType: hxmsg.source.chainType
+    });
     const record = {
       requestID,
       txId: ctx.stub.getTxID(),
@@ -606,6 +991,8 @@ class XCallContract extends Contract {
       amount: parsedPayload.amount,
       metadata: parsedPayload.metadata,
       requireAck: Boolean(parsedPayload.requireAck),
+      businessKey: businessRecord.businessKey,
+      businessStatus: businessRecord.status,
       status: 'executed',
       updatedAt: new Date().toISOString()
     };
@@ -620,6 +1007,16 @@ class XCallContract extends Contract {
 
   async GetInboundStatus(ctx, requestID) {
     const data = await ctx.stub.getState(`inbound:${requestID}`);
+    return data && data.length > 0 ? data.toString() : '';
+  }
+
+  async QueryBusinessRecord(ctx, op, recordId) {
+    const data = await ctx.stub.getState(`business:${businessKey(op, recordId)}`);
+    return data && data.length > 0 ? data.toString() : '';
+  }
+
+  async QueryBusinessRecordByRequest(ctx, requestID) {
+    const data = await ctx.stub.getState(`businessByRequest:${requestID}`);
     return data && data.length > 0 ? data.toString() : '';
   }
 
@@ -744,18 +1141,30 @@ class XCallContract extends Contract {
     if (String(failureHash).toLowerCase() !== String(record.failureActionHash).toLowerCase()) {
       throw new Error('bad failure data');
     }
-    if (![1, 2].includes(Number(record.commitmentType))) {
-      throw new Error('unsupported commitment');
-    }
+    if (Number(record.commitmentType) !== 3) throw new Error('unsupported commitment');
+    let compensationResult = null;
+    compensationResult = await refundAssetEscrowRecord(ctx, requestID);
     record.status = 'Compensated';
+    record.compensationHandler = 'asset-escrow-refund';
+    record.compensationResultHash = compensationResult
+      ? ethers.keccak256(ethers.toUtf8Bytes(stableStringify(compensationResult)))
+      : ethers.ZeroHash;
     record.compensatedAt = now;
     record.updatedAt = new Date(now * 1000).toISOString();
     await putCommitment(ctx, record);
     ctx.stub.setEvent('REQUEST_COMPENSATED', Buffer.from(JSON.stringify({
       requestID,
-      commitmentType: record.commitmentType
+      commitmentType: record.commitmentType,
+      compensationHandler: record.compensationHandler,
+      compensationResultHash: record.compensationResultHash
     })));
-    return JSON.stringify({ ok: true, requestID, status: record.status });
+    return JSON.stringify({
+      ok: true,
+      requestID,
+      status: record.status,
+      compensationHandler: record.compensationHandler,
+      compensationResultHash: record.compensationResultHash
+    });
   }
 
   async GetAckStatus(ctx, originRequestID) {

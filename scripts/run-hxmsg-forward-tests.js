@@ -141,7 +141,20 @@ async function relayHXMsg(hxmsg, teeUrl) {
   };
 }
 
-async function queryTargetState() {
+function expectedBusinessStatus(op) {
+  return {
+    asset_lock: ethers.keccak256(ethers.toUtf8Bytes('ASSET_SETTLED')),
+    mint_confirm: ethers.keccak256(ethers.toUtf8Bytes('ASSET_SETTLED')),
+    receivable_attest: ethers.keccak256(ethers.toUtf8Bytes('RECEIVABLE_ATTESTED')),
+    logistics_sync: ethers.keccak256(ethers.toUtf8Bytes('LOGISTICS_SYNCED')),
+    medical_consent: ethers.keccak256(ethers.toUtf8Bytes('CONSENT_GRANTED')),
+    oracle_update: ethers.keccak256(ethers.toUtf8Bytes('ORACLE_UPDATED')),
+    approval_commit: ethers.keccak256(ethers.toUtf8Bytes('APPROVAL_COMMITTED')),
+    subsidy_confirm: ethers.keccak256(ethers.toUtf8Bytes('ASSET_SETTLED')),
+  }[op] || ethers.keccak256(ethers.toUtf8Bytes('RECORDED'));
+}
+
+async function queryTargetState(requestID) {
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
   const deployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'deployment.json'));
   const target = new ethers.Contract(
@@ -150,26 +163,40 @@ async function queryTargetState() {
       'function executionCount() view returns (uint256)',
       'function lastRequestID() view returns (bytes32)',
       'function lastPayloadHash() view returns (bytes32)',
+      'function getBusinessRecord(bytes32) view returns ((bytes32 requestID,string op,string recordId,string actor,string amount,bytes32 metadataHash,bool requireAck,address service,bytes32 status,uint64 updatedAt))',
     ],
     provider
   );
+  const business = await target.getBusinessRecord(requestID);
   return {
     executionCount: (await target.executionCount()).toString(),
     lastRequestID: await target.lastRequestID(),
     lastPayloadHash: await target.lastPayloadHash(),
+    business: {
+      requestID: business.requestID,
+      op: business.op,
+      recordId: business.recordId,
+      actor: business.actor,
+      amount: business.amount,
+      metadataHash: business.metadataHash,
+      requireAck: business.requireAck,
+      service: business.service,
+      status: business.status,
+      updatedAt: Number(business.updatedAt),
+    },
   };
 }
 
 function saveSummary(results, totals) {
   let md = '# h-xmsg / h-FSV 正向测试结果 (Fabric → EVM)\n\n';
   md += `**测试时间**：${new Date().toISOString()}\n`;
-  md += `**通过率**：${totals.pass}/${totals.total} | **消息结构**：h-xmsg | **Fabric 验证**：h-FSV | **TEE 共识**：Raft-backed TEE cluster | **EVM提交**：HXMsgMinimalCluster | **目标合约**：轻量执行确认\n\n`;
+  md += `**通过率**：${totals.pass}/${totals.total} | **消息结构**：h-xmsg | **Fabric 验证**：h-FSV | **TEE 共识**：Raft-backed TEE cluster | **EVM提交**：HXMsgMinimalCluster | **目标合约**：分类业务服务\n\n`;
   md += '| 用例 | 业务 | 金额 | RESPONSE | Atomicity | Fabric 区块 | EVM Gas | TEE 验证 | TEE Quorum | Peer 背书 | MSP | 交易写集 | 目标执行 | 状态 |\n';
   md += '|------|------|------|----------|-----------|------------|---------|----------|------------|-----------|-----|----------|----------|------|\n';
   for (const r of results) {
     const f = r.fieldCheck || {};
     const quorum = r.teeCluster ? `${r.teeCluster.reached}/${r.teeCluster.threshold}` : '-';
-    md += `| ${r.caseId} | ${r.expectedTargetFields?.op || '-'} | ${r.expectedTargetFields?.amount || '-'} | ${r.responseRequired ? 'yes' : 'no'} | ${r.atomicityRequired ? 'yes' : 'no'} | ${r.srcHeight || '-'} | ${(Number(r.gasUsed) || 0).toLocaleString()} | ${r.teeVerification?.adapter || '-'} | ${quorum} | ${r.teeVerification?.endorsementCount ?? '-'} | ${(r.teeVerification?.endorsedMSPIDs || []).join(',') || '-'} | ${r.teeVerification?.validatedWriteKey ? 'checked' : '-'} | ${f.requestIDMatch ? 'requestID' : '-'} / ${f.payloadHashMatch ? 'payloadHash' : '-'} | ${r.pass ? 'PASS' : 'FAIL'} |\n`;
+    md += `| ${r.caseId} | ${r.expectedTargetFields?.op || '-'} | ${r.expectedTargetFields?.amount || '-'} | ${r.responseRequired ? 'yes' : 'no'} | ${r.atomicityRequired ? 'yes' : 'no'} | ${r.srcHeight || '-'} | ${(Number(r.gasUsed) || 0).toLocaleString()} | ${r.teeVerification?.adapter || '-'} | ${quorum} | ${r.teeVerification?.endorsementCount ?? '-'} | ${(r.teeVerification?.endorsedMSPIDs || []).join(',') || '-'} | ${r.teeVerification?.validatedWriteKey ? 'checked' : '-'} | ${f.businessMatch ? 'service-action' : '-'} | ${r.pass ? 'PASS' : 'FAIL'} |\n`;
   }
   fs.writeFileSync(path.join(RUNTIME_DIR, SUMMARY_FILE), md);
 }
@@ -207,6 +234,14 @@ async function main() {
       };
       try {
         const businessPayload = { ...tc.payload, requireAck: false };
+        if (['asset_lock', 'subsidy_confirm'].includes(businessPayload.op)) {
+          businessPayload.targetRecipient = deployment.deployer;
+        }
+        const expectedFields = { ...(tc.expectedTargetFields || {}) };
+        if (['asset_lock', 'subsidy_confirm'].includes(businessPayload.op)) {
+          expectedFields.actor = deployment.deployer;
+        }
+        caseResult.expectedTargetFields = expectedFields;
         const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);
         const payload = {
           businessPayload,
@@ -262,11 +297,19 @@ async function main() {
         caseResult.teeVerification = relay.teeVerification;
         caseResult.teeCluster = relay.teeCluster;
 
-        const targetState = await queryTargetState();
+        const targetState = await queryTargetState(caseResult.requestID);
         const payloadHash = ethers.keccak256(hxmsg.callData);
+        const expected = expectedFields;
         const fieldCheck = {
           requestIDMatch: targetState.lastRequestID === caseResult.requestID,
           payloadHashMatch: targetState.lastPayloadHash === payloadHash,
+          businessMatch: targetState.business.requestID === caseResult.requestID
+            && targetState.business.op === expected.op
+            && targetState.business.recordId === expected.recordId
+            && targetState.business.actor === expected.actor
+            && targetState.business.amount === expected.amount
+            && targetState.business.status === expectedBusinessStatus(expected.op)
+            && targetState.business.updatedAt > 0,
         };
         caseResult.fieldCheck = fieldCheck;
         caseResult.actualTargetState = targetState;

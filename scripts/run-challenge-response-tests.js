@@ -70,6 +70,58 @@ async function submitAtomic(source, params = {}) {
   return { requestID, record, failureData, submitGas: gasOf(receipt), submitTxHash: receipt.hash };
 }
 
+async function submitTokenEscrowAtomic(source, token, owner, params = {}) {
+  const amount = BigInt(params.amount || 1000000n);
+  await (await token.mint(owner.address, amount)).wait();
+  await (await token.connect(owner).approve(await source.getAddress(), amount)).wait();
+  const latest = await ethers.provider.getBlock('latest');
+  const now = Number(latest.timestamp);
+  const targetChainID = params.targetChainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel'));
+  const targetDomainID = params.targetDomainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-local-domain'));
+  const targetObject = params.targetObject || ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall'));
+  const selector = params.selector || ethers.id('ExecuteHXMsg(bytes32,bytes)').slice(0, 10);
+  const callDataHash = params.callDataHash || ethers.keccak256(ethers.toUtf8Bytes(`token-call-${Date.now()}-${Math.random()}`));
+  const businessPayloadHash = params.businessPayloadHash || ethers.keccak256(ethers.toUtf8Bytes('token-payload'));
+  const receiver = params.receiver || ethers.keccak256(ethers.toUtf8Bytes('token-receiver'));
+  const failureData = params.failureData || `token-failure-${Date.now()}-${Math.random()}`;
+  const failureActionHash = ethers.keccak256(ethers.toUtf8Bytes(failureData));
+  const atomicity = [
+    true,
+    AtomicityMode.COMMIT_OR_COMPENSATE,
+    CommitmentType.TOKEN_ESCROW,
+    params.commitmentRefHash || ethers.keccak256(ethers.toUtf8Bytes('token-escrow')),
+    params.successActionHash || ethers.keccak256(ethers.toUtf8Bytes('token-success')),
+    failureActionHash,
+    params.challengeWindow || 5,
+  ];
+  const tx = await source.connect(owner).submitTokenEscrowHXMsgRequest(
+    targetChainID,
+    targetDomainID,
+    targetObject,
+    selector,
+    callDataHash,
+    businessPayloadHash,
+    receiver,
+    now + 3600,
+    [true, FeedbackType.RESPONSE, params.feedbackTimeout || now + (params.feedbackTimeoutOffset || 10), ethers.ZeroHash, atomicity],
+    await token.getAddress(),
+    amount
+  );
+  const receipt = await tx.wait();
+  const event = receipt.logs
+    .map((log) => {
+      try {
+        return source.interface.parseLog(log);
+      } catch (_error) {
+        return null;
+      }
+    })
+    .find((parsed) => parsed && parsed.name === 'CrossChainCallRequested');
+  const requestID = event.args.requestID;
+  const record = await source.requests(requestID);
+  return { requestID, record, failureData, amount, submitGas: gasOf(receipt), submitTxHash: receipt.hash };
+}
+
 function buildResponse(requestID, record, overrides = {}) {
   const response = {
     originRequestID: requestID,
@@ -113,6 +165,9 @@ async function main() {
   const Source = await ethers.getContractFactory('EvmSourceContract');
   const source = await Source.deploy(await registry.getAddress());
   await source.waitForDeployment();
+  const Token = await ethers.getContractFactory('CrossChainToken');
+  const token = await Token.deploy('Escrow Test Token', 'ETT', 4, deployer.address);
+  await token.waitForDeployment();
 
   const teeWallets = [ethers.Wallet.createRandom(), ethers.Wallet.createRandom(), ethers.Wallet.createRandom()];
   for (const wallet of teeWallets) {
@@ -167,8 +222,8 @@ async function main() {
   {
     const startedMs = nowMs();
     const test = { caseId: 'CR-EVM-003', name: 'Pending -> Challenged -> Compensated', pass: false };
-    const req = await submitAtomic(source);
-    await increaseTime(3);
+    const req = await submitTokenEscrowAtomic(source, token, deployer, { feedbackTimeoutOffset: 5 });
+    await increaseTime(6);
     const challengeReceipt = await (await source.startChallenge(req.requestID)).wait();
     await increaseTime(7);
     const compensateReceipt = await (await source.compensateAfterChallenge(req.requestID, ethers.toUtf8Bytes(req.failureData))).wait();
@@ -187,7 +242,7 @@ async function main() {
 
   {
     const startedMs = nowMs();
-    const req = await submitAtomic(source);
+    const req = await submitTokenEscrowAtomic(source, token, deployer);
     const response = buildResponse(req.requestID, req.record);
     const certs = teeWallets.slice(0, 1).map((wallet) => certFor(wallet, req.requestID, response.digest));
     const result = await expectRevert('insufficient TEE quorum rejected', async () => {
@@ -203,8 +258,8 @@ async function main() {
 
   {
     const startedMs = nowMs();
-    const req = await submitAtomic(source);
-    await increaseTime(3);
+    const req = await submitTokenEscrowAtomic(source, token, deployer, { feedbackTimeoutOffset: 5 });
+    await increaseTime(6);
     const challengeReceipt = await (await source.startChallenge(req.requestID)).wait();
     await increaseTime(7);
     const compensateReceipt = await (await source.compensateAfterChallenge(req.requestID, ethers.toUtf8Bytes(req.failureData))).wait();
@@ -225,6 +280,92 @@ async function main() {
         total: req.submitGas + gasOf(challengeReceipt) + gasOf(compensateReceipt),
       },
     });
+  }
+
+  {
+    const startedMs = nowMs();
+    const test = { caseId: 'CR-EVM-006', name: 'TOKEN_ESCROW timeout -> ERC20 refund', pass: false };
+    const amount = 1234500n;
+    await (await token.mint(deployer.address, amount)).wait();
+    await (await token.approve(await source.getAddress(), amount)).wait();
+    const latest = await ethers.provider.getBlock('latest');
+    const now = Number(latest.timestamp);
+    const failureData = `token-refund-${Date.now()}`;
+    const failureActionHash = ethers.keccak256(ethers.toUtf8Bytes(failureData));
+    const atomicity = [
+      true,
+      AtomicityMode.COMMIT_OR_COMPENSATE,
+      CommitmentType.TOKEN_ESCROW,
+      ethers.keccak256(ethers.toUtf8Bytes('token-escrow')),
+      ethers.keccak256(ethers.toUtf8Bytes('token-success')),
+      failureActionHash,
+      5,
+    ];
+    const beforeOwner = await token.balanceOf(deployer.address);
+    const beforeSource = await token.balanceOf(await source.getAddress());
+    const tx = await source.submitTokenEscrowHXMsgRequest(
+      ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel')),
+      ethers.keccak256(ethers.toUtf8Bytes('fabric-local-domain')),
+      ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall')),
+      ethers.id('ExecuteHXMsg(bytes32,bytes)').slice(0, 10),
+      ethers.keccak256(ethers.toUtf8Bytes('call-token-escrow')),
+      ethers.keccak256(ethers.toUtf8Bytes('payload-token-escrow')),
+      ethers.keccak256(ethers.toUtf8Bytes('receiver')),
+      now + 3600,
+      [true, FeedbackType.RESPONSE, now + 30, ethers.ZeroHash, atomicity],
+      await token.getAddress(),
+      amount
+    );
+    const submitReceipt = await tx.wait();
+    const event = submitReceipt.logs
+      .map((log) => {
+        try {
+          return source.interface.parseLog(log);
+        } catch (_error) {
+          return null;
+        }
+      })
+      .find((parsed) => parsed && parsed.name === 'CrossChainCallRequested');
+    const requestID = event.args.requestID;
+    const afterLockOwner = await token.balanceOf(deployer.address);
+    const lockedInSource = await token.balanceOf(await source.getAddress());
+    await increaseTime(31);
+    const challengeReceipt = await (await source.startChallenge(requestID)).wait();
+    await increaseTime(7);
+    const compensateReceipt = await (await source.compensateAfterChallenge(requestID, ethers.toUtf8Bytes(failureData))).wait();
+    const finalOwner = await token.balanceOf(deployer.address);
+    const finalSource = await token.balanceOf(await source.getAddress());
+    const escrow = await source.tokenEscrows(requestID);
+    const record = await source.requests(requestID);
+    test.status = Number(record.status);
+    test.durationMs = nowMs() - startedMs;
+    test.balances = {
+      beforeOwner: beforeOwner.toString(),
+      beforeSource: beforeSource.toString(),
+      afterLockOwner: afterLockOwner.toString(),
+      lockedInSource: lockedInSource.toString(),
+      finalOwner: finalOwner.toString(),
+      finalSource: finalSource.toString(),
+    };
+    test.escrow = {
+      token: escrow.token,
+      owner: escrow.owner,
+      amount: escrow.amount.toString(),
+      refunded: escrow.refunded,
+    };
+    test.gas = {
+      submitTokenEscrowHXMsgRequest: gasOf(submitReceipt),
+      startChallenge: gasOf(challengeReceipt),
+      compensateAfterChallenge: gasOf(compensateReceipt),
+      total: gasOf(submitReceipt) + gasOf(challengeReceipt) + gasOf(compensateReceipt),
+    };
+    test.pass = test.status === 4
+      && afterLockOwner === beforeOwner - amount
+      && lockedInSource === beforeSource + amount
+      && finalOwner === beforeOwner
+      && finalSource === beforeSource
+      && escrow.refunded;
+    cases.push(test);
   }
 
   const pass = cases.filter((item) => item.pass).length;

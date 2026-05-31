@@ -30,8 +30,10 @@ function normalizeBusinessPayload(rawPayload) {
   );
 
   const actor = firstDefined(
-    rawPayload.owner,
+    rawPayload.targetRecipient,
+    rawPayload.recipient,
     rawPayload.beneficiary,
+    rawPayload.owner,
     rawPayload.supplier,
     rawPayload.issuer,
     rawPayload.grantee,

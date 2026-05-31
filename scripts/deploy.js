@@ -27,6 +27,7 @@ async function main() {
     deployer: deployer.address,
     evmSourceContract: await source.getAddress(),
     targetContract: await target.getAddress(),
+    settlementToken: await target.token(),
     teeRegistry: await teeRegistry.getAddress(),
     hxmsgGateway: await hxmsgGateway.getAddress(),
     chainId: Number((await ethers.provider.getNetwork()).chainId),

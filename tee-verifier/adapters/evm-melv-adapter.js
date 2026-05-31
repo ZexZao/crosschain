@@ -28,7 +28,7 @@ function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
 }
 
-function rememberHeader(chainState, header, { finalized = false, windowSize = 128 } = {}) {
+function rememberHeader(chainState, header, { finalized = false, windowSize = 128, skipContinuity = false } = {}) {
   if (!chainState.evm) chainState.evm = { tipHeight: 0, tipHash: null, headers: [] };
   const state = chainState.evm;
   const block = normalizeHeader(header);
@@ -37,7 +37,7 @@ function rememberHeader(chainState, header, { finalized = false, windowSize = 12
   }
   const number = Number(block.number);
   const prevHeader = (state.headers || []).find((h) => Number(h.number) === number - 1);
-  if (prevHeader && block.parentHash !== prevHeader.hash) {
+  if (!skipContinuity && prevHeader && block.parentHash !== prevHeader.hash) {
     throw new Error('EVM header chain continuity failed');
   }
   if (number >= Number(state.tipHeight || 0)) {
@@ -104,7 +104,7 @@ async function fetchFinalizedHeader(provider) {
 function rememberCommitteeHeader(chainState, committeeUpdate, { expectedChainID } = {}) {
   const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
   const verified = verifyCommitteeHeaderUpdate(committeeUpdate, { expectedChainID });
-  const header = rememberHeader(chainState, verified.header, { windowSize });
+  const header = rememberHeader(chainState, verified.header, { windowSize, skipContinuity: true });
   header.committeeCertified = true;
   header.committeeID = verified.committeeID;
   header.committeeDigest = verified.digest;
@@ -130,7 +130,11 @@ async function maintainHeaderWindow({ provider, chainState, targetBlockNumber, t
   try {
     stored = findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
   } catch (error) {
-    if (error.message !== 'stored EVM header is not committee-certified' || !committeeHeaderUpdate) {
+    const committeeCanRefresh = committeeHeaderUpdate && (
+      error.message === 'stored EVM header is not committee-certified' ||
+      error.message === 'stored EVM header hash mismatch'
+    );
+    if (!committeeCanRefresh) {
       throw error;
     }
   }
