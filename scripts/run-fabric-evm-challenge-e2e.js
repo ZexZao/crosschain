@@ -121,7 +121,7 @@ async function relayToEvm(hxmsg, deployment, teeUrl, stageTimings) {
   }
   const gateway = new ethers.Contract(
     deployment.hxmsgGateway,
-    ['function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,(bytes32,bytes32,address,uint64,bytes)[],uint256) external'],
+    ['function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,(bytes32,bytes32,address,uint64,bytes)[]) external'],
     signer
   );
   const receipt = await timed(stageTimings, 'evmTargetExecutionMs', async () => {
@@ -129,8 +129,7 @@ async function relayToEvm(hxmsg, deployment, teeUrl, stageTimings) {
       toMinimalHXMsg(hxmsg),
       deployment.targetContract,
       hxmsg.callData,
-      cluster.certifications.map((cert) => [cert.requestID, cert.hmsgDigest, cert.teeAddress, cert.verifiedAt, cert.signature]),
-      Number(cluster.threshold)
+      cluster.certifications.map((cert) => [cert.requestID, cert.hmsgDigest, cert.teeAddress, cert.verifiedAt, cert.signature])
     );
     return tx.wait();
   });
@@ -158,11 +157,11 @@ async function main() {
     const targetObject = addressToBytes32(deployment.targetContract);
     const targetChainID = chainIdToBytes32(deployment.chainId);
     const businessPayload = {
-      op: 'fabric_to_evm_atomic',
-      recordId: 'FABRIC-EVM-CR-001',
-      actor: 'fabric.userA',
-      amount: '1',
-      metadata: 'challenge-response e2e',
+      op: 'asset_lock',
+      recordId: `FABRIC-EVM-ASSET-CR-001-${Date.now()}`,
+      actor: deployment.deployer,
+      amount: '1.0000',
+      metadata: 'challenge-response e2e asset settlement',
       requireAck: false,
     };
     const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);

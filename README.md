@@ -289,9 +289,8 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 | `run-challenge-response-tests.js` | EVM 源链挑战响应状态机单元测试 |
 | `run-fabric-evm-challenge-e2e.js` | Fabric -> EVM RESPONSE 端到端闭环 |
 | `run-evm-fabric-challenge-e2e.js` | EVM -> Fabric RESPONSE 端到端闭环 |
-| `run-fabric-test-case.js` | 单条 Fabric 测试用例辅助执行 |
-| `generate-test-datasets.js` | 生成测试数据集 |
-| `load-test-case.js` | 加载测试用例 |
+| `run-asset-transfer-refund-tests.js` | 真实资产锁定、跨链 mint 和超时退款测试 |
+| `run-raft-cluster-tests.js` | TEE Raft 集群主路径测试 |
 | `export-fabric-wallet.js` | 导出 Fabric wallet 身份 |
 
 ### `test-data/`
@@ -301,9 +300,6 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 | 文件 | 作用 |
 |---|---|
 | `fabric-real-cases.json` | 当前 8 条 Fabric -> EVM 主线测试用例 |
-| `functional-cases.json` | 功能类测试用例 |
-| `performance-cases.json` | 性能类测试用例 |
-| `security-cases.json` | 安全类测试用例 |
 | `README.md` | 测试数据说明 |
 
 ### `docs/`
@@ -319,14 +315,10 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 | `tee-lightweight-verification.md` | TEE 轻客户端式验证说明 |
 | `evm-receipt-mpt-proof-and-header-window.md` | EVM receipt MPT proof 与 header window |
 | `mercury-tee-upgrade.md` | Mercury 风格 TEE 升级说明 |
-| `mercury-like-equal-tee-consensus.md` | 平等 TEE quorum 思路 |
 | `mercury-batch-signing-optimization.md` | 批量签名优化方案 |
-| `multi-tee-raft-note.md` | 多 TEE Raft 注意点 |
 | `raft-tee-cluster-implementation.md` | Raft TEE 集群实现说明 |
-| `raft-unimplemented-items.md` | Raft 未完成项 |
 | `gas-optimization-analysis.md` | gas 开销分析 |
 | `gas-optimization-stage3-implementation.md` | gas 优化第三阶段实现说明 |
-| `challenge-response-test-results-table.md` | 挑战响应测试结果表 |
 | `security-gap-review-against-design-goals.md` | 对设计初衷的安全差距审查 |
 | `paper-readiness-gaps.md` | 论文发表视角下的不足 |
 | `project-improvement-review-2026-05-29.md` | 按设计初衷梳理当前实现和后续改进项 |
@@ -577,19 +569,19 @@ npm run hxmsg:test:challenge:evm-fabric
 - Fabric `CompensateAfterChallenge` 会在 `TOKEN_ESCROW` 超时后自动分发到 escrow refund handler，真实把资产退回 owner。
 - EVM `EvmSourceContract.submitTokenEscrowHXMsgRequest` 会真实锁定 ERC20，超时补偿时自动退回用户。
 - 当前业务执行覆盖 `asset_lock`、`mint_confirm`、`receivable_attest`、`logistics_sync`、`medical_consent`、`oracle_update`、`approval_commit`、`subsidy_confirm` 等测试用例。
-- 当前 `TOKEN_ESCROW` 自动补偿已实现；解锁、撤销授权、handler registry、成功 RESPONSE 后的 release/burn/settlement 策略仍是下一步扩展点。
+- 当前 `TOKEN_ESCROW` 自动补偿已实现；Fabric 侧 asset escrow refund 与 EVM 侧 token escrow refund 都会执行真实资产退回。解锁、撤销授权、handler registry、成功 RESPONSE 后的 release/burn/settlement 策略仍是下一步扩展点。
 
 ## 当前最重要的改进项
 
 完整梳理见 `docs/project-improvement-review-2026-05-29.md`。当前优先级最高的改进是：
 
-1. 固定 TEE cluster threshold：EVM 合约和 Fabric chaincode 不应接受 relayer 传入的 threshold，应从可信 cluster 配置读取。
-2. 真实 TEE remote attestation：当前 TEE key 只是模拟服务生成的签名 key，后续需要与 TEE measurement 绑定。
-3. 正式 Header Committee：当前 EVM header update 由模拟委员会签名，后续需要 epoch、轮换、成员证明和 finalized checkpoint 来源。
-4. 生产级 Raft 增强：当前实现已覆盖主路径，但还缺少 WAL、snapshot、log compaction、动态成员变更和复杂网络分区恢复测试。
-5. 常驻 relayer / watcher / responder：当前由测试脚本驱动完整闭环，后续需要独立进程负责监听、构造 proof、投递、重试、challenge 和 response。
-6. 多组织 Fabric 实验：当前网络是单组织 `Org1MSP`，后续需要验证多组织 endorsement policy 和 peer view 不一致拒绝路径。
-7. 业务补偿执行：当前 compensation 主要完成状态收束，换币或资产锁定场景仍需要 escrow / unlock / custom executor。
+1. 真实 TEE remote attestation：当前 TEE key 只是模拟服务生成的签名 key，后续需要与 TEE measurement 绑定。
+2. 正式 Header Committee：当前 EVM header update 由模拟委员会签名，后续需要 epoch、轮换、成员证明和 finalized checkpoint 来源。
+3. 生产级 Raft 增强：当前实现已覆盖主路径，但还缺少 WAL、snapshot、log compaction、动态成员变更和复杂网络分区恢复测试。
+4. 常驻 relayer / watcher / responder：当前由测试脚本驱动完整闭环，后续需要独立进程负责监听、构造 proof、投递、重试、challenge 和 response。
+5. 多组织 Fabric 实验：当前网络是单组织 `Org1MSP`，后续需要验证多组织 endorsement policy 和 peer view 不一致拒绝路径。
+6. TEE membership governance：当前 EVM 和 Fabric 已按已注册 TEE 成员数自动推导 `floor(n/2)+1` quorum，但成员注册仍由实验环境管理；后续需要和 TDX attestation、epoch、成员轮换委员会绑定。
+7. 业务补偿扩展：当前 `TOKEN_ESCROW` 已实现真实退款，其他可补偿业务仍需要 escrow / unlock / custom executor。
 
 ## 后续扩展
 

@@ -14,7 +14,7 @@ const {
 const { buildHXMsgFromEvmReceipt, FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { buildCommitteeHeaderUpdate } = require('../shared/evm/header-committee');
-const { buildFabricExecutionProofRef, buildExecutedResponse } = require('../hxmsg-builder/response');
+const { buildFabricExecutionProofRef, buildFabricExecutionViewRef, buildExecutedResponse } = require('../hxmsg-builder/response');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004')
@@ -111,7 +111,7 @@ async function main() {
       deployment.evmSourceContract,
       [
         'function submitHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-        'function completeWithResponse(bytes32,(bytes32,bytes32,uint8,bytes32,bytes32,bytes32),(bytes32,bytes32,address,uint64,bytes)[],uint256) external',
+        'function completeWithResponse(bytes32,(bytes32,bytes32,uint8,bytes32,bytes32,bytes32),(bytes32,bytes32,address,uint64,bytes)[]) external',
       ],
       signer
     );
@@ -121,11 +121,11 @@ async function main() {
       signer
     );
     const businessPayload = {
-      op: 'evm_to_fabric_atomic',
-      recordId: `EVM-FABRIC-CR-001-${Date.now()}`,
-      actor: 'evm.userA',
-      amount: '1',
-      metadata: 'challenge-response e2e',
+      op: 'oracle_update',
+      recordId: `EVM-FABRIC-ORACLE-CR-001-${Date.now()}`,
+      actor: 'evm.oracle.publisher',
+      amount: '123.4500',
+      metadata: 'challenge-response e2e oracle update',
       requireAck: false,
     };
     const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);
@@ -208,7 +208,11 @@ async function main() {
       response,
       helperData: {
         originHxmsg: hxmsg,
-        fabricExecutionRecord: inbound,
+        fabricExecutionView: buildFabricExecutionViewRef({
+          channelID,
+          chaincodeName,
+          requestID: hxmsg.header.requestID,
+        }),
       },
     }, { timeout: 30000 }));
     const responseVoucher = responseAttest.data.teeClusterCertification;
@@ -230,8 +234,7 @@ async function main() {
           response.targetProofRefHash,
           response.responsePayloadHash,
         ],
-        responseVoucher.certifications.map((cert) => [cert.requestID, cert.hmsgDigest, cert.teeAddress, cert.verifiedAt, cert.signature]),
-        Number(responseVoucher.threshold)
+        responseVoucher.certifications.map((cert) => [cert.requestID, cert.hmsgDigest, cert.teeAddress, cert.verifiedAt, cert.signature])
       )).wait());
     result.gas.evm.completeWithResponse = gasOf(completeReceipt);
     result.gas.evm.total = result.gas.evm.submitHXMsgRequest + result.gas.evm.registerTEE + result.gas.evm.completeWithResponse;

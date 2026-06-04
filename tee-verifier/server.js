@@ -9,6 +9,7 @@ const { verifySourceFact } = require('./adapters');
 const { buildCertification, buildDigestCertification } = require('./core/certification');
 const { verifyReceiptProof } = require('../shared/evm/receipt-proof');
 const { maintainHeaderWindow } = require('./adapters/evm-melv-adapter');
+const { verifyFabricExecutionView } = require('./adapters/fabric-hfsv-adapter');
 
 ensureRuntime();
 const app = express();
@@ -406,26 +407,25 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
   if (helperData.evmExecutionReceipt) {
     const proofEnvelope = helperData.evmExecutionReceipt;
     const receipt = proofEnvelope.receipt || proofEnvelope;
-    if (proofEnvelope.receiptProof && proofEnvelope.blockHeader) {
-      const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || helperData.evmRpc || 'http://evm-node:8545');
-      const storedHeader = await maintainHeaderWindow({
-        provider,
-        chainState,
-        targetBlockNumber: Number(receipt.blockNumber),
-        targetBlockHash: receipt.blockHash,
-        committeeHeaderUpdate: helperData.committeeHeaderUpdate || proofEnvelope.committeeHeaderUpdate,
-        expectedChainID: helperData.evmChainID || `eip155:${Number(process.env.EVM_CHAIN_ID || 31337)}`,
-      });
-      await verifyReceiptProof({
-        receiptsRoot: storedHeader.receiptsRoot,
-        transactionIndex: Number(receipt.transactionIndex ?? receipt.index),
-        proof: proofEnvelope.receiptProof,
-        expectedReceipt: receipt,
-      });
-      saveChainState();
-    } else if (!helperData.allowUnprovedExecutionReceipt) {
+    if (!proofEnvelope.receiptProof || !proofEnvelope.blockHeader) {
       throw new Error('EVM execution receipt proof is required');
     }
+    const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || helperData.evmRpc || 'http://evm-node:8545');
+    const storedHeader = await maintainHeaderWindow({
+      provider,
+      chainState,
+      targetBlockNumber: Number(receipt.blockNumber),
+      targetBlockHash: receipt.blockHash,
+      committeeHeaderUpdate: helperData.committeeHeaderUpdate || proofEnvelope.committeeHeaderUpdate,
+      expectedChainID: helperData.evmChainID || `eip155:${Number(process.env.EVM_CHAIN_ID || 31337)}`,
+    });
+    await verifyReceiptProof({
+      receiptsRoot: storedHeader.receiptsRoot,
+      transactionIndex: Number(receipt.transactionIndex ?? receipt.index),
+      proof: proofEnvelope.receiptProof,
+      expectedReceipt: receipt,
+    });
+    saveChainState();
     if (Number(receipt.status) !== 1) throw new Error('EVM target execution receipt failed');
     const eventTopic = ethers.id('HXMsgAccepted(bytes32,address,address)');
     const accepted = (receipt.logs || []).find((log) => {
@@ -440,13 +440,9 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
       )
     );
     if (!sameHex(response.targetProofRefHash, proofRef)) throw new Error('response targetProofRefHash mismatch');
-  } else if (helperData.fabricExecutionRecord) {
-    const record = helperData.fabricExecutionRecord;
-    if (record.requestID !== response.originRequestID) throw new Error('Fabric execution record requestID mismatch');
-    if (record.status !== 'executed') throw new Error('Fabric execution record is not executed');
-    const proofRef = ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(record)));
-    if (!sameHex(response.targetProofRefHash, proofRef)) throw new Error('response targetProofRefHash mismatch');
-  } else if (!helperData.allowDigestOnlyResponse) {
+  } else if (helperData.fabricExecutionView || helperData.fabricChannelID || helperData.fabricChaincodeName) {
+    await verifyFabricExecutionView({ response, helperData });
+  } else {
     throw new Error('response target execution proof is required');
   }
 

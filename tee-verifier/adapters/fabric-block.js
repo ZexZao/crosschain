@@ -37,7 +37,7 @@ function extractChaincodeWrites(actionPayload) {
 function verifyFabricBlockContainsTx({ blockBytes, expectedTxId, expectedBlockNumber, expectedWriteKey }) {
   const block = common.Block.decode(blockBytes);
   const blockNumber = Number(block.header.number);
-  if (blockNumber !== Number(expectedBlockNumber)) {
+  if (expectedBlockNumber !== undefined && expectedBlockNumber !== null && blockNumber !== Number(expectedBlockNumber)) {
     throw new Error(`Fabric block number mismatch: expected=${expectedBlockNumber}, actual=${blockNumber}`);
   }
 
@@ -69,6 +69,7 @@ function verifyFabricBlockContainsTx({ blockBytes, expectedTxId, expectedBlockNu
       txId: channelHeader.tx_id,
       channelId: channelHeader.channel_id,
       type: channelHeader.type,
+      blockNumber,
       index,
       validationCode,
       writes,

@@ -10,8 +10,36 @@ function buildEvmExecutionProofRef(receipt) {
   );
 }
 
+function buildFabricExecutionRecordHash(record) {
+  return hashJson({
+    requestID: record.requestID,
+    txId: record.txId || '',
+    hmsgDigest: record.hmsgDigest || ethers.ZeroHash,
+    targetExecutionHash: record.targetExecutionHash || ethers.ZeroHash,
+    status: record.status,
+    businessKey: record.businessKey || '',
+    businessStatus: record.businessStatus || '',
+  });
+}
+
 function buildFabricExecutionProofRef(record) {
-  return ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(record)));
+  return buildFabricExecutionRecordHash(record);
+}
+
+function buildFabricExecutionViewRef({
+  channelID = process.env.FABRIC_CHANNEL || 'mychannel',
+  chaincodeName = process.env.FABRIC_CHAINCODE || 'xcall',
+  requestID,
+}) {
+  if (!requestID) throw new Error('requestID is required for Fabric execution view ref');
+  return {
+    channelID,
+    chaincodeName,
+    queryFunction: 'GetInboundStatus',
+    queryArgs: [requestID],
+    viewAddress: `fabric://${channelID}/${chaincodeName}/GetInboundStatus/${requestID}`,
+    expectedStateKey: `inbound:${requestID}`,
+  };
 }
 
 function buildExecutedResponse({
@@ -35,6 +63,8 @@ function buildExecutedResponse({
 
 module.exports = {
   buildEvmExecutionProofRef,
+  buildFabricExecutionRecordHash,
   buildFabricExecutionProofRef,
+  buildFabricExecutionViewRef,
   buildExecutedResponse,
 };

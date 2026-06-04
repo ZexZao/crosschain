@@ -286,8 +286,7 @@ contract EvmSourceContract {
     function completeWithResponse(
         bytes32 requestID,
         HXMsgLib.ResponseProof calldata response,
-        HXMsgLib.TEECertification[] calldata certs,
-        uint256 threshold
+        HXMsgLib.TEECertification[] calldata certs
     ) external {
         RequestRecord storage record = requests[requestID];
         require(
@@ -299,7 +298,7 @@ contract EvmSourceContract {
         require(response.responseStatus == RESPONSE_STATUS_EXECUTED, "not executed");
         bytes32 responseDigest = HXMsgLib.hashResponse(response);
         require(!consumedResponses[responseDigest], "response replay");
-        _verifyTEEQuorum(requestID, responseDigest, certs, threshold);
+        _verifyTEEQuorum(requestID, responseDigest, certs);
 
         RequestStatus from = record.status;
         consumedResponses[responseDigest] = true;
@@ -333,9 +332,9 @@ contract EvmSourceContract {
     function _verifyTEEQuorum(
         bytes32 requestID,
         bytes32 digest,
-        HXMsgLib.TEECertification[] calldata certs,
-        uint256 threshold
+        HXMsgLib.TEECertification[] calldata certs
     ) internal view {
+        uint256 threshold = teeRegistry.quorumThreshold();
         require(threshold > 0, "bad threshold");
         require(certs.length >= threshold, "not enough certs");
         uint256 validCount = 0;

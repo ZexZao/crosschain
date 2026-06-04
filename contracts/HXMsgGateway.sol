@@ -28,10 +28,10 @@ contract HXMsgGateway {
         HXMsgLib.HXMsgMinimal calldata hxmsg,
         address target,
         bytes calldata callData,
-        HXMsgLib.TEECertification[] calldata certs,
-        uint256 threshold
+        HXMsgLib.TEECertification[] calldata certs
     ) external {
         require(!processed[hxmsg.requestID], "already processed");
+        uint256 threshold = teeRegistry.quorumThreshold();
         require(threshold > 0, "bad threshold");
         require(certs.length >= threshold, "not enough certs");
         require(hxmsg.expireAt >= block.timestamp, "expired");

@@ -93,15 +93,14 @@ async function relayToEvm(hxmsg, teeUrl, deployment) {
   }
   const gateway = new ethers.Contract(
     deployment.hxmsgGateway,
-    ['function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,(bytes32,bytes32,address,uint64,bytes)[],uint256) external'],
+    ['function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,(bytes32,bytes32,address,uint64,bytes)[]) external'],
     signer
   );
   const receipt = await (await gateway.executeHXMsgMinimalCluster(
     toMinimalHXMsg(hxmsg),
     deployment.targetContract,
     hxmsg.callData,
-    cluster.certifications.map((cert) => [cert.requestID, cert.hmsgDigest, cert.teeAddress, cert.verifiedAt, cert.signature]),
-    Number(cluster.threshold)
+    cluster.certifications.map((cert) => [cert.requestID, cert.hmsgDigest, cert.teeAddress, cert.verifiedAt, cert.signature])
   )).wait();
   return { teeCluster: cluster, receipt, verificationResult: teeResp.data.verificationResult };
 }

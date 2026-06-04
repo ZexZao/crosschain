@@ -182,7 +182,7 @@ async function main() {
     const req = await submitAtomic(source);
     const response = buildResponse(req.requestID, req.record);
     const certs = teeWallets.slice(0, threshold).map((wallet) => certFor(wallet, req.requestID, response.digest));
-    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), certs, threshold)).wait();
+    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), certs)).wait();
     const finalRecord = await source.requests(req.requestID);
     test.status = Number(finalRecord.status);
     test.durationMs = nowMs() - startedMs;
@@ -204,7 +204,7 @@ async function main() {
     const challenged = await source.requests(req.requestID);
     const response = buildResponse(req.requestID, req.record);
     const certs = teeWallets.slice(0, threshold).map((wallet) => certFor(wallet, req.requestID, response.digest));
-    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), certs, threshold)).wait();
+    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), certs)).wait();
     const finalRecord = await source.requests(req.requestID);
     test.challengeDeadline = Number(challenged.challengeDeadline);
     test.status = Number(finalRecord.status);
@@ -246,7 +246,7 @@ async function main() {
     const response = buildResponse(req.requestID, req.record);
     const certs = teeWallets.slice(0, 1).map((wallet) => certFor(wallet, req.requestID, response.digest));
     const result = await expectRevert('insufficient TEE quorum rejected', async () => {
-      await source.completeWithResponse(req.requestID, responseTuple(response), certs, threshold);
+      await source.completeWithResponse(req.requestID, responseTuple(response), certs);
     });
     cases.push({
       caseId: 'CR-EVM-004',
@@ -266,7 +266,7 @@ async function main() {
     const response = buildResponse(req.requestID, req.record);
     const certs = teeWallets.slice(0, threshold).map((wallet) => certFor(wallet, req.requestID, response.digest));
     const result = await expectRevert('late RESPONSE after compensation rejected', async () => {
-      await source.completeWithResponse(req.requestID, responseTuple(response), certs, threshold);
+      await source.completeWithResponse(req.requestID, responseTuple(response), certs);
     });
     cases.push({
       caseId: 'CR-EVM-005',

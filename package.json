@@ -7,8 +7,6 @@
     "node": "hardhat node",
     "compile": "hardhat compile",
     "deploy": "hardhat run scripts/deploy.js --network localhost",
-    "data:generate": "node scripts/generate-test-datasets.js",
-    "fabric:case": "node scripts/run-fabric-test-case.js",
     "fabric:test": "node scripts/run-hxmsg-forward-tests.js",
     "fabric:test:forward": "node scripts/run-hxmsg-forward-tests.js",
     "hxmsg:test:forward": "node scripts/run-hxmsg-forward-tests.js",

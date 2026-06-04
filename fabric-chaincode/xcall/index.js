@@ -563,6 +563,34 @@ async function isTrustedTEE(ctx, address) {
   return data && data.length > 0;
 }
 
+const TEE_CLUSTER_CONFIG_KEY = 'teeClusterConfig';
+
+async function getTEEClusterConfig(ctx) {
+  const data = await ctx.stub.getState(TEE_CLUSTER_CONFIG_KEY);
+  if (!data || data.length === 0) {
+    return { epoch: 1, activeTEECount: 0 };
+  }
+  const parsed = JSON.parse(data.toString());
+  return {
+    epoch: Number(parsed.epoch || 1),
+    activeTEECount: Number(parsed.activeTEECount || 0)
+  };
+}
+
+async function putTEEClusterConfig(ctx, config) {
+  await ctx.stub.putState(TEE_CLUSTER_CONFIG_KEY, Buffer.from(JSON.stringify({
+    epoch: Number(config.epoch || 1),
+    activeTEECount: Number(config.activeTEECount || 0),
+    updatedAt: new Date().toISOString()
+  })));
+}
+
+async function currentTEEQuorumThreshold(ctx) {
+  const config = await getTEEClusterConfig(ctx);
+  if (config.activeTEECount <= 0) throw new Error('empty TEE cluster');
+  return Math.floor(config.activeTEECount / 2) + 1;
+}
+
 function assertTEERegistrar(ctx) {
   const allowedMSPs = ['Org1MSP'];
   const mspid = ctx.clientIdentity.getMSPID();
@@ -576,7 +604,7 @@ async function verifyTEECertification(ctx, hxmsg, certEnvelope) {
   const certs = certEnvelope.certifications || (
     certEnvelope.teeCertification ? [certEnvelope.teeCertification] : [certEnvelope]
   );
-  const threshold = Number(certEnvelope.threshold || 1);
+  const threshold = await currentTEEQuorumThreshold(ctx);
   const seen = new Set();
   let valid = 0;
   for (const cert of certs) {
@@ -603,7 +631,7 @@ async function verifyTEEDigestCertification(ctx, requestID, digest, certEnvelope
   const certs = certEnvelope.certifications || (
     certEnvelope.teeCertification ? [certEnvelope.teeCertification] : [certEnvelope]
   );
-  const threshold = Number(certEnvelope.threshold || 1);
+  const threshold = await currentTEEQuorumThreshold(ctx);
   const seen = new Set();
   let valid = 0;
   for (const cert of certs) {
@@ -914,18 +942,40 @@ class XCallContract extends Contract {
   async RegisterTrustedTEE(ctx, teeAddress) {
     assertTEERegistrar(ctx);
     const address = ethers.getAddress(teeAddress);
-    await ctx.stub.putState(`trustedTEE:${address}`, Buffer.from(JSON.stringify({
+    const key = `trustedTEE:${address}`;
+    const existing = await ctx.stub.getState(key);
+    const config = await getTEEClusterConfig(ctx);
+    if (!existing || existing.length === 0) {
+      config.activeTEECount += 1;
+      await putTEEClusterConfig(ctx, config);
+    }
+    await ctx.stub.putState(key, Buffer.from(JSON.stringify({
       address,
+      epoch: config.epoch,
       registeredByMSP: ctx.clientIdentity.getMSPID(),
       updatedAt: new Date().toISOString()
     })));
-    return JSON.stringify({ ok: true, address });
+    return JSON.stringify({
+      ok: true,
+      address,
+      epoch: config.epoch,
+      activeTEECount: config.activeTEECount,
+      quorumThreshold: Math.floor(config.activeTEECount / 2) + 1
+    });
   }
 
   async QueryTrustedTEE(ctx, teeAddress) {
     const address = ethers.getAddress(teeAddress);
     const data = await ctx.stub.getState(`trustedTEE:${address}`);
     return data && data.length > 0 ? data.toString() : '';
+  }
+
+  async QueryTEEClusterConfig(ctx) {
+    const config = await getTEEClusterConfig(ctx);
+    return JSON.stringify({
+      ...config,
+      quorumThreshold: config.activeTEECount > 0 ? Math.floor(config.activeTEECount / 2) + 1 : 0
+    });
   }
 
   async ExecuteHXMsg(ctx, hxmsgJson, callDataHex, certJson) {
@@ -985,6 +1035,7 @@ class XCallContract extends Contract {
       srcHeight: hxmsg.srcHeight || 0,
       callDataHash: hxmsg.targetAction.callDataHash,
       businessPayloadHash: hxmsg.payloadBinding.businessPayloadHash,
+      targetExecutionHash,
       op: parsedPayload.op,
       recordId: parsedPayload.recordId,
       actor: parsedPayload.actor,

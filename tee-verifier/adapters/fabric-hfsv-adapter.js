@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const fs = require('fs-extra');
 const path = require('path');
+const { ethers } = require('ethers');
 const { Gateway, Wallets } = require('fabric-network');
 const { msp, protos } = require('fabric-protos');
 const {
@@ -11,6 +12,7 @@ const {
   decodeJsonRef,
   hashBytes,
   hashJson,
+  buildFabricHFsvPolicy,
   buildDefaultFabricHFsvPolicy,
   computeAtomicityHash,
   computeFeedbackHash,
@@ -20,6 +22,22 @@ const {
 } = require('../../shared/hxmsg');
 const { buildFabricSourceRecordHash } = require('../../hxmsg-builder/fabric-to-evm');
 const { verifyFabricBlockContainsTx } = require('./fabric-block');
+
+function buildFabricExecutionRecordHash(record) {
+  return hashJson({
+    requestID: record.requestID,
+    txId: record.txId || '',
+    hmsgDigest: record.hmsgDigest || ethers.ZeroHash,
+    targetExecutionHash: record.targetExecutionHash || ethers.ZeroHash,
+    status: record.status,
+    businessKey: record.businessKey || '',
+    businessStatus: record.businessStatus || '',
+  });
+}
+
+function sameHex(a, b) {
+  return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+}
 
 function getTransactionResponsePayload(proposalResponse) {
   const proposalResponsePayload = protos.ProposalResponsePayload.decode(proposalResponse.payload);
@@ -177,7 +195,7 @@ async function queryFabricBlockByTxID(txId, channelID) {
   });
 }
 
-async function fetchEndorsedHFsv({ gateway, ref, policy, requestID, nonce }) {
+async function fetchEndorsedHFsv({ gateway, ref, policy, requestID, nonce, payloadHashFn = buildFabricSourceRecordHash }) {
   const network = await gateway.getNetwork(ref.channelID);
   const channel = network.getChannel();
   const contract = network.getContract(ref.chaincodeName);
@@ -198,21 +216,20 @@ async function fetchEndorsedHFsv({ gateway, ref, policy, requestID, nonce }) {
     targets,
     requestTimeout: Number(process.env.HFSV_QUERY_TIMEOUT_MS || 30000),
   });
-  if (proposalResponse.errors?.length) {
-    const errors = proposalResponse.errors.map((e) => `${e.connection?.name || '<peer>'}: ${e.message}`).join('; ');
-    throw new Error(`h-FSV query failed on Fabric peers: ${errors}`);
-  }
+  const peerErrors = (proposalResponse.errors || [])
+    .map((e) => `${e.connection?.name || '<peer>'}: ${e.message}`);
 
   const successfulResponses = (proposalResponse.responses || [])
     .filter((response) => response.endorsement && Number(response.response?.status) === 200);
   if (successfulResponses.length === 0) {
-    throw new Error('h-FSV query returned no endorsed peer responses');
+    const suffix = peerErrors.length ? `; peer errors: ${peerErrors.join('; ')}` : '';
+    throw new Error(`h-FSV query returned no endorsed peer responses${suffix}`);
   }
 
   const firstPayloadBytes = getTransactionResponsePayload(successfulResponses[0]);
   const payloadText = firstPayloadBytes.toString('utf8');
   const payload = JSON.parse(payloadText);
-  const payloadHash = buildFabricSourceRecordHash(payload);
+  const payloadHash = payloadHashFn(payload);
   const signedPayloadHash = buildHFsvBindingHash({
     viewAddress: ref.viewAddress,
     requestID,
@@ -257,6 +274,7 @@ async function fetchEndorsedHFsv({ gateway, ref, policy, requestID, nonce }) {
     payload,
     payloadHash,
     endorsements,
+    peerErrors,
   };
 }
 
@@ -358,6 +376,7 @@ async function verifyHFsv({ hxmsg, helperData = {} }) {
     policy,
     requestID,
     nonce: hxmsg.header.nonce,
+    payloadHashFn: buildFabricSourceRecordHash,
   }));
   validatePayloadBinding({ hxmsg, ref, hfsv });
 
@@ -388,6 +407,109 @@ async function verifyHFsv({ hxmsg, helperData = {} }) {
     hFSV: {
       viewMeta: hfsv.viewMeta,
       payloadHash: hfsv.payloadHash,
+      ignoredPeerErrors: hfsv.peerErrors,
+      endorsementSummaries: hfsv.endorsements.map((e) => ({
+        peer: e.peer,
+        endorserMSPID: e.endorserMSPID,
+        signedPayloadHash: e.signedPayloadHash,
+      })),
+    },
+  };
+}
+
+function buildDefaultFabricExecutionViewRef({ requestID, channelID, chaincodeName }) {
+  const resolvedChannelID = channelID || process.env.FABRIC_CHANNEL || 'mychannel';
+  const resolvedChaincodeName = chaincodeName || process.env.FABRIC_CHAINCODE || 'xcall';
+  return {
+    channelID: resolvedChannelID,
+    chaincodeName: resolvedChaincodeName,
+    queryFunction: 'GetInboundStatus',
+    queryArgs: [requestID],
+    viewAddress: `fabric://${resolvedChannelID}/${resolvedChaincodeName}/GetInboundStatus/${requestID}`,
+    expectedStateKey: `inbound:${requestID}`,
+  };
+}
+
+function buildFabricExecutionPolicy({ channelID, chaincodeName }) {
+  return buildFabricHFsvPolicy({
+    securityDomain: process.env.HFSV_SECURITY_DOMAIN || 'fabric-local-domain',
+    channelID,
+    chaincodeName,
+    requiredOrgs: (process.env.HFSV_REQUIRED_ORGS || 'Org1MSP').split(',').map((item) => item.trim()).filter(Boolean),
+    rule: process.env.HFSV_POLICY_RULE || 'AND',
+    threshold: process.env.HFSV_POLICY_THRESHOLD,
+    allowedQueryFunctions: ['GetInboundStatus'],
+  });
+}
+
+async function verifyFabricExecutionView({ response, helperData = {} }) {
+  if (!response) throw new Error('response is required for Fabric execution view');
+  const ref = helperData.fabricExecutionView || buildDefaultFabricExecutionViewRef({
+    requestID: response.originRequestID,
+    channelID: helperData.fabricChannelID,
+    chaincodeName: helperData.fabricChaincodeName,
+  });
+  if (ref.queryFunction !== 'GetInboundStatus') {
+    throw new Error(`unsupported Fabric response queryFunction: ${ref.queryFunction}`);
+  }
+  if (ref.queryArgs?.[0] !== response.originRequestID) {
+    throw new Error('Fabric response view requestID mismatch');
+  }
+
+  const policy = buildFabricExecutionPolicy({
+    channelID: ref.channelID,
+    chaincodeName: ref.chaincodeName,
+  });
+  const hfsv = await withFabricGateway((gateway) => fetchEndorsedHFsv({
+    gateway,
+    ref,
+    policy,
+    requestID: response.originRequestID,
+    nonce: helperData.originHxmsg?.header?.nonce || 0,
+    payloadHashFn: buildFabricExecutionRecordHash,
+  }));
+
+  const record = hfsv.payload;
+  if (hfsv.viewMeta.viewAddress !== ref.viewAddress) throw new Error('Fabric response h-FSV viewAddress mismatch');
+  if (record.requestID !== response.originRequestID) throw new Error('Fabric response record requestID mismatch');
+  if (record.status !== 'executed') throw new Error(`Fabric response record status is not executed: ${record.status}`);
+  if (!record.txId) throw new Error('Fabric response record missing execution txId');
+  if (!sameHex(record.hmsgDigest, response.originHmsgDigest)) throw new Error('Fabric response hmsgDigest mismatch');
+  if (!sameHex(record.targetExecutionHash, response.targetExecutionHash)) {
+    throw new Error('Fabric response targetExecutionHash mismatch');
+  }
+
+  const proofRef = buildFabricExecutionRecordHash(record);
+  if (!sameHex(response.targetProofRefHash, proofRef)) {
+    throw new Error('Fabric response targetProofRefHash mismatch');
+  }
+
+  const blockBytes = await queryFabricBlockByTxID(record.txId, ref.channelID);
+  const txVerification = verifyFabricBlockContainsTx({
+    blockBytes,
+    expectedTxId: record.txId,
+    expectedBlockNumber: helperData.fabricExecutionBlockNumber,
+    expectedWriteKey: ref.expectedStateKey || `inbound:${response.originRequestID}`,
+  });
+
+  return {
+    ok: true,
+    adapter: 'fabric-hfsv-response',
+    requestID: response.originRequestID,
+    executionTxID: record.txId,
+    targetProofRefHash: proofRef,
+    blockNumber: txVerification.blockNumber,
+    blockHash: txVerification.blockHash,
+    txIndex: txVerification.index,
+    validatedWriteKey: ref.expectedStateKey || `inbound:${response.originRequestID}`,
+    policyRule: policy.rule,
+    endorsedMSPIDs: [...new Set(hfsv.endorsements.map((e) => e.endorserMSPID))],
+    endorsementCount: hfsv.endorsements.length,
+    endorsedPeers: hfsv.endorsements.map((e) => e.peer),
+    hFSV: {
+      viewMeta: hfsv.viewMeta,
+      payloadHash: hfsv.payloadHash,
+      ignoredPeerErrors: hfsv.peerErrors,
       endorsementSummaries: hfsv.endorsements.map((e) => ({
         peer: e.peer,
         endorserMSPID: e.endorserMSPID,
@@ -403,4 +525,6 @@ module.exports = {
   verificationMethod: VerificationMethod.H_FSV,
   verifySourceFact: verifyHFsv,
   verifyHFsv,
+  verifyFabricExecutionView,
+  buildFabricExecutionRecordHash,
 };

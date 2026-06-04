@@ -1,26 +1,12 @@
 # 测试数据说明
 
-本目录存放用于论文原型实验的测试数据，当前覆盖四类用途：
-
-- 功能正确性数据：用于验证正常跨链调用能否被 TEE 验证并在目标链成功执行
-- 安全实验数据：用于对应篡改、重放、伪造证明、TEE 回滚等攻击场景
-- 性能实验数据：用于观察不同 `payload` 大小下的延迟和 gas 变化
-- 真实 Fabric 模式数据：用于驱动真实 Fabric 链码事件、Listener、proof-builder、TEE 和目标链的端到端联调
+本目录保留当前主线测试直接使用的数据。
 
 ## 文件说明
 
-- `functional-cases.json`
-  - 12 组正常业务消息
-  - 适合做正确性实验、演示截图和论文中的业务样例
-- `security-cases.json`
-  - 8 组安全实验样例
-  - 给出参考功能用例、攻击类型和预期失败原因
-- `performance-cases.json`
-  - 12 组不同负载规模的性能用例
-  - 覆盖约 `256B` 到 `32KB` 的 `payload`
 - `fabric-real-cases.json`
   - 8 组真实 Fabric 模式测试用例
-  - 适合验证真实链码事件发出后，是否能被监听器转换为 `XMsg` 并最终在目标链落地
+  - 由 `scripts/run-hxmsg-forward-tests.js` 驱动，用于验证 Fabric -> EVM 主线消息、h-FSV 验证、TEE quorum 和目标链真实业务执行
 
 ## 真实 Fabric 模式用例
 
@@ -44,26 +30,8 @@
 
 ## 使用方式
 
-读取某条测试用例的 `payload`：
+运行完整 Fabric -> EVM 主线测试：
 
 ```bash
-node scripts/load-test-case.js test-data/fabric-real-cases.json FABRIC-001
+npm run hxmsg:test:forward
 ```
-
-查看完整 case 信息：
-
-```bash
-node scripts/load-test-case.js test-data/fabric-real-cases.json FABRIC-006 --full
-```
-
-直接把某条真实 Fabric 用例发送到 Fabric 链码：
-
-```bash
-node scripts/run-fabric-test-case.js test-data/fabric-real-cases.json FABRIC-001
-```
-
-这一步会调用：
-
-- `docker compose -f docker-compose.fabric.yml run --rm fabric-tools ...`
-
-并把 case 的 `payload` 作为链码 `EmitXCall` 的输入。
