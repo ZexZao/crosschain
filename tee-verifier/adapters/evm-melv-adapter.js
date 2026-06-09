@@ -23,6 +23,9 @@ const {
   normalizeHeader,
   verifyCommitteeHeaderUpdate,
 } = require('../../shared/evm/header-committee');
+const {
+  verifySyncCommitteeHeaderUpdate,
+} = require('../../shared/evm/sync-committee-light-client');
 
 function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
@@ -121,7 +124,47 @@ function rememberCommitteeHeader(chainState, committeeUpdate, { expectedChainID 
   return header;
 }
 
-async function maintainHeaderWindow({ provider, chainState, targetBlockNumber, targetBlockHash, committeeHeaderUpdate, expectedChainID }) {
+async function rememberSyncCommitteeHeader(chainState, syncCommitteeUpdate, { expectedChainID, targetBlockNumber, targetBlockHash } = {}) {
+  const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
+  const verified = await verifySyncCommitteeHeaderUpdate(syncCommitteeUpdate, {
+    expectedChainID,
+    targetBlockNumber,
+    targetBlockHash,
+  });
+  const header = rememberHeader(chainState, verified.header, { windowSize, skipContinuity: true });
+  header.committeeCertified = true;
+  header.committeeID = 'ethereum-sync-committee';
+  header.syncCommitteeCertified = true;
+  header.beaconFinalizedSlot = verified.beaconFinalizedSlot;
+  header.syncCommitteeParticipants = verified.participantCount;
+  header.syncCommitteePeriod = verified.syncCommitteePeriod;
+  if (verified.finalizedHeight >= Number(chainState.evm?.finalizedHeight || 0)) {
+    chainState.evm.finalizedHeight = verified.finalizedHeight;
+    chainState.evm.finalizedHash = verified.finalizedHash;
+  }
+  chainState.evm.headerCommittee = {
+    committeeID: 'ethereum-sync-committee',
+    proofType: verified.proofType,
+    trustedBlockRoot: verified.trustedBlockRoot,
+    participantCount: verified.participantCount,
+    threshold: verified.threshold,
+    beaconFinalizedSlot: verified.beaconFinalizedSlot,
+    signatureSlot: verified.signatureSlot,
+    syncCommitteePeriod: verified.syncCommitteePeriod,
+    committeeUpdates: verified.committeeUpdates || [],
+  };
+  return header;
+}
+
+async function maintainHeaderWindow({
+  provider,
+  chainState,
+  targetBlockNumber,
+  targetBlockHash,
+  committeeHeaderUpdate,
+  syncCommitteeUpdate,
+  expectedChainID,
+}) {
   const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
   const state = chainState.evm || { tipHeight: 0, tipHash: null, headers: [] };
   chainState.evm = state;
@@ -130,7 +173,7 @@ async function maintainHeaderWindow({ provider, chainState, targetBlockNumber, t
   try {
     stored = findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
   } catch (error) {
-    const committeeCanRefresh = committeeHeaderUpdate && (
+    const committeeCanRefresh = (committeeHeaderUpdate || syncCommitteeUpdate) && (
       error.message === 'stored EVM header is not committee-certified' ||
       error.message === 'stored EVM header hash mismatch'
     );
@@ -139,12 +182,22 @@ async function maintainHeaderWindow({ provider, chainState, targetBlockNumber, t
     }
   }
   if (!stored) {
-    if (!committeeHeaderUpdate) {
-      throw new Error('target EVM header is not committee-certified in local header window');
-    }
-    const certified = rememberCommitteeHeader(chainState, committeeHeaderUpdate, { expectedChainID });
-    if (Number(certified.number) !== Number(targetBlockNumber) || !sameHex(certified.hash, targetBlockHash)) {
-      throw new Error('committee-certified header does not match target EVM block');
+    if (syncCommitteeUpdate) {
+      const certified = await rememberSyncCommitteeHeader(chainState, syncCommitteeUpdate, {
+        expectedChainID,
+        targetBlockNumber,
+        targetBlockHash,
+      });
+      if (Number(certified.number) !== Number(targetBlockNumber) || !sameHex(certified.hash, targetBlockHash)) {
+        throw new Error('sync-committee-certified header does not match target EVM block');
+      }
+    } else if (committeeHeaderUpdate) {
+      const certified = rememberCommitteeHeader(chainState, committeeHeaderUpdate, { expectedChainID });
+      if (Number(certified.number) !== Number(targetBlockNumber) || !sameHex(certified.hash, targetBlockHash)) {
+        throw new Error('committee-certified header does not match target EVM block');
+      }
+    } else {
+      throw new Error('target EVM header is not sync-committee-certified in local header window');
     }
     stored = findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
   }
@@ -200,7 +253,7 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
   if (!proofEnvelope?.receipt || !proofEnvelope?.receiptProof) {
     throw new Error('EVM receipt MPT proof is required');
   }
-  const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || helperData.evmRpc || 'http://evm-node:8545');
+  const provider = new ethers.JsonRpcProvider(helperData.evmRpc || process.env.EVM_RPC || 'http://evm-node:8545');
 
   const storedHeader = await maintainHeaderWindow({
     provider,
@@ -208,6 +261,7 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     targetBlockNumber: ref.blockNumber,
     targetBlockHash: ref.blockHash,
     committeeHeaderUpdate: helperData.committeeHeaderUpdate || proofEnvelope.committeeHeaderUpdate,
+    syncCommitteeUpdate: helperData.syncCommitteeUpdate || proofEnvelope.syncCommitteeUpdate,
     expectedChainID: `eip155:${Number(BigInt(hxmsg.source.chainID))}`,
   });
   if (proofEnvelope.blockHeader) {
@@ -311,7 +365,9 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     blockHash: receipt.blockHash,
     confirmations,
     receiptProof: 'mpt-verified',
-    headerMaintainer: 'committee-certified-header-window',
+    headerMaintainer: chainState.evm.headerCommittee?.committeeID === 'ethereum-sync-committee'
+      ? 'ethereum-sync-committee-finalized-header-window'
+      : 'committee-certified-header-window',
     lightClientTip: chainState.evm.tipHeight,
     finalizedHeight: chainState.evm.finalizedHeight || 0,
     headerCommittee: chainState.evm.headerCommittee || null,
@@ -328,5 +384,6 @@ module.exports = {
   verifyMelvEf,
   maintainHeaderWindow,
   rememberCommitteeHeader,
+  rememberSyncCommitteeHeader,
   normalizeHeader,
 };

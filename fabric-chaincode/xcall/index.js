@@ -568,19 +568,27 @@ const TEE_CLUSTER_CONFIG_KEY = 'teeClusterConfig';
 async function getTEEClusterConfig(ctx) {
   const data = await ctx.stub.getState(TEE_CLUSTER_CONFIG_KEY);
   if (!data || data.length === 0) {
-    return { epoch: 1, activeTEECount: 0 };
+    return { epoch: 1, activeTEECount: 0, members: [] };
   }
   const parsed = JSON.parse(data.toString());
+  const members = Array.isArray(parsed.members)
+    ? parsed.members.map((address) => ethers.getAddress(address))
+    : [];
   return {
     epoch: Number(parsed.epoch || 1),
-    activeTEECount: Number(parsed.activeTEECount || 0)
+    activeTEECount: Number(parsed.activeTEECount || members.length || 0),
+    members
   };
 }
 
 async function putTEEClusterConfig(ctx, config) {
+  const members = Array.isArray(config.members)
+    ? Array.from(new Set(config.members.map((address) => ethers.getAddress(address))))
+    : [];
   await ctx.stub.putState(TEE_CLUSTER_CONFIG_KEY, Buffer.from(JSON.stringify({
     epoch: Number(config.epoch || 1),
-    activeTEECount: Number(config.activeTEECount || 0),
+    activeTEECount: members.length,
+    members,
     updatedAt: new Date().toISOString()
   })));
 }
@@ -943,12 +951,11 @@ class XCallContract extends Contract {
     assertTEERegistrar(ctx);
     const address = ethers.getAddress(teeAddress);
     const key = `trustedTEE:${address}`;
-    const existing = await ctx.stub.getState(key);
     const config = await getTEEClusterConfig(ctx);
-    if (!existing || existing.length === 0) {
-      config.activeTEECount += 1;
-      await putTEEClusterConfig(ctx, config);
+    if (!config.members.includes(address)) {
+      config.members.push(address);
     }
+    await putTEEClusterConfig(ctx, config);
     await ctx.stub.putState(key, Buffer.from(JSON.stringify({
       address,
       epoch: config.epoch,
@@ -959,8 +966,8 @@ class XCallContract extends Contract {
       ok: true,
       address,
       epoch: config.epoch,
-      activeTEECount: config.activeTEECount,
-      quorumThreshold: Math.floor(config.activeTEECount / 2) + 1
+      activeTEECount: config.members.length,
+      quorumThreshold: Math.floor(config.members.length / 2) + 1
     });
   }
 
@@ -974,7 +981,8 @@ class XCallContract extends Contract {
     const config = await getTEEClusterConfig(ctx);
     return JSON.stringify({
       ...config,
-      quorumThreshold: config.activeTEECount > 0 ? Math.floor(config.activeTEECount / 2) + 1 : 0
+      activeTEECount: config.members.length,
+      quorumThreshold: config.members.length > 0 ? Math.floor(config.members.length / 2) + 1 : 0
     });
   }
 

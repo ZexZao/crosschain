@@ -1,6 +1,7 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { ethers } = require('ethers');
+const { loadDotEnv } = require('../shared/env');
 const { encodeBusinessPayload } = require('../shared/xmsg');
 const {
   bytes32FromText,
@@ -10,6 +11,8 @@ const {
   FeedbackType,
 } = require('../shared/hxmsg');
 const { FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
+
+loadDotEnv();
 
 async function main() {
   const projectRoot = path.join(__dirname, '..');
@@ -25,9 +28,15 @@ async function main() {
         metadata: 'from evm source contract'
       };
 
-  const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || 'http://127.0.0.1:8545');
+  const rpcUrl = process.env.EVM_RPC || (process.env.USE_SEPOLIA_SYNC_COMMITTEE === 'true'
+    ? process.env.SEPOLIA_RPC_URL
+    : 'http://127.0.0.1:8545');
+  if (!rpcUrl) throw new Error('EVM_RPC or SEPOLIA_RPC_URL is required');
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
   const signer = new ethers.Wallet(
-    '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
+    process.env.DEPLOYER_PRIVATE_KEY
+      || process.env.SEPOLIA_PRIVATE_KEY
+      || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80',
     provider
   );
   const contract = new ethers.Contract(

@@ -10,7 +10,9 @@ function bytes(value) {
 }
 
 function quantityBytes(value) {
-  return bytes(ethers.toBeHex(BigInt(value || 0)));
+  const quantity = BigInt(value || 0);
+  if (quantity === 0n) return new Uint8Array([]);
+  return bytes(ethers.toBeHex(quantity));
 }
 
 function encodeLog(log) {
@@ -23,7 +25,7 @@ function encodeLog(log) {
 
 function encodeReceiptForTrie(receipt) {
   const status = receipt.status !== undefined && receipt.status !== null
-    ? quantityBytes(receipt.status ? 1 : 0)
+    ? quantityBytes(BigInt(receipt.status) === 0n ? 0 : 1)
     : bytes(receipt.root);
   const payload = RLP.encode([
     status,
