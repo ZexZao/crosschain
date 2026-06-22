@@ -19,6 +19,8 @@ const {
   normalizeAtomicity,
   normalizeFeedback,
   normalizePem,
+  getSourceEvidence,
+  getAuditRecord,
 } = require('../../shared/hxmsg');
 const { buildFabricSourceRecordHash } = require('../../hxmsg-builder/fabric-to-evm');
 const { verifyFabricBlockContainsTx } = require('./fabric-block');
@@ -299,16 +301,16 @@ function validateHXMsgEnvelope({ hxmsg, ref, policy }) {
   }
 }
 
-function validatePayloadBinding({ hxmsg, ref, hfsv }) {
+function validatePayloadBinding({ hxmsg, ref, hfsv, auditRecord = {} }) {
   const record = hfsv.payload;
   const requestID = hxmsg.header.requestID;
   if (hfsv.viewMeta.viewAddress !== ref.viewAddress) throw new Error('h-FSV viewAddress mismatch');
   if (hfsv.viewMeta.requestID !== requestID) throw new Error('h-FSV requestID mismatch');
   if (Number(hfsv.viewMeta.nonce) !== Number(hxmsg.header.nonce)) throw new Error('h-FSV nonce mismatch');
   if (record.requestID !== requestID) throw new Error('Fabric state requestID mismatch');
-  if (record.sourceTxID !== hxmsg.txId) throw new Error('Fabric state sourceTxID mismatch');
+  if (auditRecord.txId && record.sourceTxID !== auditRecord.txId) throw new Error('Fabric state sourceTxID mismatch');
   if (Number(record.nonce) !== Number(hxmsg.header.nonce)) throw new Error('Fabric state nonce mismatch');
-  if (Number(record.expireAt) !== Number(hxmsg.header.expireAt)) throw new Error('Fabric state expireAt mismatch');
+  if (Number(record.expireAt) !== Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt)) throw new Error('Fabric state expireAt mismatch');
   if (record.status !== 'COMMITTED') throw new Error(`Fabric state status is not COMMITTED: ${record.status}`);
   if (hfsv.payloadHash.toLowerCase() !== hxmsg.payloadBinding.sourcePayloadHash.toLowerCase()) {
     throw new Error('sourcePayloadHash mismatch');
@@ -351,8 +353,11 @@ function validatePayloadBinding({ hxmsg, ref, hfsv }) {
 }
 
 async function verifyHFsv({ hxmsg, helperData = {} }) {
-  const ref = decodeJsonRef(hxmsg.sourceRef.encodedRef);
-  const computedRefHash = hashBytes(hxmsg.sourceRef.encodedRef);
+  const sourceEvidence = getSourceEvidence(hxmsg, helperData);
+  const auditRecord = getAuditRecord(hxmsg);
+  const encodedRef = sourceEvidence.encodedRef || hxmsg.sourceRef.encodedRef;
+  const ref = decodeJsonRef(encodedRef);
+  const computedRefHash = hashBytes(encodedRef);
   if (computedRefHash.toLowerCase() !== hxmsg.sourceRef.refHash.toLowerCase()) {
     throw new Error('sourceRef.refHash mismatch');
   }
@@ -378,14 +383,14 @@ async function verifyHFsv({ hxmsg, helperData = {} }) {
     nonce: hxmsg.header.nonce,
     payloadHashFn: buildFabricSourceRecordHash,
   }));
-  validatePayloadBinding({ hxmsg, ref, hfsv });
+  validatePayloadBinding({ hxmsg, ref, hfsv, auditRecord });
 
   const expectedWriteKey = ref.expectedStateKey;
   const blockBytes = await queryFabricBlockByTxID(hfsv.payload.sourceTxID, ref.channelID);
   const txVerification = verifyFabricBlockContainsTx({
     blockBytes,
     expectedTxId: hfsv.payload.sourceTxID,
-    expectedBlockNumber: hxmsg.srcHeight,
+    expectedBlockNumber: auditRecord.srcHeight,
     expectedWriteKey,
   });
 
@@ -395,11 +400,11 @@ async function verifyHFsv({ hxmsg, helperData = {} }) {
     requestID,
     sourceTxID: hfsv.payload.sourceTxID,
     sourcePayloadHash: hfsv.payloadHash,
-    blockNumber: Number(hxmsg.srcHeight),
+    blockNumber: Number(auditRecord.srcHeight),
     blockHash: txVerification.blockHash,
     txIndex: txVerification.index,
     validatedWriteKey: expectedWriteKey,
-    policyID: hxmsg.verification.policyRef.policyID,
+    policyID: hxmsg.verification.policyRef.policyID || ref.policyID || 'policy-hash-bound',
     policyRule: policy.rule,
     endorsedMSPIDs: [...new Set(hfsv.endorsements.map((e) => e.endorserMSPID))],
     endorsementCount: hfsv.endorsements.length,

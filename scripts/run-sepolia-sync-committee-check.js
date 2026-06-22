@@ -6,8 +6,20 @@ const {
   fetchBeaconLightClientInputs,
   verifySyncCommitteeHeaderUpdate,
 } = require('../shared/evm/sync-committee-light-client');
+const {
+  loadSyncCommitteeState,
+  resolveTrustedBlockRoot,
+  saveSyncCommitteeState,
+  syncCommitteeStateFile,
+} = require('../shared/evm/sync-committee-state');
 
 loadDotEnv();
+
+function redactUrl(value) {
+  return String(value || '')
+    .replace(/\/v3\/[^/?#]+/i, '/v3/***')
+    .replace(/\/v2\/[^/?#]+/i, '/v2/***');
+}
 
 async function main() {
   const runtimeDir = path.join(__dirname, '..', 'runtime');
@@ -24,13 +36,18 @@ async function main() {
   if (!finalizedBlock) throw new Error('Sepolia finalized execution block not available');
   const targetBlockNumber = Number(BigInt(finalizedBlock.number));
   const targetBlockHash = finalizedBlock.hash;
+  const state = loadSyncCommitteeState();
+  const trustedBlockRoot = resolveTrustedBlockRoot({ state });
+  if (!trustedBlockRoot && process.env.SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT !== 'true') {
+    throw new Error(`SEPOLIA_TRUSTED_BLOCK_ROOT or ${syncCommitteeStateFile()} is required`);
+  }
 
   const startedAt = Date.now();
   const update = await fetchBeaconLightClientInputs({
     beaconApiUrl,
     executionProvider: provider,
     targetBlockNumber,
-    trustedBlockRoot: process.env.SEPOLIA_TRUSTED_BLOCK_ROOT,
+    trustedBlockRoot,
     allowDynamicTrustedRoot: process.env.SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT === 'true',
   });
   update.chainID = `eip155:${process.env.SEPOLIA_CHAIN_ID || 11155111}`;
@@ -40,16 +57,30 @@ async function main() {
     targetBlockHash,
   });
   const elapsedMs = Date.now() - startedAt;
+  const nextState = saveSyncCommitteeState({
+    chainID: update.chainID,
+    trustedBlockRoot: verified.nextTrustedBlockRoot,
+    finalizedHeight: verified.finalizedHeight,
+    finalizedHash: verified.finalizedHash,
+    beaconFinalizedSlot: verified.beaconFinalizedSlot,
+    signatureSlot: verified.signatureSlot,
+    syncCommitteePeriod: verified.syncCommitteePeriod,
+    participantCount: verified.participantCount,
+    source: 'run-sepolia-sync-committee-check',
+  });
 
   const output = {
     testType: 'sepolia-sync-committee-light-client',
     testedAt: new Date().toISOString(),
-    executionRpc: executionRpc.replace(/\/v2\/.*/, '/v2/***'),
-    beaconApiUrl,
+    executionRpc: redactUrl(executionRpc),
+    beaconApiUrl: redactUrl(beaconApiUrl),
     chainID: update.chainID,
     targetBlockNumber,
     targetBlockHash,
     trustedBlockRoot: update.trustedBlockRoot,
+    nextTrustedBlockRoot: verified.nextTrustedBlockRoot,
+    stateFile: syncCommitteeStateFile(),
+    savedState: nextState,
     proofType: update.proofType,
     finalityVersion: update.finalityVersion,
     participantCount: verified.participantCount,
@@ -74,6 +105,9 @@ async function main() {
       `**finalized 高度**：${output.finalizedHeight}\n` +
       `**sync committee period**：${output.syncCommitteePeriod}\n` +
       `**committee update 数量**：${output.committeeUpdates.length}\n` +
+      `**trusted root**：${output.trustedBlockRoot}\n` +
+      `**next trusted root**：${output.nextTrustedBlockRoot}\n` +
+      `**state file**：${output.stateFile}\n` +
       `**sync committee 参与数**：${output.participantCount}/${512}\n` +
       `**阈值**：${output.threshold}\n` +
       `**耗时**：${output.elapsedMs} ms\n` +

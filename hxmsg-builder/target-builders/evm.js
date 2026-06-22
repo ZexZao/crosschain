@@ -8,7 +8,7 @@ const {
   computeTargetExecutionHash,
 } = require('../../shared/hxmsg');
 
-const TARGET_EXECUTE_SELECTOR = ethers.id('execute(bytes32,bytes)').slice(0, 10);
+const TARGET_EXECUTE_SELECTOR = ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10);
 
 function buildEvmContractCallTarget({
   chainId,

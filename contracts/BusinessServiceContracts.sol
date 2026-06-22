@@ -78,6 +78,31 @@ contract CrossChainAssetService is RoutedService {
         emit AssetSettled(requestID, recordKey, recipient, amountUnits);
         return keccak256(bytes("ASSET_SETTLED"));
     }
+
+    /// @notice 紧凑跨链调用版本：链上只接收业务记录哈希，完整业务内容由 TEE 签名的
+    /// metadata/business payload 哈希承诺绑定。
+    function mintSettlementCompact(
+        bytes32 requestID,
+        bytes32 recordKey,
+        address recipient,
+        uint256 amountUnits,
+        bytes32 reasonHash
+    ) external onlyRouter returns (bytes32) {
+        require(recipient != address(0), "bad recipient");
+        require(amountUnits > 0, "zero amount");
+        settlements[requestID] = Settlement({
+            requestID: requestID,
+            recordId: "",
+            recipient: recipient,
+            amountUnits: amountUnits,
+            reasonHash: reasonHash,
+            settledAt: uint64(block.timestamp)
+        });
+        recordKeyToRequestID[recordKey] = requestID;
+        token.mint(recipient, amountUnits);
+        emit AssetSettled(requestID, recordKey, recipient, amountUnits);
+        return keccak256(bytes("ASSET_SETTLED"));
+    }
 }
 
 /// @notice 应收账款证明服务。

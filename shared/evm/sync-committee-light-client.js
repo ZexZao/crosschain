@@ -306,6 +306,37 @@ async function fetchJson(baseUrl, path, { retries = 3, retryDelayMs = 1500 } = {
   throw lastError;
 }
 
+function normalizeLightClientUpdates(response) {
+  if (!response) return [];
+  if (Array.isArray(response)) return response;
+  if (Array.isArray(response.data)) return response.data;
+  return [];
+}
+
+async function fetchLightClientUpdates({
+  beaconApiUrl,
+  startPeriod,
+  endPeriod,
+  chunkSize = 128,
+}) {
+  const updates = [];
+  let cursor = BigInt(startPeriod);
+  const target = BigInt(endPeriod);
+  const maxChunk = BigInt(Math.max(1, Number(chunkSize || 128)));
+  while (cursor < target) {
+    const count = target - cursor > maxChunk ? maxChunk : target - cursor;
+    const response = await fetchJson(
+      beaconApiUrl,
+      `/eth/v1/beacon/light_client/updates?start_period=${cursor.toString()}&count=${count.toString()}`
+    );
+    const chunk = normalizeLightClientUpdates(response);
+    updates.push(...chunk);
+    if (chunk.length === 0) break;
+    cursor += BigInt(chunk.length);
+  }
+  return updates;
+}
+
 async function fetchBeaconLightClientInputs({
   beaconApiUrl,
   executionProvider,
@@ -331,9 +362,13 @@ async function fetchBeaconLightClientInputs({
   ]);
   const bootstrapPeriod = syncCommitteePeriodAtSlot(bootstrapResp.data.header.beacon.slot, specResp.data);
   const signaturePeriod = syncCommitteePeriodAtSlot(finalityResp.data.signature_slot, specResp.data);
-  const updateCount = Number(signaturePeriod - bootstrapPeriod);
-  const lightClientUpdates = updateCount > 0
-    ? await fetchJson(beaconApiUrl, `/eth/v1/beacon/light_client/updates?start_period=${bootstrapPeriod.toString()}&count=${updateCount}`)
+  const lightClientUpdates = signaturePeriod > bootstrapPeriod
+    ? await fetchLightClientUpdates({
+      beaconApiUrl,
+      startPeriod: bootstrapPeriod,
+      endPeriod: signaturePeriod,
+      chunkSize: Number(process.env.SEPOLIA_LIGHT_CLIENT_UPDATE_CHUNK_SIZE || 128),
+    })
     : [];
   const finalizedExecution = finalityResp.data.finalized_header.execution;
   const finalizedNumber = Number(finalizedExecution.block_number);
@@ -406,7 +441,7 @@ async function verifySyncCommitteeHeaderUpdate(update, {
   let activeSyncCommittee = bootstrap.current_sync_committee;
   let activePeriod = syncCommitteePeriodAtSlot(bootstrap.header.beacon.slot, spec);
   const targetSignaturePeriod = syncCommitteePeriodAtSlot(finalityUpdate.signature_slot, spec);
-  const committeeUpdates = Array.isArray(update.lightClientUpdates) ? update.lightClientUpdates : [];
+  const committeeUpdates = normalizeLightClientUpdates(update.lightClientUpdates);
   const committeeUpdateSummaries = [];
   for (const envelope of committeeUpdates) {
     const item = envelope.data || envelope;
@@ -484,10 +519,11 @@ async function verifySyncCommitteeHeaderUpdate(update, {
   if (targetBlockNumber !== undefined) {
     if (!headers.length) throw new Error('ancestor execution headers are required for non-checkpoint target block');
     headers.sort((a, b) => Number(a.number) - Number(b.number));
-    if (Number(headers[0].number) !== Number(targetBlockNumber)) {
-      throw new Error('ancestor header path does not start at target block');
+    const targetIndex = headers.findIndex((header) => Number(header.number) === Number(targetBlockNumber));
+    if (targetIndex === -1) {
+      throw new Error('ancestor header path does not include target block');
     }
-    for (let i = 1; i < headers.length; i += 1) {
+    for (let i = targetIndex + 1; i < headers.length; i += 1) {
       if (!sameHex(headers[i].parentHash, headers[i - 1].hash)) {
         throw new Error('execution ancestor hash chain is invalid');
       }
@@ -496,7 +532,7 @@ async function verifySyncCommitteeHeaderUpdate(update, {
     if (!sameHex(last.hash, finalizedHeader.hash)) {
       throw new Error('execution ancestor path is not anchored to finalized sync-committee header');
     }
-    targetHeader = headers[0];
+    targetHeader = headers[targetIndex];
     if (targetBlockHash && !sameHex(targetHeader.hash, targetBlockHash)) {
       throw new Error('target execution header hash mismatch');
     }
@@ -514,6 +550,7 @@ async function verifySyncCommitteeHeaderUpdate(update, {
     participantCount,
     threshold: Math.ceil((SYNC_COMMITTEE_SIZE * minParticipationNumerator) / minParticipationDenominator),
     trustedBlockRoot: update.trustedBlockRoot,
+    nextTrustedBlockRoot: hex(finalizedHeaderRoot),
     proofType: update.proofType,
   };
 }
@@ -524,6 +561,8 @@ module.exports = {
   CURRENT_SYNC_COMMITTEE_GINDEX_ELECTRA,
   NEXT_SYNC_COMMITTEE_GINDEX_ELECTRA,
   normalizeExecutionHeader,
+  syncCommitteePeriodAtSlot,
+  normalizeLightClientUpdates,
   fetchBeaconLightClientInputs,
   verifySyncCommitteeHeaderUpdate,
 };

@@ -1,5 +1,5 @@
 const { ethers } = require('ethers');
-const { encodeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const { MsgType, FeedbackType, hashJson } = require('../shared/hxmsg');
 const { composeHXMsg } = require('./compose');
 const {
@@ -33,8 +33,8 @@ function buildHXMsgFromFabricEvent({
   if (!rawPayload?.callDataHash) throw new Error('Fabric event payload missing callDataHash');
 
   const businessPayload = normalizeFabricEventPayload(rawPayload);
-  const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);
-  const callDataHash = ethers.keccak256(payloadHex);
+  const { normalized, compact, payloadHex, compactCallHash } = encodeCompactBusinessCall(businessPayload);
+  const callDataHash = compactCallHash;
   if (callDataHash.toLowerCase() !== String(rawPayload.callDataHash).toLowerCase()) {
     throw new Error(`callDataHash mismatch: event=${rawPayload.callDataHash}, computed=${callDataHash}`);
   }
@@ -96,6 +96,7 @@ function buildHXMsgFromFabricEvent({
     feedback,
     atomicity,
     callData: payloadHex,
+    compactCall: compact,
     callDataDecoded: normalized,
     txId,
     srcHeight: sourcePart.srcHeight,

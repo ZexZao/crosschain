@@ -4,6 +4,7 @@ const {
   VerificationMethod,
   PolicyType,
   decodeJsonRef,
+  hashBytes,
   hashJson,
   buildDefaultEvmMelvPolicy,
   computeAtomicityHash,
@@ -11,11 +12,11 @@ const {
   computeTargetExecutionHash,
   normalizeAtomicity,
   normalizeFeedback,
+  getSourceEvidence,
 } = require('../../shared/hxmsg');
 const {
   CROSS_CHAIN_CALL_TOPIC,
   parseCrossChainCallLog,
-  buildEvmEventRefHash,
   buildEvmSourcePayloadHash,
 } = require('../../hxmsg-builder/evm-to-fabric');
 const { verifyReceiptProof } = require('../../shared/evm/receipt-proof');
@@ -29,6 +30,35 @@ const {
 
 function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
+}
+
+function resetEvmHeaderWindow(chainState, { chainID }) {
+  chainState.evm = {
+    chainID,
+    tipHeight: 0,
+    tipHash: null,
+    finalizedHeight: 0,
+    finalizedHash: null,
+    headers: [],
+  };
+  return chainState.evm;
+}
+
+function ensureEvmChainContext(chainState, { expectedChainID, incomingHeader }) {
+  if (!chainState.evm) resetEvmHeaderWindow(chainState, { chainID: expectedChainID });
+  if (expectedChainID && chainState.evm.chainID && chainState.evm.chainID !== expectedChainID) {
+    return resetEvmHeaderWindow(chainState, { chainID: expectedChainID });
+  }
+  if (expectedChainID && !chainState.evm.chainID) {
+    chainState.evm.chainID = expectedChainID;
+  }
+  const incomingNumber = Number(incomingHeader?.number ?? 0);
+  const finalizedHeight = Number(chainState.evm.finalizedHeight || 0);
+  const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
+  if (incomingNumber > 0 && finalizedHeight > 0 && incomingNumber + windowSize < finalizedHeight) {
+    return resetEvmHeaderWindow(chainState, { chainID: expectedChainID || chainState.evm.chainID });
+  }
+  return chainState.evm;
 }
 
 function rememberHeader(chainState, header, { finalized = false, windowSize = 128, skipContinuity = false } = {}) {
@@ -107,6 +137,7 @@ async function fetchFinalizedHeader(provider) {
 function rememberCommitteeHeader(chainState, committeeUpdate, { expectedChainID } = {}) {
   const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
   const verified = verifyCommitteeHeaderUpdate(committeeUpdate, { expectedChainID });
+  ensureEvmChainContext(chainState, { expectedChainID, incomingHeader: verified.header });
   const header = rememberHeader(chainState, verified.header, { windowSize, skipContinuity: true });
   header.committeeCertified = true;
   header.committeeID = verified.committeeID;
@@ -117,6 +148,7 @@ function rememberCommitteeHeader(chainState, committeeUpdate, { expectedChainID 
   }
   chainState.evm.headerCommittee = {
     committeeID: verified.committeeID,
+    chainID: expectedChainID || committeeUpdate.chainID,
     threshold: verified.threshold,
     signerCount: verified.signerCount,
     lastDigest: verified.digest,
@@ -126,11 +158,20 @@ function rememberCommitteeHeader(chainState, committeeUpdate, { expectedChainID 
 
 async function rememberSyncCommitteeHeader(chainState, syncCommitteeUpdate, { expectedChainID, targetBlockNumber, targetBlockHash } = {}) {
   const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
+  const trustedBlockRoot = chainState.evm?.syncCommittee?.trustedBlockRoot
+    || process.env.SEPOLIA_TRUSTED_BLOCK_ROOT;
+  if (!trustedBlockRoot && process.env.SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT !== 'true') {
+    throw new Error('TEE sync committee trusted block root is not initialized');
+  }
+  if (trustedBlockRoot && !sameHex(syncCommitteeUpdate.trustedBlockRoot, trustedBlockRoot)) {
+    throw new Error('sync committee trusted block root mismatch');
+  }
   const verified = await verifySyncCommitteeHeaderUpdate(syncCommitteeUpdate, {
     expectedChainID,
     targetBlockNumber,
     targetBlockHash,
   });
+  ensureEvmChainContext(chainState, { expectedChainID, incomingHeader: verified.header });
   const header = rememberHeader(chainState, verified.header, { windowSize, skipContinuity: true });
   header.committeeCertified = true;
   header.committeeID = 'ethereum-sync-committee';
@@ -144,6 +185,7 @@ async function rememberSyncCommitteeHeader(chainState, syncCommitteeUpdate, { ex
   }
   chainState.evm.headerCommittee = {
     committeeID: 'ethereum-sync-committee',
+    chainID: expectedChainID || syncCommitteeUpdate.chainID,
     proofType: verified.proofType,
     trustedBlockRoot: verified.trustedBlockRoot,
     participantCount: verified.participantCount,
@@ -152,6 +194,18 @@ async function rememberSyncCommitteeHeader(chainState, syncCommitteeUpdate, { ex
     signatureSlot: verified.signatureSlot,
     syncCommitteePeriod: verified.syncCommitteePeriod,
     committeeUpdates: verified.committeeUpdates || [],
+  };
+  chainState.evm.syncCommittee = {
+    chainID: expectedChainID || syncCommitteeUpdate.chainID,
+    trustedBlockRoot: verified.nextTrustedBlockRoot,
+    previousTrustedBlockRoot: syncCommitteeUpdate.trustedBlockRoot,
+    finalizedHeight: verified.finalizedHeight,
+    finalizedHash: verified.finalizedHash,
+    beaconFinalizedSlot: verified.beaconFinalizedSlot,
+    signatureSlot: verified.signatureSlot,
+    syncCommitteePeriod: verified.syncCommitteePeriod,
+    participantCount: verified.participantCount,
+    updatedAt: new Date().toISOString(),
   };
   return header;
 }
@@ -170,8 +224,15 @@ async function maintainHeaderWindow({
   chainState.evm = state;
 
   let stored = null;
-  try {
+  if (committeeHeaderUpdate && !syncCommitteeUpdate) {
+    const certified = rememberCommitteeHeader(chainState, committeeHeaderUpdate, { expectedChainID });
+    if (Number(certified.number) !== Number(targetBlockNumber) || !sameHex(certified.hash, targetBlockHash)) {
+      throw new Error('committee-certified header does not match target EVM block');
+    }
     stored = findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
+  }
+  try {
+    stored = stored || findStoredHeader(chainState, targetBlockNumber, targetBlockHash);
   } catch (error) {
     const committeeCanRefresh = (committeeHeaderUpdate || syncCommitteeUpdate) && (
       error.message === 'stored EVM header is not committee-certified' ||
@@ -231,8 +292,10 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     throw new Error('MELV-EF adapter requires EVM finality policy');
   }
 
-  const ref = decodeJsonRef(hxmsg.sourceRef.encodedRef);
-  const expectedRefHash = buildEvmEventRefHash(ref);
+  const sourceEvidence = getSourceEvidence(hxmsg, helperData);
+  const encodedRef = sourceEvidence.encodedRef || hxmsg.sourceRef.encodedRef;
+  const ref = decodeJsonRef(encodedRef);
+  const expectedRefHash = hashBytes(encodedRef);
   if (!sameHex(expectedRefHash, hxmsg.sourceRef.refHash)) {
     throw new Error('EVM sourceRef hash mismatch');
   }
@@ -306,7 +369,7 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
 
   if (!sameHex(event.requestID, hxmsg.header.requestID)) throw new Error('EVM event requestID mismatch');
   if (Number(event.nonce) !== Number(hxmsg.header.nonce)) throw new Error('EVM event nonce mismatch');
-  if (Number(event.expireAt) !== Number(hxmsg.header.expireAt)) throw new Error('EVM event expireAt mismatch');
+  if (Number(event.expireAt) !== Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt)) throw new Error('EVM event expireAt mismatch');
   if (!sameHex(event.targetChainID, hxmsg.target.chainID)) throw new Error('EVM event targetChainID mismatch');
   if (!sameHex(event.targetDomainID, hxmsg.target.domainID)) throw new Error('EVM event targetDomainID mismatch');
   if (!sameHex(event.targetObject, hxmsg.targetAction.targetObject)) throw new Error('EVM event targetObject mismatch');
@@ -353,7 +416,8 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     callDataHash: hxmsg.targetAction.callDataHash,
     receiver: hxmsg.targetAction.receiver,
   });
-  if (!sameHex(targetExecutionHash, hxmsg.payloadBinding.targetExecutionHash)) {
+  const expectedTargetExecutionHash = hxmsg.deliveryMessage?.targetExecutionHash || hxmsg.payloadBinding.targetExecutionHash || targetExecutionHash;
+  if (!sameHex(targetExecutionHash, expectedTargetExecutionHash)) {
     throw new Error('EVM targetExecutionHash mismatch');
   }
   saveChainState();

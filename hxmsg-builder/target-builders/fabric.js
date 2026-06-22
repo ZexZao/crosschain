@@ -9,7 +9,8 @@ const {
 const FABRIC_INVOKE_SELECTOR = ethers.id('ExecuteHXMsg(bytes32,bytes)').slice(0, 10);
 
 function buildFabricTargetObject(channelID, chaincodeName) {
-  return bytes32FromText(`fabric:${channelID}:${chaincodeName}`);
+  void channelID;
+  return bytes32FromText(chaincodeName);
 }
 
 function buildFabricChaincodeTarget({

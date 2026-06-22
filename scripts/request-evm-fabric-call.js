@@ -2,7 +2,7 @@ const fs = require('fs-extra');
 const path = require('path');
 const { ethers } = require('ethers');
 const { loadDotEnv } = require('../shared/env');
-const { encodeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const {
   bytes32FromText,
   hashJson,
@@ -21,7 +21,7 @@ async function main() {
   const payload = payloadArg
     ? JSON.parse(payloadArg)
     : {
-        op: 'fabric_invoke',
+        op: 'oracle_update',
         recordId: 'EVM-FABRIC-001',
         actor: 'evm.userA',
         amount: '1',
@@ -49,12 +49,12 @@ async function main() {
 
   const channelID = process.env.FABRIC_CHANNEL || 'mychannel';
   const chaincodeName = process.env.FABRIC_CHAINCODE || 'xcall';
-  const { normalized, payloadHex } = encodeBusinessPayload(payload);
+  const { normalized, payloadHex, compactCallHash } = encodeCompactBusinessCall(payload);
   const expireAt = Math.floor(Date.now() / 1000) + 3600;
   const targetChainID = bytes32FromText(`fabric-${channelID}`);
   const targetDomainID = bytes32FromText('fabric-local-domain');
   const targetObject = buildFabricTargetObject(channelID, chaincodeName);
-  const callDataHash = ethers.keccak256(payloadHex);
+  const callDataHash = compactCallHash;
   const businessPayloadHash = hashJson(normalized);
   const receiver = bytes32FromText(normalized.actor);
   const atomicityRequired = Boolean(payload.atomicity?.required);

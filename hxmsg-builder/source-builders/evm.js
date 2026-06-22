@@ -8,6 +8,7 @@ const {
   encodeJsonRef,
   bytes32FromText,
   chainIdToBytes32,
+  hashBytes,
   buildEvmMelvPolicyRef,
   computeAtomicityHash,
   computeFeedbackHash,
@@ -153,7 +154,7 @@ function buildEvmSourceFact({
     },
     sourceRef: {
       refType: RefType.EVM_RECEIPT,
-      refHash: buildEvmEventRefHash(eventRef),
+      refHash: hashBytes(encodedRef),
       encodedRef,
     },
     verification: {

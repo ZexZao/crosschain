@@ -1,5 +1,6 @@
 const { ethers } = require('ethers');
 const { stableStringify } = require('./codec');
+const { toCanonicalHXMsg } = require('./canonical');
 
 function normalizeFeedback(feedback = {}) {
   return {
@@ -73,16 +74,18 @@ function computeTargetExecutionHash({ requestID, targetChainID, targetObject, fu
 }
 
 function computeHXMsgDigest(hxmsg) {
+  hxmsg = toCanonicalHXMsg(hxmsg);
   const headerHash = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['uint8', 'bytes32', 'uint8', 'uint64', 'uint64', 'uint64'],
+      ['uint8', 'bytes32', 'uint8', 'uint64', 'bytes32', 'uint64', 'uint64'],
       [
         hxmsg.header.version,
         hxmsg.header.requestID,
         hxmsg.header.msgType,
         hxmsg.header.nonce,
-        hxmsg.header.createdAt,
-        hxmsg.header.expireAt,
+        hxmsg.header.nonceScope,
+        hxmsg.header.sourceTimestamp,
+        hxmsg.header.deliveryExpireAt,
       ]
     )
   );
@@ -115,25 +118,26 @@ function computeHXMsgDigest(hxmsg) {
   );
   const verificationHash = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['uint8', 'uint8', 'uint16', 'uint8', 'bytes32', 'bytes32', 'bytes32'],
+      ['uint8', 'uint8', 'uint16', 'bytes32', 'uint64', 'bytes32', 'uint8', 'bytes32', 'bytes32'],
       [
         hxmsg.verification.verificationMethod,
-        hxmsg.verification.finalityModel,
-        hxmsg.verification.requiredConfirmations,
+        hxmsg.verification.finality.model,
+        hxmsg.verification.finality.confirmations,
+        hxmsg.verification.finality.checkpointRoot,
+        hxmsg.verification.finality.epoch,
+        hxmsg.verification.finality.committeePolicyHash,
         hxmsg.verification.policyRef.policyType,
-        hxmsg.verification.policyRef.policyID,
         hxmsg.verification.policyRef.policyHash,
-        hxmsg.verification.adapterID,
+        hxmsg.verification.verifierProfileHash,
       ]
     )
   );
   const bindingHash = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'bytes32'],
+      ['bytes32', 'bytes32'],
       [
         hxmsg.payloadBinding.sourcePayloadHash,
         hxmsg.payloadBinding.businessPayloadHash,
-        hxmsg.payloadBinding.targetExecutionHash,
       ]
     )
   );
@@ -149,10 +153,20 @@ function computeHXMsgDigest(hxmsg) {
 }
 
 function toMinimalHXMsg(hxmsg) {
+  hxmsg = toCanonicalHXMsg(hxmsg);
   const feedback = normalizeFeedback(hxmsg.feedback);
+  const targetExecutionHash = computeTargetExecutionHash({
+    requestID: hxmsg.header.requestID,
+    targetChainID: hxmsg.target.chainID,
+    targetObject: hxmsg.targetAction.targetObject,
+    functionSelector: hxmsg.targetAction.functionSelector,
+    callDataHash: hxmsg.targetAction.callDataHash,
+    receiver: hxmsg.targetAction.receiver,
+  });
+  const hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
   return [
     hxmsg.header.requestID,
-    hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg),
+    hmsgDigest,
     hxmsg.target.chainType,
     hxmsg.target.chainID,
     hxmsg.targetAction.actionType,
@@ -160,12 +174,12 @@ function toMinimalHXMsg(hxmsg) {
     hxmsg.targetAction.functionSelector,
     hxmsg.targetAction.callDataHash,
     hxmsg.targetAction.receiver,
-    hxmsg.payloadBinding.targetExecutionHash,
+    targetExecutionHash,
     feedback.required,
     feedback.expectedMsgType,
     feedback.timeout,
     feedback.callbackRefHash,
-    hxmsg.header.expireAt,
+    hxmsg.header.deliveryExpireAt,
   ];
 }
 
@@ -214,7 +228,16 @@ function computeHXMsgDeliveryDigest(hxmsg) {
 }
 
 function toOnChainHXMsg(hxmsg) {
+  hxmsg = toCanonicalHXMsg(hxmsg);
   const feedback = normalizeFeedback(hxmsg.feedback);
+  const targetExecutionHash = computeTargetExecutionHash({
+    requestID: hxmsg.header.requestID,
+    targetChainID: hxmsg.target.chainID,
+    targetObject: hxmsg.targetAction.targetObject,
+    functionSelector: hxmsg.targetAction.functionSelector,
+    callDataHash: hxmsg.targetAction.callDataHash,
+    receiver: hxmsg.targetAction.receiver,
+  });
   return [
     hxmsg.header.version,
     hxmsg.header.msgType,
@@ -233,24 +256,24 @@ function toOnChainHXMsg(hxmsg) {
     hxmsg.targetAction.callDataHash,
     hxmsg.targetAction.receiver,
     hxmsg.verification.verificationMethod,
-    hxmsg.verification.finalityModel,
-    hxmsg.verification.requiredConfirmations,
+    hxmsg.verification.finality.model,
+    hxmsg.verification.finality.confirmations,
     [
       hxmsg.verification.policyRef.policyType,
-      hxmsg.verification.policyRef.policyID,
+      ethers.ZeroHash,
       hxmsg.verification.policyRef.policyHash,
     ],
-    hxmsg.verification.adapterID,
+    hxmsg.verification.verifierProfileHash,
     hxmsg.payloadBinding.sourcePayloadHash,
     hxmsg.payloadBinding.businessPayloadHash,
-    hxmsg.payloadBinding.targetExecutionHash,
+    targetExecutionHash,
     feedback.required,
     feedback.expectedMsgType,
     feedback.timeout,
     feedback.callbackRefHash,
     hxmsg.header.nonce,
-    hxmsg.header.createdAt,
-    hxmsg.header.expireAt,
+    hxmsg.header.sourceTimestamp,
+    hxmsg.header.deliveryExpireAt,
   ];
 }
 

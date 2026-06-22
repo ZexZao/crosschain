@@ -4,13 +4,22 @@ const fs = require('fs-extra');
 const path = require('path');
 const crypto = require('crypto');
 const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
-const { ChainType, computeHXMsgDigest, computeHXMsgDeliveryDigest, computeResponseDigest } = require('../shared/hxmsg');
+const { loadDotEnv } = require('../shared/env');
+const {
+  ChainType,
+  computeHXMsgDigest,
+  computeHXMsgDeliveryDigest,
+  computeResponseDigest,
+  assertEnvelopeBindings,
+} = require('../shared/hxmsg');
+const { buildHXMsgBatch } = require('../shared/hxmsg/batch');
 const { verifySourceFact } = require('./adapters');
 const { buildCertification, buildDigestCertification } = require('./core/certification');
 const { verifyReceiptProof } = require('../shared/evm/receipt-proof');
 const { maintainHeaderWindow } = require('./adapters/evm-melv-adapter');
 const { verifyFabricExecutionView } = require('./adapters/fabric-hfsv-adapter');
 
+loadDotEnv();
 ensureRuntime();
 const app = express();
 app.use(express.json({ limit: '10mb' }));  // Larger limit for block data
@@ -255,6 +264,20 @@ function signingDigestForHXMsg(hxmsg) {
     : (hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg));
 }
 
+function normalizeAttestationInput(body = {}) {
+  const envelope = body.hxmsg?.hxmsg ? body.hxmsg : body.hxmsg?.hxmsgEnvelope;
+  const hxmsg = body.hxmsg?.hxmsg || body.hxmsg;
+  const sourceEvidence = envelope?.sourceEvidence || body.sourceEvidence || {};
+  const proofHelper = sourceEvidence.helperData || sourceEvidence.proof || {};
+  return {
+    hxmsg,
+    helperData: {
+      ...proofHelper,
+      ...(body.helperData || body.blockData || {}),
+    },
+  };
+}
+
 function makeConsensusEntry({ hxmsg, helperData, proposerID }) {
   const hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
   hxmsg.hmsgDigest = hmsgDigest;
@@ -308,6 +331,31 @@ function makeDigestConsensusEntry({ requestID, digest, response, helperData, pro
     status: 'pending',
     response,
     helperData: helperData || {},
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+}
+
+function makeBatchConsensusEntry({ batch, proposerID }) {
+  const index = lastLogIndex() + 1;
+  const term = Number(consensusState.currentTerm || 1);
+  const signatureDigestType = 'batchDigest';
+  const entryDigest = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
+      [term, index, batch.batchID, batch.batchSigningDigest, signatureDigestType]
+    )
+  );
+  return {
+    index,
+    term,
+    proposerID,
+    requestID: batch.batchID,
+    hmsgDigest: batch.batchSigningDigest,
+    signingDigest: batch.batchSigningDigest,
+    signatureDigestType,
+    entryDigest,
+    status: 'pending',
+    batch,
     createdAt: Math.floor(Date.now() / 1000),
   };
 }
@@ -386,6 +434,24 @@ function assertEntryMatchesDigest(entry, requestID, digest) {
   }
 }
 
+function assertEntryMatchesBatch(entry, batch) {
+  const rebuilt = buildHXMsgBatch(batch.hxmsgs);
+  if (!sameHex(rebuilt.batchID, batch.batchID)) throw new Error('batchID mismatch');
+  if (!sameHex(rebuilt.batchRoot, batch.batchRoot)) throw new Error('batchRoot mismatch');
+  if (!sameHex(rebuilt.batchSigningDigest, batch.batchSigningDigest)) throw new Error('batchSigningDigest mismatch');
+  if (!sameHex(entry.requestID, batch.batchID)) throw new Error('consensus batch request mismatch');
+  if (!sameHex(entry.hmsgDigest, batch.batchSigningDigest)) throw new Error('consensus batch digest mismatch');
+  if (!sameHex(entry.signingDigest, batch.batchSigningDigest)) throw new Error('consensus batch signing digest mismatch');
+  const expectedEntryDigest = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
+      [Number(entry.term), Number(entry.index), batch.batchID, batch.batchSigningDigest, entry.signatureDigestType]
+    )
+  );
+  if (!sameHex(entry.entryDigest, expectedEntryDigest)) throw new Error('consensus batch entry digest mismatch');
+  return rebuilt;
+}
+
 function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
 }
@@ -398,7 +464,8 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
     const originDigest = originHxmsg.hmsgDigest || computeHXMsgDigest(originHxmsg);
     if (!sameHex(originDigest, response.originHmsgDigest)) throw new Error('response originHmsgDigest mismatch');
     if (!sameHex(originHxmsg.header.requestID, response.originRequestID)) throw new Error('response originRequestID mismatch');
-    if (!sameHex(originHxmsg.payloadBinding.targetExecutionHash, response.targetExecutionHash)) {
+    const originTargetExecutionHash = originHxmsg.deliveryMessage?.targetExecutionHash || originHxmsg.payloadBinding.targetExecutionHash;
+    if (!sameHex(originTargetExecutionHash, response.targetExecutionHash)) {
       throw new Error('response targetExecutionHash mismatch');
     }
   }
@@ -456,8 +523,9 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
 }
 
 async function verifyHXMsgLocally({ hxmsg, helperData }) {
+  assertEnvelopeBindings(hxmsg);
   hxmsg.hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
-  if (Number(hxmsg.header.expireAt) < Math.floor(Date.now() / 1000)) {
+  if (Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt) < Math.floor(Date.now() / 1000)) {
     throw new Error('h-xmsg expired');
   }
   const verificationResult = await verifySourceFact({
@@ -467,6 +535,31 @@ async function verifyHXMsgLocally({ hxmsg, helperData }) {
     saveChainState,
   });
   return { verificationResult };
+}
+
+async function verifyBatchLocally({ batch }) {
+  if (!batch || !Array.isArray(batch.hxmsgs) || !Array.isArray(batch.helperDataList)) {
+    throw new Error('batch.hxmsgs and batch.helperDataList are required');
+  }
+  if (batch.hxmsgs.length === 0) throw new Error('empty h-xmsg batch');
+  if (batch.hxmsgs.length !== batch.helperDataList.length) throw new Error('batch helperData count mismatch');
+  const rebuilt = buildHXMsgBatch(batch.hxmsgs);
+  if (!sameHex(rebuilt.batchID, batch.batchID)) throw new Error('batchID mismatch');
+  if (!sameHex(rebuilt.batchRoot, batch.batchRoot)) throw new Error('batchRoot mismatch');
+  if (!sameHex(rebuilt.batchSigningDigest, batch.batchSigningDigest)) throw new Error('batchSigningDigest mismatch');
+  const verificationResults = [];
+  for (let i = 0; i < batch.hxmsgs.length; i += 1) {
+    const local = await verifyHXMsgLocally({
+      hxmsg: batch.hxmsgs[i],
+      helperData: batch.helperDataList[i] || {},
+    });
+    verificationResults.push({
+      index: i,
+      requestID: batch.hxmsgs[i].header.requestID,
+      ...local.verificationResult,
+    });
+  }
+  return { rebuilt, verificationResults };
 }
 
 function buildCommittedCertification({ hxmsg, entry }) {
@@ -838,6 +931,64 @@ async function collectClusterAttestations({ hxmsg, helperData, localResult }) {
   };
 }
 
+async function collectClusterBatchCertifications({ batch, localResult }) {
+  const threshold = clusterThreshold();
+  const entry = makeBatchConsensusEntry({ batch, proposerID: teeNodeID });
+  const raftResult = await replicateEntryToRaftQuorum(entry);
+  const verificationResults = [{ nodeID: teeNodeID, batchVerified: true, items: localResult.verificationResults }];
+  const accepted = (raftResult.appendAcks || []).filter((ack) => ack.accepted);
+  if (!raftResult.committed || accepted.length < raftMajority()) {
+    return {
+      algorithm: 'mercury-raft-tee-batch-cluster',
+      proposerID: teeNodeID,
+      term: entry.term,
+      index: entry.index,
+      entryDigest: entry.entryDigest,
+      threshold,
+      raftMajority: raftMajority(),
+      totalConfigured: clusterSize(),
+      reached: accepted.length,
+      quorumReached: false,
+      batchID: batch.batchID,
+      batchRoot: batch.batchRoot,
+      batchSigningDigest: batch.batchSigningDigest,
+      certifications: [],
+      appendAcks: raftResult.appendAcks || [],
+      verificationResults,
+    };
+  }
+
+  const { certifications, certAcks } = await collectCommittedCertifications({
+    hxmsg: null,
+    committedEntry: raftResult.committedEntry,
+    commitAcks: raftResult.commitAcks || [],
+  });
+  return {
+    algorithm: 'mercury-raft-tee-batch-cluster',
+    proposerID: teeNodeID,
+    leaderID: teeNodeID,
+    term: raftResult.committedEntry.term,
+    index: raftResult.committedEntry.index,
+    entryDigest: raftResult.committedEntry.entryDigest,
+    threshold,
+    raftMajority: raftMajority(),
+    totalConfigured: clusterSize(),
+    reached: certifications.length,
+    quorumReached: certifications.length >= threshold,
+    batchID: batch.batchID,
+    batchRoot: batch.batchRoot,
+    batchSize: batch.hxmsgs.length,
+    batchSigningDigest: batch.batchSigningDigest,
+    signingDigest: batch.batchSigningDigest,
+    signatureDigestType: 'batchDigest',
+    certifications,
+    appendAcks: raftResult.appendAcks || [],
+    commitAcks: raftResult.commitAcks || [],
+    certAcks,
+    verificationResults,
+  };
+}
+
 // ============ Routes ============
 
 app.get('/pubkey', (_req, res) => {
@@ -958,8 +1109,11 @@ app.post('/internal/raft/append-entries', async (req, res) => {
           response: entry.response,
           helperData: entry.helperData || {},
         }) };
+      } else if (entry.batch) {
+        assertEntryMatchesBatch(entry, entry.batch);
+        localResult = { verificationResult: await verifyBatchLocally({ batch: entry.batch }) };
       } else {
-        throw new Error('raft entry missing hxmsg or response');
+        throw new Error('raft entry missing hxmsg, response, or batch');
       }
       verificationResults.push({ entryDigest: entry.entryDigest, ...localResult.verificationResult });
       appendConsensusEntry(entry);
@@ -1022,14 +1176,14 @@ app.post('/attest', async (req, res) => {
         res.status(leaderRoute.status).json(leaderRoute.body);
         return;
       }
-      const hxmsg = req.body.hxmsg;
+      const { hxmsg, helperData } = normalizeAttestationInput(req.body);
       const localResult = await verifyHXMsgLocally({
         hxmsg,
-        helperData: req.body.helperData || req.body.blockData || {},
+        helperData,
       });
       const teeClusterCertification = await collectClusterAttestations({
         hxmsg,
-        helperData: req.body.helperData || req.body.blockData || {},
+        helperData,
         localResult,
       });
       if (!teeClusterCertification.quorumReached) {
@@ -1046,6 +1200,51 @@ app.post('/attest', async (req, res) => {
     throw new Error('h-xmsg is required');
   } catch (error) {
     console.error('[attest] Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ /attest-batch: verify many h-xmsgs, commit one batch digest ============
+
+app.post('/attest-batch', async (req, res) => {
+  try {
+    const hxmsgs = req.body?.hxmsgs;
+    const helperDataList = req.body?.helperDataList || [];
+    if (!Array.isArray(hxmsgs) || hxmsgs.length === 0) throw new Error('hxmsgs are required');
+    if (!Array.isArray(helperDataList) || helperDataList.length !== hxmsgs.length) {
+      throw new Error('helperDataList must match hxmsgs length');
+    }
+    const leaderRoute = await ensureRaftLeaderOrForward(req.body, '/attest-batch');
+    if (!leaderRoute.localLeader) {
+      res.status(leaderRoute.status).json(leaderRoute.body);
+      return;
+    }
+    const built = buildHXMsgBatch(hxmsgs);
+    const batch = {
+      batchID: built.batchID,
+      batchRoot: built.batchRoot,
+      batchSize: built.batchSize,
+      targetChainID: built.targetChainID,
+      batchSigningDigest: built.batchSigningDigest,
+      hxmsgs,
+      helperDataList,
+    };
+    const localResult = await verifyBatchLocally({ batch });
+    const teeBatchCertification = await collectClusterBatchCertifications({ batch, localResult });
+    if (!teeBatchCertification.quorumReached) {
+      throw new Error(`TEE batch quorum not reached: ${teeBatchCertification.reached}/${teeBatchCertification.threshold}`);
+    }
+    res.json({
+      batchID: built.batchID,
+      batchRoot: built.batchRoot,
+      batchSize: built.batchSize,
+      batchSigningDigest: built.batchSigningDigest,
+      merkleProofs: built.proofs,
+      teeBatchCertification,
+      verificationResults: localResult.verificationResults,
+    });
+  } catch (error) {
+    console.error('[attest-batch] Error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

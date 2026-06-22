@@ -287,7 +287,7 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 | `deploy.js` | 部署 EVM 合约并写入 `runtime/deployment.json` |
 | `request-evm-fabric-call.js` | 通过统一 `submitHXMsgRequest(..., policy)` 发起 EVM -> Fabric 请求 |
 | `run-hxmsg-forward-tests.js` | 8 条 Fabric -> EVM 主线测试 |
-| `run-evm-fabric-tests.js` | EVM -> Fabric 主线测试 |
+| `run-evm-fabric-tests.js` | EVM -> Fabric 主线测试；统一支持本地 mock committee 与 Sepolia sync committee，并按阶段进行并发调度 |
 | `run-sepolia-sync-committee-check.js` | Sepolia 真实 sync committee/finality 验证检查，不发交易 |
 | `run-challenge-response-tests.js` | EVM 源链挑战响应状态机单元测试 |
 | `run-fabric-evm-challenge-e2e.js` | Fabric -> EVM RESPONSE 端到端闭环 |
@@ -481,15 +481,55 @@ EVM -> Fabric：
 npm run hxmsg:test:evm-fabric
 ```
 
+`run-evm-fabric-tests.js` 使用同一套主流程覆盖本地和 Sepolia：
+
+| 模式 | header/finality 来源 | 源链发交易 |
+|---|---|---|
+| 本地默认 | 模拟 header committee | Hardhat 默认账户；由于 Hardhat automine 不支持同一账户排队 nonce，源链发交易默认串行 |
+| Sepolia | 真实 Ethereum sync committee finalized header | `.env` 中的 `SEPOLIA_PRIVATE_KEY`；可限流并发发起多笔测试交易 |
+
+并发参数：
+
+| 参数 | 默认值 | 作用 |
+|---|---:|---|
+| `HXMSG_CASE_TOTAL` | 64 | 自动生成的 EVM -> Fabric 主线测试用例总数；由 8 类既有业务操作重复扩展，不新增 op |
+| `HXMSG_CASE_LIMIT` | 64 | 本轮实际运行的用例数量 |
+| `HXMSG_SOURCE_CONCURRENCY` | 本地 1 / Sepolia 2 | 源链发交易并发度 |
+| `HXMSG_PROOF_CONCURRENCY` | 本地 4 / Sepolia 2 | receipt proof 构造并发度 |
+| `HXMSG_TEE_CONCURRENCY` | 1 | TEE attest 并发度；当前 Raft 主路径建议保守限流 |
+| `HXMSG_FABRIC_CONCURRENCY` | 2 | Fabric 目标执行并发度 |
+| `HXMSG_ALLOW_LOCAL_PARALLEL_SOURCE` | false | 是否允许本地 Hardhat 源链并发发交易；默认关闭 |
+| `TEE_EVM_RPC` | 本地 `http://evm-node:8545` | 传给 TEE 容器使用的 EVM RPC |
+
+Sepolia 模式下，脚本会等待目标源链交易进入 finalized execution block，再使用真实 sync committee 数据验证 finalized header，并用该 header 或其 parentHash 链覆盖目标交易区块的 receipt MPT proof 验证。这里的并发只影响实验调度，不代表 TEE 对交易进行批量签名。
+
+Mercury-style TEE 批量签名当前用于 Fabric -> EVM 方向：
+
+| 参数 | 默认值 | 作用 |
+|---|---:|---|
+| `HXMSG_TEE_BATCH_SIZE` | 8 | 每次提交给 TEE quorum 的 h-xmsg 数量 |
+
+该路径中，每个 TEE 节点仍会逐条验证 h-FSV Fabric View-like 证明。验证通过后，TEE 对这一批 h-xmsg 的 Merkle root、batchID、batchSize 和目标链 ID 形成一个 batch signing digest，并通过 5 节点 TEE quorum 提交一组批签名。EVM 侧 `HXMsgGateway.executeHXMsgMinimalBatchCluster` 只验证一次 TEE quorum，再用每条消息的 Merkle proof 证明其属于该批次，然后逐条执行目标业务合约。
+
+因此，TEE 批量签名优化的是“多条 Fabric -> EVM 消息在 EVM 目标链上重复验证 TEE quorum”的成本。EVM -> Fabric 方向的 EVM gas 主要发生在源链业务请求提交，目标链是 Fabric，因此不会因为 TEE 批签名直接降低源链 gas。
+
 Sepolia sync committee / finalized header 验证：
 
 ```bash
 npm run sepolia:sync-committee
 ```
 
-该命令不会发交易，只会读取 Sepolia execution finalized block、Beacon bootstrap 和 `LightClientFinalityUpdate`，并在本地验证 current sync committee Merkle branch、finality branch、execution payload branch、sync committee BLS 聚合签名和 2/3 参与阈值。当前 Alchemy Sepolia execution RPC 继续用于普通 EVM 读写；Alchemy Beacon endpoint 不支持 `/eth/v1/beacon/light_client/*`，因此 `.env` 中的 `SEPOLIA_LIGHT_CLIENT_BEACON_API_URL` 默认使用支持 light-client API 的 PublicNode Sepolia Beacon endpoint。
+该命令不会发交易，只会读取 Sepolia execution finalized block、Beacon bootstrap、`LightClientUpdate` 和 `LightClientFinalityUpdate`，并在本地验证 current sync committee Merkle branch、跨 period 的 next sync committee 更新链、finality branch、execution payload branch、sync committee BLS 聚合签名和 2/3 参与阈值。验证通过后会更新 `runtime/sepolia-sync-committee-state.json`，保存下一次实验可继续使用的 trusted beacon root。当前 Alchemy Sepolia execution RPC 继续用于普通 EVM 读写；Alchemy Beacon endpoint 不支持 `/eth/v1/beacon/light_client/*`，因此 `.env` 中的 `SEPOLIA_LIGHT_CLIENT_BEACON_API_URL` 默认使用支持 light-client API 的 PublicNode Sepolia Beacon endpoint。
 
-`SEPOLIA_TRUSTED_BLOCK_ROOT` 是 TEE light client 的弱主观 bootstrap checkpoint，应由实验者从可信渠道固定。代码默认要求该字段存在；只有显式设置 `SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT=true` 时，脚本才会为了临时调试从 Beacon API 动态读取 finalized root。
+`SEPOLIA_TRUSTED_BLOCK_ROOT` 是 TEE light client 的弱主观 bootstrap checkpoint，应由实验者从可信渠道固定。代码默认要求该字段或 `runtime/sepolia-sync-committee-state.json` 存在；只有显式设置 `SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT=true` 时，脚本才会为了临时调试从 Beacon API 动态读取 finalized root。TEE 在验证 Sepolia 证明时不会信任 relayer 自带的任意 trusted root，而是使用自身 `chain-state` 中保存的 root 或 `.env` 中的初始 root，验证成功后再自动推进本地 trusted state。
+
+Sepolia Ethereum -> Fabric 自动测试：
+
+```bash
+npm run sepolia:test:evm-fabric
+```
+
+该命令会临时把 `runtime/deployment.sepolia.json` 切换为当前部署文件，默认只跑 1 条 EVM -> Fabric 用例，等待 finality 的默认上限为 20 分钟，结束后自动恢复本地 `runtime/deployment.json`。可通过 `HXMSG_CASE_LIMIT`、`HXMSG_CASE_TOTAL`、`SEPOLIA_FINALITY_TIMEOUT_MS` 调整测试规模和等待时间。
 
 真实资产锁定、EVM token 发放和 Fabric 退款：
 
@@ -518,8 +558,8 @@ npm run hxmsg:test:challenge:evm-fabric
 |---|---|
 | `npm run compile` | PASS |
 | `npm run raft:test` | 6/6 PASS |
-| `npm run hxmsg:test:forward` | 8/8 PASS |
-| `npm run hxmsg:test:evm-fabric` | 1/1 PASS |
+| `HXMSG_TEE_BATCH_SIZE=8 npm run hxmsg:test:forward` | 8/8 PASS |
+| `HXMSG_CASE_LIMIT=8 npm run hxmsg:test:evm-fabric` | 8/8 PASS |
 | `npm run hxmsg:test:asset` | 2/2 PASS |
 | `npm run hxmsg:test:challenge` | 6/6 PASS |
 | `npm run hxmsg:test:challenge:fabric-evm` | PASS |
@@ -542,13 +582,39 @@ npm run hxmsg:test:challenge:evm-fabric
 | `runtime/hxmsg-fabric-evm-challenge-e2e-results.json` | Fabric -> EVM RESPONSE 端到端 |
 | `runtime/hxmsg-evm-fabric-challenge-e2e-results.json` | EVM -> Fabric RESPONSE 端到端 |
 
+最近一次本地 Fabric -> EVM TEE 批签名主线测试结果：
+
+| 指标 | 结果 |
+|---|---|
+| 运行模式 | `local-mock-committee` |
+| 通过率 | 8/8 PASS |
+| TEE 批大小 | `HXMSG_TEE_BATCH_SIZE=8` |
+| TEE batch quorum | 5/3 |
+| EVM batch tx gas | 3703239 |
+| 平均 gas/message | 462905 |
+| 结果文件 | `runtime/hxmsg-fabric-evm-results.json` |
+| 汇总文件 | `runtime/hxmsg-test-summary.md` |
+
+最近一次本地 EVM -> Fabric 主线回归测试结果：
+
+| 指标 | 结果 |
+|---|---|
+| 运行模式 | `local-mock-committee` |
+| 通过率 | 8/8 PASS |
+| 并发配置 | source=1, proof=4, tee=1, fabric=2 |
+| 总耗时 | 21147 ms |
+| TEE quorum | 每条均为 5/3 |
+| Fabric 状态 | 每条均为 `executed` |
+| 结果文件 | `runtime/hxmsg-evm-fabric-results.json` |
+| 汇总文件 | `runtime/hxmsg-evm-fabric-summary.md` |
+
 ### Sepolia 真实 sync committee 验证结果
 
 最近一次 Sepolia Ethereum -> Fabric 端到端测试已通过。该测试不是本地 Hardhat 模拟：源链交易真实发送到 Sepolia，TEE 通过真实 Beacon light-client 数据验证 sync committee finality，并使用 receipt MPT proof 验证源链事件存在性，再由 5 个 TEE 模拟节点形成 3/5 quorum 后提交到 Fabric。
 
 | 指标 | 结果 |
 |---|---|
-| 测试命令 | `USE_SEPOLIA_SYNC_COMMITTEE=true HXMSG_CASE_LIMIT=1 SEPOLIA_FINALITY_TIMEOUT_MS=1500000 npm run hxmsg:test:evm-fabric` |
+| 测试命令 | `npm run sepolia:test:evm-fabric` 或 `USE_SEPOLIA_SYNC_COMMITTEE=true HXMSG_CASE_LIMIT=1 SEPOLIA_FINALITY_TIMEOUT_MS=1500000 npm run hxmsg:test:evm-fabric` |
 | 测试结果 | 1/1 PASS |
 | EVM tx | `0xccdcfde3d8b1ad3d5e9d20bcc2933905fc5d56c45f63577f10a750903ee4a3e1` |
 | EVM gas | 292254 |

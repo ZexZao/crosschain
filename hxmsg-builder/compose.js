@@ -1,4 +1,12 @@
-const { computeHXMsgDigest } = require('../shared/hxmsg');
+const {
+  computeHXMsgDigest,
+  buildDeliveryMessage,
+  buildHXMsgEnvelope,
+  hydrateLegacyHXMsg,
+  toCanonicalHXMsg,
+  attachCanonicalAliases,
+  assertHXMsgInvariants,
+} = require('../shared/hxmsg');
 
 function composeHXMsg({
   header,
@@ -11,13 +19,14 @@ function composeHXMsg({
   feedback,
   atomicity,
   callData,
+  compactCall,
   callDataDecoded,
   txId,
   srcHeight,
   sourceRecord,
   proofMeta,
 }) {
-  const hxmsg = {
+  const canonicalHxmsg = attachCanonicalAliases(toCanonicalHXMsg({
     header,
     source,
     target,
@@ -27,14 +36,32 @@ function composeHXMsg({
     payloadBinding,
     feedback,
     atomicity: atomicity || undefined,
-    callData,
-    callDataDecoded,
-    txId,
-    srcHeight: Number(srcHeight),
-    sourceRecord,
-    proofMeta,
-  };
-  hxmsg.hmsgDigest = computeHXMsgDigest(hxmsg);
+  }));
+  assertHXMsgInvariants(canonicalHxmsg);
+  canonicalHxmsg.hmsgDigest = computeHXMsgDigest(canonicalHxmsg);
+  const hxmsgEnvelope = buildHXMsgEnvelope({
+    canonicalHxmsg,
+    sourceEvidence: {
+      encodedRef: sourceRef.encodedRef,
+      sourceRecord,
+    },
+    executionData: {
+      callData,
+      compactCall,
+      businessPayload: callDataDecoded,
+    },
+    runtime: {
+      adapterID: verification.adapterID,
+    },
+    auditRecord: {
+      txId,
+      srcHeight: Number(srcHeight),
+      proofMeta,
+    },
+  });
+  const deliveryMessage = buildDeliveryMessage(canonicalHxmsg, hxmsgEnvelope.executionData);
+  const hxmsg = hydrateLegacyHXMsg(canonicalHxmsg, hxmsgEnvelope, deliveryMessage);
+  hxmsg.canonicalHxmsg = canonicalHxmsg;
   return hxmsg;
 }
 

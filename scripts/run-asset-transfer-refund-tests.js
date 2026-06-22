@@ -4,7 +4,7 @@ const axios = require('axios');
 const { ethers } = require('ethers');
 const { Gateway, Wallets } = require('fabric-network');
 const { common } = require('fabric-protos');
-const { encodeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const {
   addressToBytes32,
   chainIdToBytes32,
@@ -147,14 +147,14 @@ async function main() {
       reason: 'real_crosschain_transfer',
       requireAck: false,
     };
-    const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);
+    const { normalized, compactCallHash } = encodeCompactBusinessCall(businessPayload);
     const payload = {
       businessPayload,
       targetChainType: 'EVM',
       targetChainID: chainIdToBytes32(deployment.chainId),
       targetObject: addressToBytes32(deployment.targetContract),
       functionSelector: TARGET_EXECUTE_SELECTOR,
-      callDataHash: ethers.keccak256(payloadHex),
+      callDataHash: compactCallHash,
       businessPayloadHash: hashJson(normalized),
       receiver: addressToBytes32(receiver),
       expireAt: Math.floor(Date.now() / 1000) + 3600,
@@ -218,14 +218,14 @@ async function main() {
       reason: 'refund_path',
       requireAck: false,
     };
-    const encodedRefund = encodeBusinessPayload(refundBusinessPayload);
+    const encodedRefund = encodeCompactBusinessCall(refundBusinessPayload);
     const refundPayload = {
       businessPayload: refundBusinessPayload,
       targetChainType: 'EVM',
       targetChainID: chainIdToBytes32(deployment.chainId),
       targetObject: addressToBytes32(deployment.targetContract),
       functionSelector: TARGET_EXECUTE_SELECTOR,
-      callDataHash: ethers.keccak256(encodedRefund.payloadHex),
+      callDataHash: encodedRefund.compactCallHash,
       businessPayloadHash: hashJson(encodedRefund.normalized),
       receiver: addressToBytes32(receiver),
       expireAt: Math.floor(Date.now() / 1000) + 3600,

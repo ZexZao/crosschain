@@ -3,7 +3,7 @@ const path = require('path');
 const axios = require('axios');
 const { ethers } = require('ethers');
 const { Gateway, Wallets } = require('fabric-network');
-const { encodeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const {
   bytes32FromText,
   hashJson,
@@ -128,7 +128,7 @@ async function main() {
       metadata: 'challenge-response e2e oracle update',
       requireAck: false,
     };
-    const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);
+    const { normalized, compactCallHash } = encodeCompactBusinessCall(businessPayload);
     const latest = await provider.getBlock('latest');
     const now = Number(latest.timestamp);
     const failureData = 'evm-fabric-failure';
@@ -147,7 +147,7 @@ async function main() {
         bytes32FromText('fabric-local-domain'),
         buildFabricTargetObject(channelID, chaincodeName),
         FABRIC_INVOKE_SELECTOR,
-        ethers.keccak256(payloadHex),
+        compactCallHash,
         hashJson(normalized),
         bytes32FromText(normalized.actor),
         now + 3600,

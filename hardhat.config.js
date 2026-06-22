@@ -12,6 +12,10 @@ module.exports = {
     }
   },
   networks: {
+    hardhat: {
+      blockGasLimit: 0x1fffffffffffff,
+      gas: 100000000
+    },
     localhost: {
       url: "http://127.0.0.1:8545"
     },

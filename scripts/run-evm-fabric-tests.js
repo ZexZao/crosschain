@@ -1,32 +1,90 @@
-const { execFileSync } = require('child_process');
 const fs = require('fs-extra');
 const path = require('path');
 const axios = require('axios');
+const { performance } = require('perf_hooks');
 const { ethers } = require('ethers');
 const { Gateway, Wallets } = require('fabric-network');
 const { loadDotEnv } = require('../shared/env');
-const { buildHXMsgFromEvmReceipt } = require('../hxmsg-builder/evm-to-fabric');
+const { buildHXMsgFromEvmReceipt, FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { buildCommitteeHeaderUpdate } = require('../shared/evm/header-committee');
-const { fetchBeaconLightClientInputs } = require('../shared/evm/sync-committee-light-client');
+const {
+  fetchBeaconLightClientInputs,
+  verifySyncCommitteeHeaderUpdate,
+} = require('../shared/evm/sync-committee-light-client');
+const {
+  loadSyncCommitteeState,
+  resolveTrustedBlockRoot,
+  saveSyncCommitteeState,
+  syncCommitteeStateFile,
+} = require('../shared/evm/sync-committee-state');
 const { FeedbackType } = require('../shared/hxmsg');
-const { normalizeBusinessPayload } = require('../shared/xmsg');
+const {
+  bytes32FromText,
+  hashJson,
+  AtomicityMode,
+  CommitmentType,
+} = require('../shared/hxmsg');
+const { encodeCompactBusinessCall, normalizeBusinessPayload } = require('../shared/xmsg');
 const { writeJSON } = require('../shared/utils');
 
 loadDotEnv();
 
-const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
+const PROJECT_ROOT = path.join(__dirname, '..');
+const RUNTIME_DIR = path.join(PROJECT_ROOT, 'runtime');
+const USE_SEPOLIA_SYNC_COMMITTEE = process.env.USE_SEPOLIA_SYNC_COMMITTEE === 'true';
+const EVM_RPC = process.env.EVM_RPC || (USE_SEPOLIA_SYNC_COMMITTEE
+  ? process.env.SEPOLIA_RPC_URL
+  : 'http://127.0.0.1:8545');
+const TEE_EVM_RPC = process.env.TEE_EVM_RPC || (USE_SEPOLIA_SYNC_COMMITTEE
+  ? EVM_RPC
+  : 'http://evm-node:8545');
 const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004')
   .split(',')
   .map((url) => url.trim())
   .filter(Boolean);
-const EVM_RPC = process.env.EVM_RPC || (process.env.USE_SEPOLIA_SYNC_COMMITTEE === 'true'
-  ? process.env.SEPOLIA_RPC_URL
-  : 'http://127.0.0.1:8545');
 
-async function getFabricContract(projectRoot) {
-  const profile = process.env.FABRIC_CONNECTION_PROFILE || path.join(projectRoot, 'fabric-network', 'connection-org1.json');
-  const walletPath = process.env.FABRIC_WALLET_PATH || path.join(projectRoot, 'fabric-network', 'wallet');
+const REQUESTED_SOURCE_TX_CONCURRENCY = Number(process.env.HXMSG_SOURCE_CONCURRENCY || (USE_SEPOLIA_SYNC_COMMITTEE ? 2 : 1));
+const SOURCE_TX_CONCURRENCY = USE_SEPOLIA_SYNC_COMMITTEE || process.env.HXMSG_ALLOW_LOCAL_PARALLEL_SOURCE === 'true'
+  ? REQUESTED_SOURCE_TX_CONCURRENCY
+  : 1;
+const PROOF_CONCURRENCY = Number(process.env.HXMSG_PROOF_CONCURRENCY || (USE_SEPOLIA_SYNC_COMMITTEE ? 2 : 4));
+const TEE_CONCURRENCY = Number(process.env.HXMSG_TEE_CONCURRENCY || 1);
+const FABRIC_CONCURRENCY = Number(process.env.HXMSG_FABRIC_CONCURRENCY || 2);
+const DEFAULT_CASE_TOTAL = Number(process.env.HXMSG_CASE_TOTAL || 64);
+const NO_WRITE_RESULTS = process.env.HXMSG_NO_WRITE_RESULTS === 'true';
+
+const SOURCE_ABI = [
+  'function submitHXMsgRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
+  'function requests(bytes32) view returns (address,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,uint64,uint64,uint64,uint64,uint64,uint8,uint8)',
+  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
+];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function monotonicMs() {
+  return Math.round(performance.now());
+}
+
+async function mapLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+async function getFabricContract() {
+  const profile = process.env.FABRIC_CONNECTION_PROFILE || path.join(PROJECT_ROOT, 'fabric-network', 'connection-org1.json');
+  const walletPath = process.env.FABRIC_WALLET_PATH || path.join(PROJECT_ROOT, 'fabric-network', 'wallet');
   const identity = process.env.FABRIC_IDENTITY || 'appUser';
   const channel = process.env.FABRIC_CHANNEL || 'mychannel';
   const chaincode = process.env.FABRIC_CHAINCODE || 'xcall';
@@ -63,26 +121,222 @@ async function resolveTeeLeader() {
   throw new Error(`no reachable TEE node: ${statuses.map((status) => `${status.url}:${status.error}`).join('; ')}`);
 }
 
-function requestEvmFabricCall(projectRoot, payload) {
-  const stdout = execFileSync(process.execPath, [
-    path.join(projectRoot, 'scripts', 'request-evm-fabric-call.js'),
-    JSON.stringify(payload),
-  ], {
-    cwd: projectRoot,
-    encoding: 'utf8',
-    stdio: 'pipe',
-  });
-  return JSON.parse(stdout);
+async function fetchTeeSyncCommitteeRoot(teeUrl) {
+  try {
+    const resp = await axios.get(`${teeUrl}/chain-state`, { timeout: 3000 });
+    return resp.data?.evm?.syncCommittee?.trustedBlockRoot || null;
+  } catch (_error) {
+    return null;
+  }
 }
 
-async function queryInbound(contract, requestID) {
-  const data = await contract.evaluateTransaction('GetInboundStatus', requestID);
-  return data && data.length > 0 ? JSON.parse(data.toString()) : null;
+function buildBaseCaseTemplates(now, round, suffix) {
+  return [
+    {
+      payload: {
+        op: 'asset_lock',
+        assetId: `EVM_ASSET_${now}_${suffix}`,
+        assetType: 'XCST',
+        amount: String(12.5 + round),
+        recipient: `fabric.alice.${round}`,
+        owner: `evm.alice.${round}`,
+        metadata: `asset settlement batch ${round}`,
+        requireAck: false,
+      },
+    },
+    {
+      payload: {
+        op: 'mint_confirm',
+        assetId: `EVM_MINT_${now}_${suffix}`,
+        assetType: 'XCST',
+        amount: String(8 + round),
+        recipient: `fabric.bob.${round}`,
+        issuer: 'evm.bridge.minter',
+        metadata: `mint confirmation batch ${round}`,
+        requireAck: false,
+      },
+    },
+    {
+      payload: {
+        op: 'receivable_attest',
+        receivableId: `EVM_AR_${now}_${suffix}`,
+        supplier: `fabric.supplier.${round}`,
+        amount: String(3200 + round),
+        debtor: `evm.buyer.${round}`,
+        metadata: `receivable attestation batch ${round}`,
+        requireAck: false,
+      },
+    },
+    {
+      payload: {
+        op: 'logistics_sync',
+        waybillId: `EVM_WAYBILL_${now}_${suffix}`,
+        inspector: `fabric.inspector.${round}`,
+        reading: String(42 + round),
+        location: `hangzhou-zone-${round}`,
+        metadata: `logistics synchronization batch ${round}`,
+        requireAck: false,
+      },
+    },
+    {
+      payload: {
+        op: 'medical_consent',
+        consentId: `EVM_CONSENT_${now}_${suffix}`,
+        grantee: `fabric.hospital.${round}`,
+        durationDays: 30 + round,
+        patient: `evm.patient.${round}`,
+        metadata: `medical consent grant batch ${round}`,
+        requireAck: false,
+      },
+    },
+    {
+      payload: {
+        op: 'oracle_update',
+        feed: `EVM_PRICE_${now}_${suffix}`,
+        price: `1.${String(2345 + round).padStart(4, '0')}`,
+        sourceAgency: 'evm-oracle-bridge',
+        roundId: now + round,
+        metadata: `oracle update batch ${round}`,
+        requireAck: false,
+      },
+    },
+    {
+      payload: {
+        op: 'approval_commit',
+        workflowId: `EVM_APPROVAL_${now}_${suffix}`,
+        approvers: [`fabric.approverA.${round}`, `fabric.approverB.${round}`, `fabric.approverC.${round}`],
+        threshold: 2,
+        applicant: `evm.applicant.${round}`,
+        metadata: `approval commit batch ${round}`,
+        requireAck: false,
+      },
+    },
+    {
+      payload: {
+        op: 'subsidy_confirm',
+        applicationId: `EVM_SUBSIDY_${now}_${suffix}`,
+        assetType: 'XCST',
+        subsidyAmount: String(66 + round),
+        beneficiary: `fabric.farmer.${round}`,
+        institution: 'evm.agencyA',
+        metadata: `subsidy confirmation batch ${round}`,
+        requireAck: false,
+      },
+    },
+  ];
 }
 
-async function queryBusinessRecord(contract, requestID) {
-  const data = await contract.evaluateTransaction('QueryBusinessRecordByRequest', requestID);
-  return data && data.length > 0 ? JSON.parse(data.toString()) : null;
+function buildCases(now, total = DEFAULT_CASE_TOTAL) {
+  const cases = [];
+  let round = 0;
+  while (cases.length < total) {
+    round += 1;
+    const templates = buildBaseCaseTemplates(now, round, String(round).padStart(3, '0'));
+    for (const template of templates) {
+      if (cases.length >= total) break;
+      const caseNo = cases.length + 1;
+      cases.push({
+        caseId: `EVM-FABRIC-${String(caseNo).padStart(3, '0')}`,
+        payload: template.payload,
+      });
+    }
+  }
+  return cases;
+}
+
+function expectedBusinessStatus(op) {
+  return {
+    asset_lock: 'ASSET_SETTLED',
+    mint_confirm: 'ASSET_SETTLED',
+    receivable_attest: 'RECEIVABLE_ATTESTED',
+    logistics_sync: 'LOGISTICS_SYNCED',
+    medical_consent: 'CONSENT_GRANTED',
+    oracle_update: 'ORACLE_UPDATED',
+    approval_commit: 'APPROVAL_COMMITTED',
+    subsidy_confirm: 'ASSET_SETTLED',
+    identity_attest: 'IDENTITY_ATTESTED',
+    carbon_retire: 'CARBON_RETIRED',
+    iot_alert: 'IOT_ALERT_RECORDED',
+    certificate_verify: 'CERTIFICATE_VERIFIED',
+    benchmark_store: 'BENCHMARK_STORED',
+  }[op] || 'RECORDED';
+}
+
+function buildSubmitArgs({ deployment, payload }) {
+  const channelID = process.env.FABRIC_CHANNEL || 'mychannel';
+  const chaincodeName = process.env.FABRIC_CHAINCODE || 'xcall';
+  const { normalized, payloadHex, compactCallHash } = encodeCompactBusinessCall(payload);
+  const expireAt = Math.floor(Date.now() / 1000) + 3600;
+  const targetChainID = bytes32FromText(`fabric-${channelID}`);
+  const targetDomainID = bytes32FromText('fabric-local-domain');
+  const targetObject = buildFabricTargetObject(channelID, chaincodeName);
+  const callDataHash = compactCallHash;
+  const businessPayloadHash = hashJson(normalized);
+  const receiver = bytes32FromText(normalized.actor);
+  const atomicityRequired = Boolean(payload.atomicity?.required);
+  const atomicity = atomicityRequired
+    ? [
+      true,
+      payload.atomicity.mode || AtomicityMode.COMMIT_OR_COMPENSATE,
+      payload.atomicity.commitmentType || CommitmentType.INTENT_ONLY,
+      payload.atomicity.commitmentRefHash || ethers.keccak256(ethers.toUtf8Bytes(`commitment:${normalized.recordId}`)),
+      payload.atomicity.successActionHash || ethers.keccak256(ethers.toUtf8Bytes(`success:${normalized.recordId}`)),
+      payload.atomicity.failureActionHash || ethers.keccak256(ethers.toUtf8Bytes(payload.failureData || `failure:${normalized.recordId}`)),
+      Number(payload.atomicity.challengeWindow || 60),
+    ]
+    : [false, 0, CommitmentType.NONE, ethers.ZeroHash, ethers.ZeroHash, ethers.ZeroHash, 0];
+  const policy = atomicityRequired
+    ? [true, FeedbackType.RESPONSE, Number(payload.feedbackTimeout || expireAt), ethers.ZeroHash, atomicity]
+    : [false, FeedbackType.NONE, 0, ethers.ZeroHash, atomicity];
+  return {
+    args: [
+      targetChainID,
+      targetDomainID,
+      targetObject,
+      FABRIC_INVOKE_SELECTOR,
+      callDataHash,
+      businessPayloadHash,
+      receiver,
+      expireAt,
+      policy,
+    ],
+    normalized,
+    payloadHex,
+    callDataHash,
+    businessPayloadHash,
+    chainId: deployment.chainId,
+  };
+}
+
+async function sendSourceTransaction({ sourceContract, provider, deployment, tc, nextNonce }) {
+  const result = baseResult(tc);
+  result.timings.caseStartedAt = monotonicMs();
+  const startedAt = monotonicMs();
+  const submit = buildSubmitArgs({ deployment, payload: tc.payload });
+  const txOptions = {};
+  if (nextNonce) txOptions.nonce = nextNonce();
+  const tx = await sourceContract.submitHXMsgRequest(...submit.args, txOptions);
+  const receipt = await tx.wait();
+  const event = receipt.logs
+    .map((log) => {
+      try {
+        return sourceContract.interface.parseLog(log);
+      } catch (_) {
+        return null;
+      }
+    })
+    .find((parsed) => parsed && parsed.name === 'CrossChainCallRequested');
+  if (!event?.args?.requestID) throw new Error('CrossChainCallRequested event not found');
+  result.timings.sourceTxMs = monotonicMs() - startedAt;
+  result.evmTxHash = receipt.hash;
+  result.evmGasUsed = receipt.gasUsed.toString();
+  result.sourceBlockNumber = receipt.blockNumber;
+  result.sourceBlockHash = receipt.blockHash;
+  result.requestID = event.args.requestID;
+  result.callData = submit.payloadHex;
+  result.expectedPayload = normalizeBusinessPayload(tc.payload);
+  console.log(`${tc.caseId} SOURCE tx=${receipt.hash} block=${receipt.blockNumber}`);
+  return { tc, result, receipt };
 }
 
 async function fetchJson(baseUrl, route) {
@@ -92,15 +346,11 @@ async function fetchJson(baseUrl, route) {
     try {
       const resp = await fetch(url, { headers: { accept: 'application/json' } });
       const text = await resp.text();
-      if (!resp.ok) {
-        throw new Error(`Beacon API ${resp.status} ${url}: ${text.slice(0, 200)}`);
-      }
+      if (!resp.ok) throw new Error(`Beacon API ${resp.status} ${url}: ${text.slice(0, 200)}`);
       return JSON.parse(text);
     } catch (error) {
       lastError = error;
-      if (attempt < 2) {
-        await new Promise((resolve) => setTimeout(resolve, 1500 * (attempt + 1)));
-      }
+      if (attempt < 2) await sleep(1500 * (attempt + 1));
     }
   }
   throw lastError;
@@ -131,381 +381,422 @@ async function fetchBeaconFinalized(beaconApiUrl) {
   };
 }
 
-async function waitForFinalizedExecutionBlock({
-  provider,
-  beaconApiUrl,
-  targetBlockNumber,
-  timeoutMs = 20 * 60 * 1000,
-}) {
-  const started = Date.now();
+async function waitForFinalizedExecutionBlock({ provider, beaconApiUrl, targetBlockNumber, timeoutMs }) {
+  const started = monotonicMs();
   let lastFinality = null;
   async function checkFinality() {
-    const finalized = beaconApiUrl
-      ? await fetchBeaconFinalized(beaconApiUrl)
-      : await fetchExecutionFinalized(provider);
+    const finalized = beaconApiUrl ? await fetchBeaconFinalized(beaconApiUrl) : await fetchExecutionFinalized(provider);
     lastFinality = finalized || lastFinality;
     if (finalized && finalized.finalizedHeight >= Number(targetBlockNumber)) {
-      return {
-        ...finalized,
-        waitMs: Date.now() - started,
-      };
+      return { ...finalized, waitMs: monotonicMs() - started };
     }
     return null;
   }
-
-  while (Date.now() - started < timeoutMs) {
+  while (monotonicMs() - started < timeoutMs) {
     try {
       const finalized = await checkFinality();
       if (finalized) return finalized;
     } catch (error) {
       lastFinality = lastFinality || { finalizedHeight: 0, source: `transient-error:${error.message}` };
     }
-    await new Promise((resolve) => setTimeout(resolve, 12000));
+    await sleep(12000);
   }
   const finalized = await checkFinality();
   if (finalized) return finalized;
-  const last = lastFinality
-    ? ` lastFinalized=${lastFinality.finalizedHeight} source=${lastFinality.source}`
-    : '';
+  const last = lastFinality ? ` lastFinalized=${lastFinality.finalizedHeight} source=${lastFinality.source}` : '';
   throw new Error(`Sepolia finality timeout for block ${targetBlockNumber}.${last}`);
 }
 
-function expectedBusinessStatus(op) {
+async function buildProofItem({ item, provider, deployment, sharedSyncCommitteeUpdate }) {
+  const { tc, result, receipt } = item;
+  try {
+    const proofStartedAt = monotonicMs();
+    const [block, receiptProof] = await Promise.all([
+      provider.getBlock(receipt.blockNumber),
+      buildReceiptProof({ provider, blockNumber: receipt.blockNumber, txHash: receipt.hash }),
+    ]);
+    let committeeHeaderUpdate = null;
+    let syncCommitteeUpdate = null;
+    if (USE_SEPOLIA_SYNC_COMMITTEE) {
+      syncCommitteeUpdate = {
+        ...sharedSyncCommitteeUpdate,
+        chainID: `eip155:${deployment.chainId}`,
+      };
+    } else {
+      committeeHeaderUpdate = buildCommitteeHeaderUpdate({
+        header: receiptProof.blockHeader,
+        chainID: `eip155:${deployment.chainId}`,
+      });
+    }
+    result.timings.proofBuildMs = monotonicMs() - proofStartedAt;
+
+    const hxmsgStartedAt = monotonicMs();
+    const hxmsg = buildHXMsgFromEvmReceipt({
+      deployment,
+      receipt,
+      block,
+      businessPayload: tc.payload,
+    });
+    result.timings.hxmsgBuildMs = monotonicMs() - hxmsgStartedAt;
+    result.feedback = hxmsg.feedback;
+    result.atomicity = hxmsg.atomicity || null;
+    result.responseRequired = Boolean(hxmsg.feedback?.required);
+    result.atomicityRequired = Boolean(hxmsg.atomicity?.required);
+    result.protocolCheck = {
+      feedbackDisabled: hxmsg.feedback?.required === false
+        && Number(hxmsg.feedback?.expectedMsgType || 0) === FeedbackType.NONE
+        && Number(hxmsg.feedback?.timeout || 0) === 0
+        && hxmsg.feedback?.callbackRefHash === ethers.ZeroHash,
+      atomicityDisabled: !hxmsg.atomicity?.required,
+      challengeResponseExpected: false,
+    };
+    if (!NO_WRITE_RESULTS) {
+      writeJSON(`latest-evm-xmsg-${tc.caseId}.json`, hxmsg);
+    }
+    return {
+      ...item,
+      hxmsg,
+      receiptProof,
+      committeeHeaderUpdate,
+      syncCommitteeUpdate,
+    };
+  } catch (error) {
+    result.error = error.response?.data?.error || error.message;
+    result.errorDetail = error.response?.data || null;
+    console.log(`${tc.caseId} PROOF ERROR ${result.error}`);
+    return item;
+  }
+}
+
+async function attestWithTEE({ item, teeUrl }) {
+  const { tc, result, hxmsg, receiptProof, committeeHeaderUpdate, syncCommitteeUpdate } = item;
+  if (!hxmsg || !receiptProof) return item;
+  try {
+    const teeStartedAt = monotonicMs();
+    const teeResp = await axios.post(`${teeUrl}/attest`, {
+      hxmsg,
+      helperData: {
+        evmReceiptProof: receiptProof,
+        committeeHeaderUpdate,
+        syncCommitteeUpdate,
+        evmRpc: TEE_EVM_RPC,
+      },
+    }, { timeout: Number(process.env.HXMSG_TEE_TIMEOUT_MS || 60000) });
+    result.timings.teeAttestMs = monotonicMs() - teeStartedAt;
+    const voucher = teeResp.data.teeClusterCertification || teeResp.data.teeCertification;
+    result.teeVerification = teeResp.data.verificationResult;
+    result.teeCluster = teeResp.data.teeClusterCertification;
+    console.log(`${tc.caseId} TEE quorum=${result.teeCluster ? `${result.teeCluster.reached}/${result.teeCluster.threshold}` : 'single'}`);
+    return { ...item, hxmsg, voucher };
+  } catch (error) {
+    result.error = error.response?.data?.error || error.message;
+    result.errorDetail = error.response?.data || null;
+    console.log(`${tc.caseId} TEE ERROR ${result.error}`);
+    return item;
+  }
+}
+
+async function registerTrustedTEEs(contract, attestedItems) {
+  const addresses = new Set();
+  for (const item of attestedItems) {
+    const voucher = item.voucher;
+    const certs = voucher?.certifications || (voucher ? [voucher] : []);
+    for (const cert of certs) {
+      if (cert?.teeAddress) addresses.add(ethers.getAddress(cert.teeAddress));
+    }
+  }
+  const startedAt = monotonicMs();
+  for (const address of addresses) {
+    await contract.submitTransaction('RegisterTrustedTEE', address);
+  }
   return {
-    asset_lock: 'ASSET_SETTLED',
-    mint_confirm: 'ASSET_SETTLED',
-    receivable_attest: 'RECEIVABLE_ATTESTED',
-    logistics_sync: 'LOGISTICS_SYNCED',
-    medical_consent: 'CONSENT_GRANTED',
-    oracle_update: 'ORACLE_UPDATED',
-    approval_commit: 'APPROVAL_COMMITTED',
-    subsidy_confirm: 'ASSET_SETTLED',
-    identity_attest: 'IDENTITY_ATTESTED',
-    carbon_retire: 'CARBON_RETIRED',
-    iot_alert: 'IOT_ALERT_RECORDED',
-    certificate_verify: 'CERTIFICATE_VERIFIED',
-    benchmark_store: 'BENCHMARK_STORED',
-  }[op] || 'RECORDED';
+    teeAddresses: Array.from(addresses),
+    elapsedMs: monotonicMs() - startedAt,
+  };
+}
+
+async function queryInbound(contract, requestID) {
+  const data = await contract.evaluateTransaction('GetInboundStatus', requestID);
+  return data && data.length > 0 ? JSON.parse(data.toString()) : null;
+}
+
+async function queryBusinessRecord(contract, requestID) {
+  const data = await contract.evaluateTransaction('QueryBusinessRecordByRequest', requestID);
+  return data && data.length > 0 ? JSON.parse(data.toString()) : null;
+}
+
+async function executeOnFabric({ item, contract, sourceView }) {
+  const { result, hxmsg, voucher } = item;
+  if (!hxmsg || !voucher) {
+    result.pass = false;
+    result.timings.totalMs = monotonicMs() - result.timings.caseStartedAt;
+    return item;
+  }
+  try {
+    const fabricStartedAt = monotonicMs();
+    const fabricResp = await contract.submitTransaction(
+      'ExecuteHXMsg',
+      JSON.stringify(hxmsg),
+      hxmsg.callData,
+      JSON.stringify(voucher)
+    );
+    result.timings.fabricExecuteMs = monotonicMs() - fabricStartedAt;
+
+    const queryStartedAt = monotonicMs();
+    const inbound = await queryInbound(contract, hxmsg.header.requestID);
+    const businessRecord = await queryBusinessRecord(contract, hxmsg.header.requestID);
+    const sourceRecord = await sourceView.requests(hxmsg.header.requestID);
+    result.timings.resultQueryMs = monotonicMs() - queryStartedAt;
+    result.fabricResult = fabricResp.toString();
+    result.inbound = inbound;
+    result.businessRecord = businessRecord;
+    result.sourceRequest = {
+      status: Number(sourceRecord.status ?? sourceRecord[18]),
+      feedbackTimeout: Number(sourceRecord.feedbackTimeout ?? sourceRecord[14]),
+      challengeWindow: Number(sourceRecord.challengeWindow ?? sourceRecord[15]),
+      challengeDeadline: Number(sourceRecord.challengeDeadline ?? sourceRecord[16]),
+      commitmentType: Number(sourceRecord.commitmentType ?? sourceRecord[17]),
+    };
+    result.pass = Boolean(inbound)
+      && Boolean(businessRecord)
+      && inbound.recordId === result.expectedPayload.recordId
+      && inbound.actor === result.expectedPayload.actor
+      && inbound.amount === result.expectedPayload.amount
+      && inbound.status === 'executed'
+      && businessRecord.op === inbound.op
+      && businessRecord.recordId === inbound.recordId
+      && businessRecord.actor === inbound.actor
+      && businessRecord.amount === inbound.amount
+      && businessRecord.status === expectedBusinessStatus(inbound.op)
+      && result.protocolCheck.feedbackDisabled
+      && result.protocolCheck.atomicityDisabled
+      && result.sourceRequest.challengeWindow === 0
+      && result.sourceRequest.commitmentType === 0
+      && Number(inbound.validTEECount || 0) >= Number((voucher.threshold || 1));
+    console.log(`${result.caseId} ${result.pass ? 'PASS' : 'FAIL'} requestID=${result.requestID}`);
+  } catch (error) {
+    result.error = error.responses?.[0]?.response?.message || error.response?.data?.error || error.message;
+    result.errorDetail = error.response?.data || null;
+    console.log(`${result.caseId} FABRIC ERROR ${result.error}`);
+  }
+  result.timings.totalMs = monotonicMs() - result.timings.caseStartedAt;
+  return item;
+}
+
+function baseResult(tc) {
+  return {
+    caseId: tc.caseId,
+    pass: false,
+    timings: {
+      sourceTxMs: 0,
+      finalityWaitMs: 0,
+      proofBuildMs: 0,
+      hxmsgBuildMs: 0,
+      teeAttestMs: 0,
+      teeRegistrationMs: 0,
+      fabricExecuteMs: 0,
+      resultQueryMs: 0,
+      totalMs: 0,
+    },
+  };
+}
+
+function writeSummary({ output, finalityTimeoutMs, sharedFinality }) {
+  fs.writeFileSync(
+    path.join(RUNTIME_DIR, 'hxmsg-evm-fabric-summary.md'),
+    `# h-xmsg / MELV-EF EVM -> Fabric 测试结果\n\n` +
+      `**测试时间**：${output.testedAt}\n` +
+      `**通过率**：${output.pass}/${output.total}\n` +
+      `**运行模式**：${output.executionMode}\n` +
+      `**并发配置**：source=${output.concurrency.sourceTx}, proof=${output.concurrency.proof}, tee=${output.concurrency.tee}, fabric=${output.concurrency.fabric}\n` +
+      `**finality 等待上限**：${finalityTimeoutMs} ms\n` +
+      `**共享 finality 等待**：${sharedFinality ? `${sharedFinality.waitMs} ms, finalizedHeight=${sharedFinality.finalizedHeight}` : '-'}\n\n` +
+      `| 用例 | RESPONSE | Atomicity | EVM tx | EVM Gas | Source tx ms | Finality wait ms | Proof ms | TEE ms | Fabric ms | Total ms | TEE quorum | Fabric 状态 | 状态 |\n` +
+      `|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n` +
+      output.results.map((r) => `| ${r.caseId} | ${r.responseRequired ? 'yes' : 'no'} | ${r.atomicityRequired ? 'yes' : 'no'} | ${r.evmTxHash || '-'} | ${r.evmGasUsed || '-'} | ${r.timings?.sourceTxMs ?? '-'} | ${r.timings?.finalityWaitMs ?? '-'} | ${r.timings?.proofBuildMs ?? '-'} | ${r.timings?.teeAttestMs ?? '-'} | ${r.timings?.fabricExecuteMs ?? '-'} | ${r.timings?.totalMs ?? '-'} | ${r.teeCluster ? `${r.teeCluster.reached}/${r.teeCluster.threshold}` : '-'} | ${r.inbound?.status || '-'} | ${r.pass ? 'PASS' : 'FAIL'} |`).join('\n') +
+      `\n`
+  );
 }
 
 async function main() {
+  if (!EVM_RPC) throw new Error('EVM_RPC or SEPOLIA_RPC_URL is required');
   fs.ensureDirSync(RUNTIME_DIR);
-  const projectRoot = path.join(__dirname, '..');
   const deployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'deployment.json'));
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
-  const sourceView = new ethers.Contract(
-    deployment.evmSourceContract,
-    ['function requests(bytes32) view returns (address,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,uint64,uint64,uint64,uint64,uint64,uint8,uint8)'],
+  const signerPrivateKey = USE_SEPOLIA_SYNC_COMMITTEE
+    ? (process.env.SEPOLIA_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY)
+    : (process.env.LOCAL_EVM_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80');
+  if (!signerPrivateKey) throw new Error('SEPOLIA_PRIVATE_KEY is required for Sepolia mode');
+  const signer = new ethers.Wallet(
+    signerPrivateKey,
     provider
   );
+  let nextNonceValue = await provider.getTransactionCount(signer.address, 'pending');
+  const nextNonce = () => {
+    const nonce = nextNonceValue;
+    nextNonceValue += 1;
+    return nonce;
+  };
+  const sourceContract = new ethers.Contract(deployment.evmSourceContract, SOURCE_ABI, signer);
+  const sourceView = new ethers.Contract(deployment.evmSourceContract, SOURCE_ABI, provider);
   const teeUrl = await resolveTeeLeader();
   const now = Date.now();
-  const cases = [
-    {
-      caseId: 'EVM-FABRIC-001',
-      payload: {
-        op: 'asset_lock',
-        assetId: `EVM_ASSET_${now}_001`,
-        assetType: 'XCST',
-        amount: '12.5',
-        recipient: 'fabric.alice',
-        owner: 'evm.alice',
-        metadata: 'sepolia asset settlement',
-        requireAck: false,
-      },
-    },
-    {
-      caseId: 'EVM-FABRIC-002',
-      payload: {
-        op: 'mint_confirm',
-        assetId: `EVM_MINT_${now}_002`,
-        assetType: 'XCST',
-        amount: '8',
-        recipient: 'fabric.bob',
-        issuer: 'evm.bridge.minter',
-        metadata: 'sepolia mint confirmation',
-        requireAck: false,
-      },
-    },
-    {
-      caseId: 'EVM-FABRIC-003',
-      payload: {
-        op: 'receivable_attest',
-        receivableId: `EVM_AR_${now}_003`,
-        supplier: 'fabric.supplierA',
-        amount: '3200',
-        debtor: 'evm.buyerA',
-        metadata: 'sepolia receivable attestation',
-        requireAck: false,
-      },
-    },
-    {
-      caseId: 'EVM-FABRIC-004',
-      payload: {
-        op: 'logistics_sync',
-        waybillId: `EVM_WAYBILL_${now}_004`,
-        inspector: 'fabric.inspectorA',
-        reading: '42',
-        location: 'hangzhou-zone-a',
-        metadata: 'sepolia logistics synchronization',
-        requireAck: false,
-      },
-    },
-    {
-      caseId: 'EVM-FABRIC-005',
-      payload: {
-        op: 'medical_consent',
-        consentId: `EVM_CONSENT_${now}_005`,
-        grantee: 'fabric.hospitalA',
-        durationDays: 30,
-        patient: 'evm.patientA',
-        metadata: 'sepolia medical consent grant',
-        requireAck: false,
-      },
-    },
-    {
-      caseId: 'EVM-FABRIC-006',
-      payload: {
-        op: 'oracle_update',
-        feed: `EVM_PRICE_${now}_006`,
-        price: '1.2345',
-        sourceAgency: 'evm-oracle-bridge',
-        roundId: now,
-        metadata: 'sepolia oracle update',
-        requireAck: false,
-      },
-    },
-    {
-      caseId: 'EVM-FABRIC-007',
-      payload: {
-        op: 'approval_commit',
-        workflowId: `EVM_APPROVAL_${now}_007`,
-        approvers: ['fabric.approverA', 'fabric.approverB', 'fabric.approverC'],
-        threshold: 2,
-        applicant: 'evm.applicantA',
-        metadata: 'sepolia approval commit',
-        requireAck: false,
-      },
-    },
-    {
-      caseId: 'EVM-FABRIC-008',
-      payload: {
-        op: 'subsidy_confirm',
-        applicationId: `EVM_SUBSIDY_${now}_008`,
-        assetType: 'XCST',
-        subsidyAmount: '66',
-        beneficiary: 'fabric.farmerA',
-        institution: 'evm.agencyA',
-        metadata: 'sepolia subsidy confirmation',
-        requireAck: false,
-      },
-    },
-  ];
+  const cases = buildCases(now, DEFAULT_CASE_TOTAL);
   const caseLimit = Number(process.env.HXMSG_CASE_LIMIT || cases.length);
   const selectedCases = cases.slice(0, Math.max(0, Math.min(cases.length, caseLimit)));
   const finalityTimeoutMs = Number(process.env.SEPOLIA_FINALITY_TIMEOUT_MS || 15 * 60 * 1000);
+  const beaconApiUrl = process.env.SEPOLIA_LIGHT_CLIENT_BEACON_API_URL || process.env.SEPOLIA_BEACON_API_URL;
+  const startedAt = monotonicMs();
+  let latestSharedFinality = null;
+  let syncCommitteeState = null;
 
-  const { gateway, contract } = await getFabricContract(projectRoot);
-  const results = [];
-  let pass = 0;
-  let fail = 0;
-  try {
-    for (const tc of selectedCases) {
-      const caseStartedAt = Date.now();
-      let finalityStartedAt = 0;
-      const result = {
-        caseId: tc.caseId,
-        pass: false,
-        timings: {
-          sourceTxMs: 0,
-          finalityWaitMs: 0,
-          proofBuildMs: 0,
-          hxmsgBuildMs: 0,
-          teeAttestMs: 0,
-          teeRegistrationMs: 0,
-          fabricExecuteMs: 0,
-          resultQueryMs: 0,
-          totalMs: 0,
-        },
+  console.log(`RUN ${selectedCases.length}/${cases.length} cases mode=${USE_SEPOLIA_SYNC_COMMITTEE ? 'sepolia-sync-committee' : 'local-mock-committee'} sourceConcurrency=${SOURCE_TX_CONCURRENCY}`);
+  if (!USE_SEPOLIA_SYNC_COMMITTEE && REQUESTED_SOURCE_TX_CONCURRENCY > 1 && process.env.HXMSG_ALLOW_LOCAL_PARALLEL_SOURCE !== 'true') {
+    console.log('Local Hardhat automine uses sourceConcurrency=1; later proof/TEE/Fabric stages still run with configured concurrency.');
+  }
+
+  const sourceItems = await mapLimit(selectedCases, SOURCE_TX_CONCURRENCY, (tc) => sendSourceTransaction({
+    sourceContract,
+    provider,
+    deployment,
+    tc,
+    nextNonce,
+  }).catch((error) => {
+    const result = baseResult(tc);
+    result.timings.caseStartedAt = monotonicMs();
+    result.error = error.message;
+    result.timings.totalMs = monotonicMs() - result.timings.caseStartedAt;
+    console.log(`${tc.caseId} SOURCE ERROR ${result.error}`);
+    return { tc, result, sourceFailed: true };
+  }));
+
+  const sourceSuccess = sourceItems.filter((item) => !item.sourceFailed);
+  let sharedSyncCommitteeUpdate = null;
+  if (USE_SEPOLIA_SYNC_COMMITTEE && sourceSuccess.length > 0) {
+    syncCommitteeState = loadSyncCommitteeState();
+    const teeTrustedBlockRoot = await fetchTeeSyncCommitteeRoot(teeUrl);
+    const trustedBlockRoot = teeTrustedBlockRoot
+      || process.env.SEPOLIA_TRUSTED_BLOCK_ROOT
+      || resolveTrustedBlockRoot({ state: syncCommitteeState });
+    if (!trustedBlockRoot && process.env.SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT !== 'true') {
+      throw new Error(`SEPOLIA_TRUSTED_BLOCK_ROOT or ${syncCommitteeStateFile()} is required`);
+    }
+    const finalityStartedAt = monotonicMs();
+    const minBlock = Math.min(...sourceSuccess.map((item) => item.receipt.blockNumber));
+    const maxBlock = Math.max(...sourceSuccess.map((item) => item.receipt.blockNumber));
+    latestSharedFinality = await waitForFinalizedExecutionBlock({
+      provider,
+      beaconApiUrl,
+      targetBlockNumber: maxBlock,
+      timeoutMs: finalityTimeoutMs,
+    });
+    const finalityWaitMs = monotonicMs() - finalityStartedAt;
+    for (const item of sourceSuccess) {
+      item.result.timings.finalityWaitMs = finalityWaitMs;
+      item.result.finality = {
+        finalizedHeight: latestSharedFinality.finalizedHeight,
+        finalizedHash: latestSharedFinality.finalizedHash,
+        sourceBlockNumber: item.receipt.blockNumber,
+        source: latestSharedFinality.source,
+        beaconFinalizedSlot: latestSharedFinality.beaconFinalizedSlot || null,
+        signatureSlot: latestSharedFinality.signatureSlot || null,
+        sharedFinalityForMaxSourceBlock: maxBlock,
       };
-      try {
-        const sourceTxStartedAt = Date.now();
-        const invoke = requestEvmFabricCall(projectRoot, tc.payload);
-        result.timings.sourceTxMs = Date.now() - sourceTxStartedAt;
-        result.evmTxHash = invoke.txHash;
-        result.evmGasUsed = invoke.gasUsed;
-        const expectedPayload = normalizeBusinessPayload(tc.payload);
-        const receipt = await provider.getTransactionReceipt(invoke.txHash);
-        result.sourceBlockNumber = receipt.blockNumber;
-        result.sourceBlockHash = receipt.blockHash;
-        let finality = null;
-        const beaconApiUrl = process.env.SEPOLIA_LIGHT_CLIENT_BEACON_API_URL || process.env.SEPOLIA_BEACON_API_URL;
-        if (process.env.USE_SEPOLIA_SYNC_COMMITTEE === 'true') {
-          finalityStartedAt = Date.now();
-          finality = await waitForFinalizedExecutionBlock({
-            provider,
-            beaconApiUrl,
-            targetBlockNumber: receipt.blockNumber,
-            timeoutMs: finalityTimeoutMs,
-          });
-          result.timings.finalityWaitMs = Date.now() - finalityStartedAt;
-          result.finality = {
-            finalizedHeight: finality.finalizedHeight,
-            finalizedHash: finality.finalizedHash,
-            sourceBlockNumber: receipt.blockNumber,
-            source: finality.source,
-            beaconFinalizedSlot: finality.beaconFinalizedSlot || null,
-            signatureSlot: finality.signatureSlot || null,
-          };
-        }
-        const proofStartedAt = Date.now();
-        const block = await provider.getBlock(receipt.blockNumber);
-        const receiptProof = await buildReceiptProof({
-          provider,
-          blockNumber: receipt.blockNumber,
-          txHash: invoke.txHash,
-        });
-        let committeeHeaderUpdate = null;
-        let syncCommitteeUpdate = null;
-        if (process.env.USE_SEPOLIA_SYNC_COMMITTEE === 'true') {
-          syncCommitteeUpdate = await fetchBeaconLightClientInputs({
-            beaconApiUrl,
-            executionProvider: provider,
-            targetBlockNumber: receipt.blockNumber,
-            trustedBlockRoot: process.env.SEPOLIA_TRUSTED_BLOCK_ROOT,
-            allowDynamicTrustedRoot: process.env.SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT === 'true',
-          });
-          syncCommitteeUpdate.chainID = `eip155:${deployment.chainId}`;
-        } else {
-          committeeHeaderUpdate = buildCommitteeHeaderUpdate({
-            header: receiptProof.blockHeader,
-            chainID: `eip155:${deployment.chainId}`,
-          });
-        }
-        result.timings.proofBuildMs = Date.now() - proofStartedAt;
-        const hxmsgStartedAt = Date.now();
-        const hxmsg = buildHXMsgFromEvmReceipt({
-          deployment,
-          receipt,
-          block,
-          businessPayload: tc.payload,
-        });
-        result.timings.hxmsgBuildMs = Date.now() - hxmsgStartedAt;
-        const protocolCheck = {
-          feedbackDisabled: hxmsg.feedback?.required === false
-            && Number(hxmsg.feedback?.expectedMsgType || 0) === FeedbackType.NONE
-            && Number(hxmsg.feedback?.timeout || 0) === 0
-            && hxmsg.feedback?.callbackRefHash === ethers.ZeroHash,
-          atomicityDisabled: !hxmsg.atomicity?.required,
-          challengeResponseExpected: false,
-        };
-        writeJSON('latest-evm-xmsg.json', hxmsg);
-        const teeStartedAt = Date.now();
-        const teeResp = await axios.post(`${teeUrl}/attest`, {
-          hxmsg,
-          helperData: {
-            evmReceiptProof: receiptProof,
-            committeeHeaderUpdate,
-            syncCommitteeUpdate,
-            evmRpc: EVM_RPC,
-          },
-        }, { timeout: 30000 });
-        result.timings.teeAttestMs = Date.now() - teeStartedAt;
-        const voucher = teeResp.data.teeClusterCertification || teeResp.data.teeCertification;
-        const certs = voucher.certifications || [voucher];
-        const teeRegistrationStartedAt = Date.now();
-        for (const cert of certs) {
-          await contract.submitTransaction('RegisterTrustedTEE', cert.teeAddress);
-        }
-        result.timings.teeRegistrationMs = Date.now() - teeRegistrationStartedAt;
-        const fabricStartedAt = Date.now();
-        const fabricResp = await contract.submitTransaction(
-          'ExecuteHXMsg',
-          JSON.stringify(hxmsg),
-          hxmsg.callData,
-          JSON.stringify(voucher)
-        );
-        result.timings.fabricExecuteMs = Date.now() - fabricStartedAt;
-        const queryStartedAt = Date.now();
-        const inbound = await queryInbound(contract, hxmsg.header.requestID);
-        const businessRecord = await queryBusinessRecord(contract, hxmsg.header.requestID);
-        const sourceRecord = await sourceView.requests(hxmsg.header.requestID);
-        result.timings.resultQueryMs = Date.now() - queryStartedAt;
-        result.requestID = hxmsg.header.requestID;
-        result.feedback = hxmsg.feedback;
-        result.atomicity = hxmsg.atomicity || null;
-        result.responseRequired = Boolean(hxmsg.feedback?.required);
-        result.atomicityRequired = Boolean(hxmsg.atomicity?.required);
-        result.protocolCheck = protocolCheck;
-        result.sourceRequest = {
-          status: Number(sourceRecord.status ?? sourceRecord[18]),
-          feedbackTimeout: Number(sourceRecord.feedbackTimeout ?? sourceRecord[14]),
-          challengeWindow: Number(sourceRecord.challengeWindow ?? sourceRecord[15]),
-          challengeDeadline: Number(sourceRecord.challengeDeadline ?? sourceRecord[16]),
-          commitmentType: Number(sourceRecord.commitmentType ?? sourceRecord[17]),
-        };
-        result.fabricResult = fabricResp.toString();
-        result.teeVerification = teeResp.data.verificationResult;
-        result.teeCluster = teeResp.data.teeClusterCertification;
-        result.inbound = inbound;
-        result.businessRecord = businessRecord;
-        result.pass = Boolean(inbound)
-          && Boolean(businessRecord)
-          && inbound.recordId === expectedPayload.recordId
-          && inbound.actor === expectedPayload.actor
-          && inbound.amount === expectedPayload.amount
-          && inbound.status === 'executed'
-          && businessRecord.op === inbound.op
-          && businessRecord.recordId === inbound.recordId
-          && businessRecord.actor === inbound.actor
-          && businessRecord.amount === inbound.amount
-          && businessRecord.status === expectedBusinessStatus(inbound.op)
-          && protocolCheck.feedbackDisabled
-          && protocolCheck.atomicityDisabled
-          && result.sourceRequest.challengeWindow === 0
-          && result.sourceRequest.commitmentType === 0
-          && Number(inbound.validTEECount || 0) >= Number((voucher.threshold || 1));
-        if (result.pass) pass += 1; else fail += 1;
-        console.log(`${tc.caseId} ${result.pass ? 'PASS' : 'FAIL'} requestID=${result.requestID}`);
-      } catch (error) {
-        fail += 1;
-        result.error = error.response?.data?.error || error.message;
-        result.errorDetail = error.response?.data || null;
-        result.finalityTimeout = /finality timeout/i.test(result.error || '');
-        if (result.finalityTimeout && finalityStartedAt > 0) {
-          result.timings.finalityWaitMs = Date.now() - finalityStartedAt;
-        }
-        console.log(`${tc.caseId} ERROR ${result.error}`);
+    }
+    const syncStartedAt = monotonicMs();
+    sharedSyncCommitteeUpdate = await fetchBeaconLightClientInputs({
+      beaconApiUrl,
+      executionProvider: provider,
+      targetBlockNumber: minBlock,
+      trustedBlockRoot,
+      allowDynamicTrustedRoot: process.env.SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT === 'true',
+      maxAncestorHeaders: Number(process.env.SEPOLIA_MAX_ANCESTOR_HEADERS || 512),
+    });
+    sharedSyncCommitteeUpdate.chainID = `eip155:${deployment.chainId}`;
+    const verifiedSyncCommittee = await verifySyncCommitteeHeaderUpdate(sharedSyncCommitteeUpdate, {
+      expectedChainID: sharedSyncCommitteeUpdate.chainID,
+    });
+    syncCommitteeState = saveSyncCommitteeState({
+      chainID: sharedSyncCommitteeUpdate.chainID,
+      trustedBlockRoot: verifiedSyncCommittee.nextTrustedBlockRoot,
+      finalizedHeight: verifiedSyncCommittee.finalizedHeight,
+      finalizedHash: verifiedSyncCommittee.finalizedHash,
+      beaconFinalizedSlot: verifiedSyncCommittee.beaconFinalizedSlot,
+      signatureSlot: verifiedSyncCommittee.signatureSlot,
+      syncCommitteePeriod: verifiedSyncCommittee.syncCommitteePeriod,
+      participantCount: verifiedSyncCommittee.participantCount,
+      source: 'run-evm-fabric-tests',
+    });
+    const syncFetchMs = monotonicMs() - syncStartedAt;
+    for (const item of sourceSuccess) {
+      item.result.timings.sharedSyncCommitteeFetchMs = syncFetchMs;
+      item.result.syncCommittee = {
+        trustedBlockRoot: sharedSyncCommitteeUpdate.trustedBlockRoot,
+        nextTrustedBlockRoot: verifiedSyncCommittee.nextTrustedBlockRoot,
+        trustedRootSource: teeTrustedBlockRoot ? 'tee-chain-state' : (process.env.SEPOLIA_TRUSTED_BLOCK_ROOT ? 'env' : 'runtime-state'),
+        syncCommitteePeriod: verifiedSyncCommittee.syncCommitteePeriod,
+        committeeUpdateCount: verifiedSyncCommittee.committeeUpdates.length,
+        participantCount: verifiedSyncCommittee.participantCount,
+        stateFile: syncCommitteeStateFile(),
+      };
+    }
+  }
+
+  const proofItems = await mapLimit(sourceItems, PROOF_CONCURRENCY, async (item) => {
+    if (item.sourceFailed) return item;
+    return buildProofItem({ item, provider, deployment, sharedSyncCommitteeUpdate });
+  });
+
+  const attestedItems = await mapLimit(proofItems, TEE_CONCURRENCY, async (item) => {
+    if (item.sourceFailed || item.error) return item;
+    return attestWithTEE({ item, teeUrl });
+  });
+
+  const { gateway, contract } = await getFabricContract();
+  try {
+    const registration = await registerTrustedTEEs(contract, attestedItems);
+    for (const item of attestedItems) {
+      if (item.voucher) item.result.timings.teeRegistrationMs = registration.elapsedMs;
+    }
+    await mapLimit(attestedItems, FABRIC_CONCURRENCY, (item) => executeOnFabric({ item, contract, sourceView }));
+    for (const item of attestedItems) {
+      const result = item.result;
+      if (!result.timings.totalMs) {
+        result.timings.totalMs = monotonicMs() - (result.timings.caseStartedAt || startedAt);
       }
-      result.timings.totalMs = Date.now() - caseStartedAt;
-      results.push(result);
+      delete result.timings.caseStartedAt;
     }
   } finally {
     gateway.disconnect();
   }
 
+  const results = attestedItems.map((item) => item.result);
+  const pass = results.filter((result) => result.pass).length;
+  const fail = results.length - pass;
   const output = {
     testType: 'hxmsg-melv-ef-evm-to-fabric',
     testedAt: new Date().toISOString(),
+    executionMode: USE_SEPOLIA_SYNC_COMMITTEE ? 'sepolia-sync-committee' : 'local-mock-committee',
     total: selectedCases.length,
     configuredTotal: cases.length,
     pass,
     fail,
+    concurrency: {
+      sourceTx: SOURCE_TX_CONCURRENCY,
+      proof: PROOF_CONCURRENCY,
+      tee: TEE_CONCURRENCY,
+      fabric: FABRIC_CONCURRENCY,
+    },
+    sharedFinality: latestSharedFinality,
+    syncCommitteeState,
+    elapsedMs: monotonicMs() - startedAt,
     results,
   };
-  writeJSON('hxmsg-evm-fabric-results.json', output);
-  fs.writeFileSync(
-    path.join(RUNTIME_DIR, 'hxmsg-evm-fabric-summary.md'),
-      `# h-xmsg / MELV-EF EVM -> Fabric 测试结果\n\n` +
-      `**测试时间**：${output.testedAt}\n` +
-      `**通过率**：${pass}/${selectedCases.length}\n\n` +
-      `**finality 等待上限**：${finalityTimeoutMs} ms\n\n` +
-      `| 用例 | RESPONSE | Atomicity | EVM tx | EVM Gas | Source tx ms | Finality wait ms | Proof ms | TEE ms | Fabric ms | Total ms | TEE quorum | Fabric 状态 | 状态 |\n` +
-      `|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n` +
-      results.map((r) => `| ${r.caseId} | ${r.responseRequired ? 'yes' : 'no'} | ${r.atomicityRequired ? 'yes' : 'no'} | ${r.evmTxHash || '-'} | ${r.evmGasUsed || '-'} | ${r.timings?.sourceTxMs ?? '-'} | ${r.timings?.finalityWaitMs ?? '-'} | ${r.timings?.proofBuildMs ?? '-'} | ${r.timings?.teeAttestMs ?? '-'} | ${r.timings?.fabricExecuteMs ?? '-'} | ${r.timings?.totalMs ?? '-'} | ${r.teeCluster ? `${r.teeCluster.reached}/${r.teeCluster.threshold}` : '-'} | ${r.inbound?.status || '-'} | ${r.pass ? 'PASS' : 'FAIL'} |`).join('\n') +
-      `\n`
-  );
-  console.log(`FINAL ${pass}/${selectedCases.length} passed, ${fail} failed`);
+  if (!NO_WRITE_RESULTS) {
+    writeJSON('hxmsg-evm-fabric-results.json', output);
+    writeSummary({ output, finalityTimeoutMs, sharedFinality: latestSharedFinality });
+  }
+  console.log(`FINAL ${pass}/${selectedCases.length} passed, ${fail} failed elapsedMs=${output.elapsedMs}`);
   process.exit(fail > 0 ? 1 : 0);
 }
 

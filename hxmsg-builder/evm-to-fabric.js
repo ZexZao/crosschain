@@ -1,5 +1,5 @@
 const { ethers } = require('ethers');
-const { encodeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const {
   MsgType,
   FeedbackType,
@@ -40,8 +40,8 @@ function buildHXMsgFromEvmReceipt({
 
   const sourceContract = deployment.evmSourceContract;
   const { log, parsed } = findCrossChainCallLog({ receipt, sourceContract });
-  const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);
-  const callDataHash = ethers.keccak256(payloadHex);
+  const { normalized, compact, payloadHex, compactCallHash } = encodeCompactBusinessCall(businessPayload);
+  const callDataHash = compactCallHash;
   if (callDataHash.toLowerCase() !== parsed.callDataHash.toLowerCase()) {
     throw new Error(`callDataHash mismatch: event=${parsed.callDataHash}, computed=${callDataHash}`);
   }
@@ -103,6 +103,7 @@ function buildHXMsgFromEvmReceipt({
     feedback,
     atomicity,
     callData: payloadHex,
+    compactCall: compact,
     callDataDecoded: normalized,
     txId: receipt.hash,
     srcHeight: sourcePart.srcHeight,

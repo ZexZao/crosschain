@@ -17,6 +17,30 @@ contract TargetContract {
         uint64 updatedAt;
     }
 
+    struct CompactCall {
+        uint16 opCode;
+        bytes32 recordIdHash;
+        bytes32 actorHash;
+        address actorAddress;
+        int256 amount;
+        bytes32 metadataHash;
+        bool requireAck;
+    }
+
+    struct CompactBusinessRecord {
+        bytes32 requestID;
+        uint16 opCode;
+        bytes32 recordIdHash;
+        bytes32 actorHash;
+        address actorAddress;
+        int256 amount;
+        bytes32 metadataHash;
+        bool requireAck;
+        address service;
+        bytes32 status;
+        uint64 updatedAt;
+    }
+
     event MessageExecuted(
         bytes32 indexed requestID,
         address indexed gateway,
@@ -46,6 +70,7 @@ contract TargetContract {
     bytes32 public lastPayloadHash;
     uint256 public executionCount;
     mapping(bytes32 => BusinessRecord) private businessRecords;
+    mapping(bytes32 => CompactBusinessRecord) private compactBusinessRecords;
     mapping(bytes32 => bytes32) public recordKeyToRequestID;
     mapping(bytes32 => uint256) public opExecutionCount;
     mapping(bytes32 => uint256) public assetAmountByRequest;
@@ -74,8 +99,24 @@ contract TargetContract {
         return true;
     }
 
+    function executeCompact(bytes32 requestID, CompactCall calldata compact) external returns (bool) {
+        require(msg.sender == gateway, "only gateway");
+        bytes32 payloadHash = hashCompactCall(compact);
+
+        lastRequestID = requestID;
+        lastPayloadHash = payloadHash;
+        executionCount += 1;
+        _applyCompactBusinessAction(requestID, compact);
+        emit MessageExecuted(requestID, msg.sender, payloadHash, executionCount);
+        return true;
+    }
+
     function getBusinessRecord(bytes32 requestID) external view returns (BusinessRecord memory) {
         return businessRecords[requestID];
+    }
+
+    function getCompactBusinessRecord(bytes32 requestID) external view returns (CompactBusinessRecord memory) {
+        return compactBusinessRecords[requestID];
     }
 
     function getBusinessRecordByKey(string calldata op, string calldata recordId) external view returns (BusinessRecord memory) {
@@ -120,6 +161,82 @@ contract TargetContract {
         opExecutionCount[opKey] += 1;
 
         emit BusinessActionApplied(requestID, recordKey, opKey, op, recordId, actor, amount, status);
+    }
+
+    function hashCompactCall(CompactCall calldata compact) public pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                compact.opCode,
+                compact.recordIdHash,
+                compact.actorHash,
+                compact.actorAddress,
+                compact.amount,
+                compact.metadataHash,
+                compact.requireAck
+            )
+        );
+    }
+
+    function _applyCompactBusinessAction(bytes32 requestID, CompactCall calldata compact) internal {
+        bytes32 opKey = bytes32(uint256(compact.opCode));
+        bytes32 recordKey = _compactRecordKey(compact.opCode, compact.recordIdHash);
+        (address service, bytes32 status) = _dispatchCompactBusinessService(requestID, compact);
+
+        compactBusinessRecords[requestID] = CompactBusinessRecord({
+            requestID: requestID,
+            opCode: compact.opCode,
+            recordIdHash: compact.recordIdHash,
+            actorHash: compact.actorHash,
+            actorAddress: compact.actorAddress,
+            amount: compact.amount,
+            metadataHash: compact.metadataHash,
+            requireAck: compact.requireAck,
+            service: service,
+            status: status,
+            updatedAt: uint64(block.timestamp)
+        });
+        recordKeyToRequestID[recordKey] = requestID;
+        opExecutionCount[opKey] += 1;
+    }
+
+    function _dispatchCompactBusinessService(bytes32 requestID, CompactCall calldata compact)
+        internal
+        returns (address service, bytes32 status)
+    {
+        if (compact.opCode == 1 || compact.opCode == 2 || compact.opCode == 8 || compact.opCode == 9) {
+            require(compact.actorAddress != address(0), "asset recipient must be evm address");
+            require(compact.amount > 0, "bad asset amount");
+            status = assetService.mintSettlementCompact(
+                requestID,
+                compact.recordIdHash,
+                compact.actorAddress,
+                uint256(compact.amount),
+                compact.metadataHash
+            );
+            assetAmountByRequest[requestID] = uint256(compact.amount);
+            assetRecipientByRequest[requestID] = compact.actorAddress;
+            return (address(assetService), status);
+        }
+        if (compact.opCode == 3) {
+            require(compact.amount > 0, "zero amount");
+            return (address(receivableService), keccak256(bytes("RECEIVABLE_ATTESTED")));
+        }
+        if (compact.opCode == 4) {
+            return (address(logisticsService), keccak256(bytes("LOGISTICS_SYNCED")));
+        }
+        if (compact.opCode == 5) {
+            require(compact.amount > 0, "zero duration");
+            return (address(consentService), keccak256(bytes("CONSENT_GRANTED")));
+        }
+        if (compact.opCode == 6) {
+            require(compact.amount >= 0, "bad oracle amount");
+            return (address(oracleService), keccak256(bytes("ORACLE_UPDATED")));
+        }
+        if (compact.opCode == 7) {
+            require(compact.amount > 0, "zero threshold");
+            return (address(approvalService), keccak256(bytes("APPROVAL_COMMITTED")));
+        }
+        revert("unsupported compact op");
     }
 
     function _dispatchBusinessService(
@@ -169,6 +286,10 @@ contract TargetContract {
 
     function _recordKey(string memory op, string memory recordId) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(op, ":", recordId));
+    }
+
+    function _compactRecordKey(uint16 opCode, bytes32 recordIdHash) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(opCode, recordIdHash));
     }
 
     function _parseUint(string memory text) internal pure returns (uint256) {

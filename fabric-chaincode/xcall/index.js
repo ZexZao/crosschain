@@ -103,6 +103,27 @@ function normalizeFeedback(feedback = {}) {
   };
 }
 
+function compactBusinessCallTuple(compact) {
+  return [
+    Number(compact.opCode),
+    compact.recordIdHash,
+    compact.actorHash,
+    compact.actorAddress || ethers.ZeroAddress,
+    BigInt(compact.amount),
+    compact.metadataHash,
+    Boolean(compact.requireAck)
+  ];
+}
+
+function hashCompactBusinessCall(compact) {
+  return ethers.keccak256(
+    ABI.encode(
+      ['uint16', 'bytes32', 'bytes32', 'address', 'int256', 'bytes32', 'bool'],
+      compactBusinessCallTuple(compact)
+    )
+  );
+}
+
 function normalizeAtomicity(atomicity = {}) {
   return {
     required: Boolean(atomicity.required),
@@ -223,18 +244,71 @@ function computeTargetExecutionHashFromHXMsg(hxmsg) {
   );
 }
 
+function canonicalHeader(hxmsg) {
+  return {
+    version: Number(hxmsg.header.version),
+    requestID: hxmsg.header.requestID,
+    msgType: Number(hxmsg.header.msgType),
+    nonce: Number(hxmsg.header.nonce),
+    nonceScope: hxmsg.header.nonceScope || ethers.ZeroHash,
+    sourceTimestamp: Number(hxmsg.header.sourceTimestamp ?? hxmsg.header.createdAt ?? 0),
+    deliveryExpireAt: Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt ?? 0)
+  };
+}
+
+function canonicalVerification(hxmsg) {
+  const finality = hxmsg.verification.finality || {};
+  return {
+    verificationMethod: Number(hxmsg.verification.verificationMethod),
+    finality: {
+      model: Number(finality.model ?? hxmsg.verification.finalityModel ?? 0),
+      confirmations: Number(finality.confirmations ?? hxmsg.verification.requiredConfirmations ?? 0),
+      checkpointRoot: finality.checkpointRoot || ethers.ZeroHash,
+      epoch: Number(finality.epoch || 0),
+      committeePolicyHash: finality.committeePolicyHash || ethers.ZeroHash
+    },
+    policyRef: {
+      policyType: Number(hxmsg.verification.policyRef.policyType),
+      policyHash: hxmsg.verification.policyRef.policyHash || ethers.ZeroHash
+    },
+    verifierProfileHash: hxmsg.verification.verifierProfileHash || hxmsg.verification.adapterID || ethers.ZeroHash
+  };
+}
+
+function getEnvelope(hxmsg) {
+  return hxmsg.hxmsgEnvelope || {};
+}
+
+function getExecutionData(hxmsg) {
+  return getEnvelope(hxmsg).executionData || {
+    callData: hxmsg.callData,
+    compactCall: hxmsg.compactCall,
+    businessPayload: hxmsg.callDataDecoded
+  };
+}
+
+function getAuditRecord(hxmsg) {
+  return getEnvelope(hxmsg).auditRecord || {
+    txId: hxmsg.txId,
+    srcHeight: hxmsg.srcHeight
+  };
+}
+
 function computeHXMsgDigest(hxmsg) {
   const feedback = normalizeFeedback(hxmsg.feedback);
+  const header = canonicalHeader(hxmsg);
+  const verification = canonicalVerification(hxmsg);
   const headerHash = ethers.keccak256(
     ABI.encode(
-      ['uint8', 'bytes32', 'uint8', 'uint64', 'uint64', 'uint64'],
+      ['uint8', 'bytes32', 'uint8', 'uint64', 'bytes32', 'uint64', 'uint64'],
       [
-        Number(hxmsg.header.version),
-        hxmsg.header.requestID,
-        Number(hxmsg.header.msgType),
-        Number(hxmsg.header.nonce),
-        Number(hxmsg.header.createdAt),
-        Number(hxmsg.header.expireAt)
+        header.version,
+        header.requestID,
+        header.msgType,
+        header.nonce,
+        header.nonceScope,
+        header.sourceTimestamp,
+        header.deliveryExpireAt
       ]
     )
   );
@@ -267,25 +341,26 @@ function computeHXMsgDigest(hxmsg) {
   );
   const verificationHash = ethers.keccak256(
     ABI.encode(
-      ['uint8', 'uint8', 'uint16', 'uint8', 'bytes32', 'bytes32', 'bytes32'],
+      ['uint8', 'uint8', 'uint16', 'bytes32', 'uint64', 'bytes32', 'uint8', 'bytes32', 'bytes32'],
       [
-        Number(hxmsg.verification.verificationMethod),
-        Number(hxmsg.verification.finalityModel),
-        Number(hxmsg.verification.requiredConfirmations),
-        Number(hxmsg.verification.policyRef.policyType),
-        hxmsg.verification.policyRef.policyID,
-        hxmsg.verification.policyRef.policyHash,
-        hxmsg.verification.adapterID
+        verification.verificationMethod,
+        verification.finality.model,
+        verification.finality.confirmations,
+        verification.finality.checkpointRoot,
+        verification.finality.epoch,
+        verification.finality.committeePolicyHash,
+        verification.policyRef.policyType,
+        verification.policyRef.policyHash,
+        verification.verifierProfileHash
       ]
     )
   );
   const bindingHash = ethers.keccak256(
     ABI.encode(
-      ['bytes32', 'bytes32', 'bytes32'],
+      ['bytes32', 'bytes32'],
       [
         hxmsg.payloadBinding.sourcePayloadHash,
-        hxmsg.payloadBinding.businessPayloadHash,
-        hxmsg.payloadBinding.targetExecutionHash
+        hxmsg.payloadBinding.businessPayloadHash
       ]
     )
   );
@@ -320,6 +395,9 @@ function computeHXMsgDigest(hxmsg) {
 
 function computeHXMsgDeliveryDigest(hxmsg) {
   const feedback = normalizeFeedback(hxmsg.feedback);
+  const targetExecutionHash = hxmsg.deliveryMessage?.targetExecutionHash
+    || hxmsg.payloadBinding.targetExecutionHash
+    || computeTargetExecutionHashFromHXMsg(hxmsg);
   const minimal = [
     hxmsg.header.requestID,
     hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg),
@@ -330,12 +408,12 @@ function computeHXMsgDeliveryDigest(hxmsg) {
     hxmsg.targetAction.functionSelector,
     hxmsg.targetAction.callDataHash,
     hxmsg.targetAction.receiver,
-    hxmsg.payloadBinding.targetExecutionHash,
+    targetExecutionHash,
     feedback.required,
     feedback.expectedMsgType,
     feedback.timeout,
     feedback.callbackRefHash,
-    hxmsg.header.expireAt
+    hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt
   ];
   const chainHash = ethers.keccak256(
     ABI.encode(
@@ -989,6 +1067,10 @@ class XCallContract extends Contract {
   async ExecuteHXMsg(ctx, hxmsgJson, callDataHex, certJson) {
     const hxmsg = parseJson(hxmsgJson, 'hxmsgJson');
     const certEnvelope = parseJson(certJson, 'certJson');
+    const executionData = getExecutionData(hxmsg);
+    const auditRecord = getAuditRecord(hxmsg);
+    const compactCall = executionData.compactCall;
+    const businessPayload = executionData.businessPayload;
     const requestID = hxmsg.header.requestID;
     const consumedKey = `hxmsg-consumed:${requestID}`;
     const consumed = await ctx.stub.getState(consumedKey);
@@ -997,13 +1079,13 @@ class XCallContract extends Contract {
     }
 
     const now = Number(ctx.stub.getTxTimestamp().seconds.low || ctx.stub.getTxTimestamp().seconds || Math.floor(Date.now() / 1000));
-    if (Number(hxmsg.header.expireAt) < now) throw new Error('h-xmsg expired');
+    if (Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt) < now) throw new Error('h-xmsg expired');
     if (Number(hxmsg.target.chainType) !== 2) throw new Error('target is not Fabric');
     if (Number(hxmsg.targetAction.actionType) !== 5) throw new Error('action is not chaincode invoke');
 
     const expectedChainID = bytes32FromText(`fabric-${ctx.stub.getChannelID()}`);
     const expectedDomainID = bytes32FromText('fabric-local-domain');
-    const expectedTargetObject = bytes32FromText(`fabric:${ctx.stub.getChannelID()}:xcall`);
+    const expectedTargetObject = bytes32FromText('xcall');
     if (String(hxmsg.target.chainID).toLowerCase() !== expectedChainID.toLowerCase()) {
       throw new Error('Fabric target chainID mismatch');
     }
@@ -1013,16 +1095,28 @@ class XCallContract extends Contract {
     if (String(hxmsg.targetAction.targetObject).toLowerCase() !== expectedTargetObject.toLowerCase()) {
       throw new Error('Fabric target object mismatch');
     }
-    if (String(hxmsg.targetAction.callDataHash).toLowerCase() !== ethers.keccak256(callDataHex).toLowerCase()) {
+    if (compactCall) {
+      if (String(hxmsg.targetAction.callDataHash).toLowerCase() !== hashCompactBusinessCall(compactCall).toLowerCase()) {
+        throw new Error('compact callDataHash mismatch');
+      }
+      if (String(hxmsg.targetAction.callDataHash).toLowerCase() !== ethers.keccak256(callDataHex).toLowerCase()) {
+        throw new Error('compact callData bytes mismatch');
+      }
+    } else if (String(hxmsg.targetAction.callDataHash).toLowerCase() !== ethers.keccak256(callDataHex).toLowerCase()) {
       throw new Error('callDataHash mismatch');
     }
     const targetExecutionHash = computeTargetExecutionHashFromHXMsg(hxmsg);
-    if (String(hxmsg.payloadBinding.targetExecutionHash).toLowerCase() !== targetExecutionHash.toLowerCase()) {
+    const expectedTargetExecutionHash = hxmsg.deliveryMessage?.targetExecutionHash || hxmsg.payloadBinding.targetExecutionHash || targetExecutionHash;
+    if (String(expectedTargetExecutionHash).toLowerCase() !== targetExecutionHash.toLowerCase()) {
       throw new Error('targetExecutionHash mismatch');
     }
 
     const certResult = await verifyTEECertification(ctx, hxmsg, certEnvelope);
-    const parsedPayload = decodeBusinessPayload(callDataHex);
+    const parsedPayload = compactCall ? businessPayload : decodeBusinessPayload(callDataHex);
+    if (!parsedPayload) throw new Error('businessPayload is required for compact h-xmsg');
+    if (hashJson(parsedPayload).toLowerCase() !== String(hxmsg.payloadBinding.businessPayloadHash).toLowerCase()) {
+      throw new Error('businessPayloadHash mismatch');
+    }
     const businessRecord = await applyBusinessAction(ctx, {
       requestID,
       hmsgDigest: certResult.hmsgDigest,
@@ -1039,8 +1133,8 @@ class XCallContract extends Contract {
       teeThreshold: certResult.threshold,
       teeSigners: certResult.signers,
       sourceChainType: hxmsg.source.chainType,
-      sourceTxID: hxmsg.txId || '',
-      srcHeight: hxmsg.srcHeight || 0,
+      sourceTxID: auditRecord.txId || '',
+      srcHeight: auditRecord.srcHeight || 0,
       callDataHash: hxmsg.targetAction.callDataHash,
       businessPayloadHash: hxmsg.payloadBinding.businessPayloadHash,
       targetExecutionHash,
@@ -1087,6 +1181,7 @@ class XCallContract extends Contract {
   async BindCommitmentHXMsg(ctx, hxmsgJson, certJson) {
     const hxmsg = parseJson(hxmsgJson, 'hxmsgJson');
     const certEnvelope = parseJson(certJson, 'certJson');
+    const auditRecord = getAuditRecord(hxmsg);
     const requestID = hxmsg.header.requestID;
     const record = await getCommitment(ctx, requestID);
     if (!['Pending', 'Challenged'].includes(record.status)) {
@@ -1095,7 +1190,7 @@ class XCallContract extends Contract {
     if (record.hmsgDigest && record.hmsgDigest !== ethers.ZeroHash) {
       throw new Error('hmsgDigest already bound');
     }
-    if (String(record.sourceTxID).toLowerCase() !== String(hxmsg.txId).toLowerCase()) {
+    if (String(record.sourceTxID).toLowerCase() !== String(auditRecord.txId).toLowerCase()) {
       throw new Error('sourceTxID mismatch');
     }
     const targetExecutionHash = computeTargetExecutionHashFromHXMsg(hxmsg);

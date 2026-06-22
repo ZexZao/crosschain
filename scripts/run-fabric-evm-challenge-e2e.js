@@ -4,7 +4,7 @@ const axios = require('axios');
 const { ethers } = require('ethers');
 const { Gateway, Wallets } = require('fabric-network');
 const { common } = require('fabric-protos');
-const { encodeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const {
   addressToBytes32,
   chainIdToBytes32,
@@ -164,7 +164,7 @@ async function main() {
       metadata: 'challenge-response e2e asset settlement',
       requireAck: false,
     };
-    const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);
+    const { normalized, compactCallHash } = encodeCompactBusinessCall(businessPayload);
     const failureData = 'fabric-evm-failure';
     const now = Math.floor(Date.now() / 1000);
     const payload = {
@@ -173,7 +173,7 @@ async function main() {
       targetChainID,
       targetObject,
       functionSelector: TARGET_EXECUTE_SELECTOR,
-      callDataHash: ethers.keccak256(payloadHex),
+      callDataHash: compactCallHash,
       businessPayloadHash: hashJson(normalized),
       receiver: targetObject,
       expireAt: now + 3600,
