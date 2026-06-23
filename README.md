@@ -531,6 +531,27 @@ npm run sepolia:test:evm-fabric
 
 该命令会临时把 `runtime/deployment.sepolia.json` 切换为当前部署文件，默认只跑 1 条 EVM -> Fabric 用例，等待 finality 的默认上限为 20 分钟，结束后自动恢复本地 `runtime/deployment.json`。可通过 `HXMSG_CASE_LIMIT`、`HXMSG_CASE_TOTAL`、`SEPOLIA_FINALITY_TIMEOUT_MS` 调整测试规模和等待时间。
 
+Ethereum -> Fabric 的 Sepolia 实验需要等待 finality：源链交易先真实发送到 Sepolia，TEE 不能只相信最新区块或 RPC 返回值，而是要等该交易所在执行层区块被 Beacon finalized checkpoint 覆盖。之后脚本才会获取 `LightClientFinalityUpdate`、sync committee updates、execution header parentHash 链和 receipt MPT proof，并交给 TEE 验证。因此该方向的耗时通常由 finality 等待主导，可能需要十几分钟；若超过 `SEPOLIA_FINALITY_TIMEOUT_MS`，脚本会放弃本轮测试。
+
+Sepolia Fabric -> Ethereum 测试：
+
+```bash
+set -a
+. ./.env
+set +a
+cp runtime/deployment.sepolia.json runtime/deployment.json
+EVM_RPC="$SEPOLIA_RPC_URL" \
+DEPLOYER_PRIVATE_KEY="$SEPOLIA_PRIVATE_KEY" \
+HXMSG_CASE_TOTAL=1 \
+HXMSG_CASE_LIMIT=1 \
+HXMSG_TEE_BATCH_SIZE=1 \
+HXMSG_FABRIC_EMIT_DELAY_MS=0 \
+npm run hxmsg:test:forward
+cp runtime/deployment.local-before-sepolia-run.json runtime/deployment.json
+```
+
+该方向的源链是本地 Fabric，TEE 通过 h-FSV / Fabric View-like 证明验证 Fabric 事件存在性；目标链是 Sepolia，因此会真实提交 EVM 目标执行交易并消耗 Sepolia ETH。与 Ethereum -> Fabric 不同，Fabric -> Ethereum 不需要等待 Sepolia 源链 finality，因为 Sepolia 在该实验中是目标链；主要耗时来自 TEE quorum、TEE signer 注册和 Sepolia 目标链交易确认。
+
 真实资产锁定、EVM token 发放和 Fabric 退款：
 
 ```bash
@@ -608,7 +629,7 @@ npm run hxmsg:test:challenge:evm-fabric
 | 结果文件 | `runtime/hxmsg-evm-fabric-results.json` |
 | 汇总文件 | `runtime/hxmsg-evm-fabric-summary.md` |
 
-### Sepolia 真实 sync committee 验证结果
+### Sepolia Ethereum -> Fabric 验证结果
 
 最近一次 Sepolia Ethereum -> Fabric 端到端测试已通过。该测试不是本地 Hardhat 模拟：源链交易真实发送到 Sepolia，TEE 通过真实 Beacon light-client 数据验证 sync committee finality，并使用 receipt MPT proof 验证源链事件存在性，再由 5 个 TEE 模拟节点形成 3/5 quorum 后提交到 Fabric。
 
@@ -635,6 +656,32 @@ npm run hxmsg:test:challenge:evm-fabric
 |---|---|
 | `runtime/hxmsg-evm-fabric-results.json` | 完整 JSON 结果，包含 tx、gas、finality、proof、TEE、Fabric 和业务执行记录 |
 | `runtime/hxmsg-evm-fabric-summary.md` | Markdown 汇总表 |
+
+### Sepolia Fabric -> Ethereum 验证结果
+
+最近一次 Sepolia Fabric -> Ethereum 端到端测试已通过。该测试中 Fabric 作为源链，本地 Fabric 链码真实发出跨链事件；TEE 使用 h-FSV / Fabric View-like 证明验证该事件存在性和背书写集，再由 5 个 TEE 模拟节点形成 3/5 quorum；目标链交易真实提交到 Sepolia 的 `HXMsgGateway` 和目标业务合约。
+
+| 指标 | 结果 |
+|---|---|
+| 测试命令 | `EVM_RPC="$SEPOLIA_RPC_URL" DEPLOYER_PRIVATE_KEY="$SEPOLIA_PRIVATE_KEY" HXMSG_CASE_LIMIT=1 HXMSG_TEE_BATCH_SIZE=1 npm run hxmsg:test:forward` |
+| 测试结果 | 1/1 PASS |
+| Fabric 用例 | `FABRIC-001` |
+| Fabric 区块 | 1617 |
+| h-xmsg requestID | `0x637f3689207817b685340d9363441d8ad076f675b463b04dd230ebb48df1ec31` |
+| Sepolia tx | `0x25a4c32e8b372006ebe2444a1b6e14abf06ada0f0cfab6edb33dd8d0fe220f3d` |
+| Sepolia gas | 702017 |
+| TEE 验证 | `fabric-hfsv` |
+| TEE quorum | 5/3 |
+| Fabric peer 背书 | 4 |
+| MSP | `Org1MSP` |
+| 目标执行 | `service-action` |
+
+结果文件：
+
+| 文件 | 内容 |
+|---|---|
+| `runtime/hxmsg-fabric-evm-results.json` | 完整 JSON 结果，包含 Fabric tx、h-FSV/TEE 验证、Sepolia tx、gas 和目标业务执行记录 |
+| `runtime/hxmsg-test-summary.md` | Markdown 汇总表 |
 
 ## 安全设计要点
 
