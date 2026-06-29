@@ -11,13 +11,15 @@ const {
   computeHXMsgDeliveryDigest,
   computeResponseDigest,
   assertEnvelopeBindings,
+  buildDeliveryMessage,
 } = require('../shared/hxmsg');
 const { buildHXMsgBatch } = require('../shared/hxmsg/batch');
 const { verifySourceFact } = require('./adapters');
-const { buildCertification, buildDigestCertification } = require('./core/certification');
 const { verifyReceiptProof } = require('../shared/evm/receipt-proof');
 const { maintainHeaderWindow } = require('./adapters/evm-melv-adapter');
 const { verifyFabricExecutionView } = require('./adapters/fabric-hfsv-adapter');
+const { buildSimulatedAttestationIdentityWithBLS } = require('../shared/tee/attestation');
+const { signShare, aggregateShares } = require('../shared/tee/bls-threshold');
 
 loadDotEnv();
 ensureRuntime();
@@ -73,6 +75,7 @@ function saveConsensusState() {
 let lastHeartbeatAt = Date.now();
 let electionDeadlineAt = Date.now() + electionTimeoutMs();
 const peerReplicationState = new Map();
+let currentTermBarrierInFlight = null;
 
 // ============ TEE Identity ============
 
@@ -89,6 +92,16 @@ if (!state) {
     sessions: state.sessions,
   };
   writeJSON(teeStateFile, state);
+}
+
+const CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes(process.env.TEE_CLUSTER_ID || 'HXMSG_TEE_CLUSTER_LOCAL_V1'));
+
+async function currentTEEIdentity() {
+  return buildSimulatedAttestationIdentityWithBLS({
+    privateKey: state.privateKey,
+    nodeID: teeNodeID,
+    epoch: Number(process.env.TEE_ATTESTATION_EPOCH || 1),
+  });
 }
 
 function clusterPeers() {
@@ -360,6 +373,38 @@ function makeBatchConsensusEntry({ batch, proposerID }) {
   };
 }
 
+function makeNoopConsensusEntry({ proposerID, reason = 'leader-current-term-barrier' } = {}) {
+  const index = lastLogIndex() + 1;
+  const term = Number(consensusState.currentTerm || 1);
+  const requestID = ethers.ZeroHash;
+  const digest = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['string', 'string', 'uint64', 'uint64'],
+      ['HXMSG_RAFT_NOOP_V1', reason, term, index]
+    )
+  );
+  const entryDigest = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
+      [term, index, requestID, digest, 'noop']
+    )
+  );
+  return {
+    index,
+    term,
+    proposerID,
+    requestID,
+    hmsgDigest: digest,
+    signingDigest: digest,
+    signatureDigestType: 'noop',
+    entryDigest,
+    status: 'pending',
+    noop: true,
+    reason,
+    createdAt: Math.floor(Date.now() / 1000),
+  };
+}
+
 function appendConsensusEntry(entry) {
   const existing = consensusState.log.find((item) => item.entryDigest === entry.entryDigest);
   if (existing) return existing;
@@ -396,6 +441,14 @@ function commitConsensusEntry(entryDigest) {
   }
   saveConsensusState();
   return entry;
+}
+
+function hasCommittedEntryInCurrentTerm() {
+  return consensusState.log.some((entry) => (
+    Number(entry.term) === Number(consensusState.currentTerm)
+    && Number(entry.index) <= Number(consensusState.commitIndex || 0)
+    && entry.status === 'committed'
+  ));
 }
 
 function assertEntryMatchesHXMsg(entry, hxmsg) {
@@ -464,7 +517,7 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
     const originDigest = originHxmsg.hmsgDigest || computeHXMsgDigest(originHxmsg);
     if (!sameHex(originDigest, response.originHmsgDigest)) throw new Error('response originHmsgDigest mismatch');
     if (!sameHex(originHxmsg.header.requestID, response.originRequestID)) throw new Error('response originRequestID mismatch');
-    const originTargetExecutionHash = originHxmsg.deliveryMessage?.targetExecutionHash || originHxmsg.payloadBinding.targetExecutionHash;
+    const originTargetExecutionHash = (originHxmsg.deliveryMessage || buildDeliveryMessage(originHxmsg)).targetExecutionHash;
     if (!sameHex(originTargetExecutionHash, response.targetExecutionHash)) {
       throw new Error('response targetExecutionHash mismatch');
     }
@@ -525,7 +578,8 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
 async function verifyHXMsgLocally({ hxmsg, helperData }) {
   assertEnvelopeBindings(hxmsg);
   hxmsg.hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
-  if (Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt) < Math.floor(Date.now() / 1000)) {
+  if (hxmsg.header.deliveryExpireAt === undefined) throw new Error('canonical header.deliveryExpireAt is required');
+  if (Number(hxmsg.header.deliveryExpireAt) < Math.floor(Date.now() / 1000)) {
     throw new Error('h-xmsg expired');
   }
   const verificationResult = await verifySourceFact({
@@ -562,30 +616,37 @@ async function verifyBatchLocally({ batch }) {
   return { rebuilt, verificationResults };
 }
 
-function buildCommittedCertification({ hxmsg, entry }) {
+async function buildCommittedBLSShare({ hxmsg, requestID, digest, entry }) {
   const committedEntry = consensusState.log.find((item) => item.entryDigest === entry.entryDigest);
   if (!committedEntry || committedEntry.status !== 'committed') {
     throw new Error('cannot sign before consensus commit');
   }
-  assertEntryMatchesHXMsg(committedEntry, hxmsg);
-  return buildCertification({
-    hxmsg,
-    privateKey: state.privateKey,
-  });
-}
-
-function buildCommittedDigestCertification({ requestID, digest, entry }) {
-  const committedEntry = consensusState.log.find((item) => item.entryDigest === entry.entryDigest);
-  if (!committedEntry || committedEntry.status !== 'committed') {
-    throw new Error('cannot sign before consensus commit');
+  if (hxmsg) {
+    assertEntryMatchesHXMsg(committedEntry, hxmsg);
+  } else {
+    assertEntryMatchesDigest(committedEntry, requestID, digest);
   }
-  assertEntryMatchesDigest(committedEntry, requestID, digest);
-  return buildDigestCertification({
+  const identity = await currentTEEIdentity();
+  const share = await signShare({
     requestID,
-    digest,
+    digest: committedEntry.signingDigest || committedEntry.hmsgDigest,
     privateKey: state.privateKey,
-    signatureDigestType: committedEntry.signatureDigestType || 'responseDigest',
+    nodeID: teeNodeID,
   });
+  return {
+    nodeID: teeNodeID,
+    teeAddress: state.address,
+    signerIndex: identity.signerIndex,
+    blsPublicKey: identity.blsPublicKey,
+    blsPublicKeyHash: identity.blsPublicKeyHash,
+    requestID: committedEntry.requestID,
+    hmsgDigest: committedEntry.hmsgDigest,
+    signingDigest: committedEntry.signingDigest || committedEntry.hmsgDigest,
+    signatureDigestType: committedEntry.signatureDigestType || 'hmsgDigest',
+    signature: share.signature,
+    committedTerm: committedEntry.term,
+    committedIndex: committedEntry.index,
+  };
 }
 
 async function startElection() {
@@ -785,16 +846,36 @@ async function replicateEntryToRaftQuorum(entry) {
   return { committed: true, committedEntry, appendAcks, commitAcks };
 }
 
+async function ensureCurrentTermCommitBarrier() {
+  if (clusterPeers().length === 0) return null;
+  if (consensusState.role !== 'leader') throw new Error('current term barrier requires leader role');
+  if (hasCommittedEntryInCurrentTerm()) return null;
+  if (currentTermBarrierInFlight) return currentTermBarrierInFlight;
+  const barrier = makeNoopConsensusEntry({ proposerID: teeNodeID });
+  currentTermBarrierInFlight = (async () => {
+    try {
+      const result = await replicateEntryToRaftQuorum(barrier);
+      const accepted = (result.appendAcks || []).filter((ack) => ack.accepted);
+      if (!result.committed || accepted.length < raftMajority()) {
+        throw new Error(`Raft current-term barrier not committed: ${accepted.length}/${raftMajority()}`);
+      }
+      return result;
+    } finally {
+      currentTermBarrierInFlight = null;
+    }
+  })();
+  return currentTermBarrierInFlight;
+}
+
 async function collectCommittedCertifications({ hxmsg, committedEntry, commitAcks }) {
-  const localCommitCert = hxmsg
-    ? buildCommittedCertification({ hxmsg, entry: committedEntry })
-    : buildCommittedDigestCertification({
-      requestID: committedEntry.requestID,
-      digest: committedEntry.hmsgDigest,
-      entry: committedEntry,
-    });
-  const certifications = [localCommitCert];
-  const certAcks = [{ nodeID: teeNodeID, signed: true, teeCertification: localCommitCert }];
+  const localShare = await buildCommittedBLSShare({
+    hxmsg,
+    requestID: committedEntry.requestID,
+    digest: committedEntry.hmsgDigest,
+    entry: committedEntry,
+  });
+  const shares = [localShare];
+  const certAcks = [{ nodeID: teeNodeID, signed: true, blsShare: localShare }];
   await Promise.all(clusterPeerDefs().map(async (peer) => {
     const committed = commitAcks.find((ack) => ack.committed && ack.nodeID === peer.id);
     if (!committed) return;
@@ -809,17 +890,31 @@ async function collectCommittedCertifications({ hxmsg, committedEntry, commitAck
       });
       if (!resp.ok) throw new Error(`status ${resp.status}`);
       const data = await resp.json();
-      certifications.push(data.teeCertification);
-      certAcks.push({ nodeID: data.nodeID, signed: true, teeCertification: data.teeCertification });
+      shares.push(data.blsShare);
+      certAcks.push({ nodeID: data.nodeID, signed: true, blsShare: data.blsShare });
     } catch (error) {
       certAcks.push({ nodeID: peer.id, signed: false, error: error.message });
     }
   }));
-  return { certifications, certAcks };
+  const selectedShares = shares
+    .filter((share) => share && sameHex(share.signingDigest, committedEntry.signingDigest || committedEntry.hmsgDigest))
+    .slice(0, clusterThreshold());
+  const clusterCertificate = await aggregateShares({
+    shares: selectedShares,
+    clusterID: CLUSTER_ID,
+    epoch: Number(process.env.TEE_ATTESTATION_EPOCH || 1),
+    threshold: clusterThreshold(),
+    signingDigest: committedEntry.signingDigest || committedEntry.hmsgDigest,
+    signatureDigestType: committedEntry.signatureDigestType || 'hmsgDigest',
+    term: committedEntry.term,
+    index: committedEntry.index,
+  });
+  return { clusterCertificate, shares: selectedShares, certAcks };
 }
 
 async function collectClusterDigestCertifications({ response, helperData, localResult }) {
   const threshold = clusterThreshold();
+  const barrierResult = await ensureCurrentTermCommitBarrier();
   const requestID = response.originRequestID;
   const digest = computeResponseDigest(response);
   const entry = makeDigestConsensusEntry({
@@ -845,12 +940,16 @@ async function collectClusterDigestCertifications({ response, helperData, localR
       reached: accepted.length,
       quorumReached: false,
       hmsgDigest: digest,
-      certifications: [],
       appendAcks: raftResult.appendAcks || [],
+      barrierEntry: barrierResult?.committedEntry ? {
+        index: barrierResult.committedEntry.index,
+        term: barrierResult.committedEntry.term,
+        entryDigest: barrierResult.committedEntry.entryDigest,
+      } : undefined,
       verificationResults,
     };
   }
-  const { certifications, certAcks } = await collectCommittedCertifications({
+  const { clusterCertificate, shares, certAcks } = await collectCommittedCertifications({
     hxmsg: null,
     committedEntry: raftResult.committedEntry,
     commitAcks: raftResult.commitAcks || [],
@@ -865,14 +964,20 @@ async function collectClusterDigestCertifications({ response, helperData, localR
     threshold,
     raftMajority: raftMajority(),
     totalConfigured: clusterSize(),
-    reached: certifications.length,
-    quorumReached: certifications.length >= threshold,
+    reached: clusterCertificate.participantCount,
+    quorumReached: clusterCertificate.participantCount >= threshold,
     hmsgDigest: digest,
     signingDigest: digest,
     signatureDigestType: 'responseDigest',
-    certifications,
+    ...clusterCertificate,
+    shares,
     appendAcks: raftResult.appendAcks || [],
     commitAcks: raftResult.commitAcks || [],
+    barrierEntry: barrierResult?.committedEntry ? {
+      index: barrierResult.committedEntry.index,
+      term: barrierResult.committedEntry.term,
+      entryDigest: barrierResult.committedEntry.entryDigest,
+    } : undefined,
     certAcks,
     verificationResults,
   };
@@ -880,6 +985,7 @@ async function collectClusterDigestCertifications({ response, helperData, localR
 
 async function collectClusterAttestations({ hxmsg, helperData, localResult }) {
   const threshold = clusterThreshold();
+  const barrierResult = await ensureCurrentTermCommitBarrier();
   const entry = makeConsensusEntry({ hxmsg, helperData, proposerID: teeNodeID });
   const raftResult = await replicateEntryToRaftQuorum(entry);
   const verificationResults = [{ nodeID: teeNodeID, ...localResult.verificationResult }];
@@ -897,13 +1003,17 @@ async function collectClusterAttestations({ hxmsg, helperData, localResult }) {
       reached: accepted.length,
       quorumReached: false,
       hmsgDigest: entry.hmsgDigest,
-      certifications: [],
       appendAcks: raftResult.appendAcks || [],
+      barrierEntry: barrierResult?.committedEntry ? {
+        index: barrierResult.committedEntry.index,
+        term: barrierResult.committedEntry.term,
+        entryDigest: barrierResult.committedEntry.entryDigest,
+      } : undefined,
       verificationResults,
     };
   }
 
-  const { certifications, certAcks } = await collectCommittedCertifications({
+  const { clusterCertificate, shares, certAcks } = await collectCommittedCertifications({
     hxmsg,
     committedEntry: raftResult.committedEntry,
     commitAcks: raftResult.commitAcks || [],
@@ -918,14 +1028,20 @@ async function collectClusterAttestations({ hxmsg, helperData, localResult }) {
     threshold,
     raftMajority: raftMajority(),
     totalConfigured: clusterSize(),
-    reached: certifications.length,
-    quorumReached: certifications.length >= threshold,
+    reached: clusterCertificate.participantCount,
+    quorumReached: clusterCertificate.participantCount >= threshold,
     hmsgDigest: raftResult.committedEntry.hmsgDigest,
     signingDigest: raftResult.committedEntry.signingDigest,
     signatureDigestType: raftResult.committedEntry.signatureDigestType,
-    certifications,
+    ...clusterCertificate,
+    shares,
     appendAcks: raftResult.appendAcks || [],
     commitAcks: raftResult.commitAcks || [],
+    barrierEntry: barrierResult?.committedEntry ? {
+      index: barrierResult.committedEntry.index,
+      term: barrierResult.committedEntry.term,
+      entryDigest: barrierResult.committedEntry.entryDigest,
+    } : undefined,
     certAcks,
     verificationResults,
   };
@@ -933,6 +1049,7 @@ async function collectClusterAttestations({ hxmsg, helperData, localResult }) {
 
 async function collectClusterBatchCertifications({ batch, localResult }) {
   const threshold = clusterThreshold();
+  const barrierResult = await ensureCurrentTermCommitBarrier();
   const entry = makeBatchConsensusEntry({ batch, proposerID: teeNodeID });
   const raftResult = await replicateEntryToRaftQuorum(entry);
   const verificationResults = [{ nodeID: teeNodeID, batchVerified: true, items: localResult.verificationResults }];
@@ -952,13 +1069,17 @@ async function collectClusterBatchCertifications({ batch, localResult }) {
       batchID: batch.batchID,
       batchRoot: batch.batchRoot,
       batchSigningDigest: batch.batchSigningDigest,
-      certifications: [],
       appendAcks: raftResult.appendAcks || [],
+      barrierEntry: barrierResult?.committedEntry ? {
+        index: barrierResult.committedEntry.index,
+        term: barrierResult.committedEntry.term,
+        entryDigest: barrierResult.committedEntry.entryDigest,
+      } : undefined,
       verificationResults,
     };
   }
 
-  const { certifications, certAcks } = await collectCommittedCertifications({
+  const { clusterCertificate, shares, certAcks } = await collectCommittedCertifications({
     hxmsg: null,
     committedEntry: raftResult.committedEntry,
     commitAcks: raftResult.commitAcks || [],
@@ -973,17 +1094,23 @@ async function collectClusterBatchCertifications({ batch, localResult }) {
     threshold,
     raftMajority: raftMajority(),
     totalConfigured: clusterSize(),
-    reached: certifications.length,
-    quorumReached: certifications.length >= threshold,
+    reached: clusterCertificate.participantCount,
+    quorumReached: clusterCertificate.participantCount >= threshold,
     batchID: batch.batchID,
     batchRoot: batch.batchRoot,
     batchSize: batch.hxmsgs.length,
     batchSigningDigest: batch.batchSigningDigest,
     signingDigest: batch.batchSigningDigest,
     signatureDigestType: 'batchDigest',
-    certifications,
+    ...clusterCertificate,
+    shares,
     appendAcks: raftResult.appendAcks || [],
     commitAcks: raftResult.commitAcks || [],
+    barrierEntry: barrierResult?.committedEntry ? {
+      index: barrierResult.committedEntry.index,
+      term: barrierResult.committedEntry.term,
+      entryDigest: barrierResult.committedEntry.entryDigest,
+    } : undefined,
     certAcks,
     verificationResults,
   };
@@ -991,8 +1118,16 @@ async function collectClusterBatchCertifications({ batch, localResult }) {
 
 // ============ Routes ============
 
-app.get('/pubkey', (_req, res) => {
-  res.json({ nodeID: teeNodeID, address: state.address });
+app.get('/pubkey', async (_req, res) => {
+  res.json({
+    nodeID: teeNodeID,
+    address: state.address,
+    attestation: await currentTEEIdentity(),
+  });
+});
+
+app.get('/identity', async (_req, res) => {
+  res.json(await currentTEEIdentity());
 });
 
 app.get('/chain-state', (_req, res) => {
@@ -1096,7 +1231,15 @@ app.post('/internal/raft/append-entries', async (req, res) => {
     const verificationResults = [];
     for (const entry of entries) {
       let localResult;
-      if (entry.hxmsg) {
+      if (entry.noop) {
+        localResult = {
+          verificationResult: {
+            verified: true,
+            adapter: 'raft-noop',
+            reason: entry.reason || 'leader-current-term-barrier',
+          },
+        };
+      } else if (entry.hxmsg) {
         assertEntryMatchesHXMsg(entry, entry.hxmsg);
         localResult = await verifyHXMsgLocally({
           hxmsg: entry.hxmsg,
@@ -1113,7 +1256,7 @@ app.post('/internal/raft/append-entries', async (req, res) => {
         assertEntryMatchesBatch(entry, entry.batch);
         localResult = { verificationResult: await verifyBatchLocally({ batch: entry.batch }) };
       } else {
-        throw new Error('raft entry missing hxmsg, response, or batch');
+        throw new Error('raft entry missing hxmsg, response, batch, or noop');
       }
       verificationResults.push({ entryDigest: entry.entryDigest, ...localResult.verificationResult });
       appendConsensusEntry(entry);
@@ -1146,20 +1289,23 @@ app.post('/internal/raft/append-entries', async (req, res) => {
   }
 });
 
-app.post('/internal/raft/sign-committed', (req, res) => {
+app.post('/internal/raft/sign-committed', async (req, res) => {
   try {
     const { entryDigest } = req.body;
     if (!entryDigest) throw new Error('entryDigest is required');
     const entry = consensusState.log.find((item) => item.entryDigest === entryDigest);
     if (!entry) throw new Error(`entry not found: ${entryDigest}`);
     if (entry.status !== 'committed') throw new Error('entry is not committed');
-    const teeCertification = entry.hxmsg
-      ? buildCommittedCertification({ hxmsg: entry.hxmsg, entry })
-      : buildCommittedDigestCertification({ requestID: entry.requestID, digest: entry.hmsgDigest, entry });
+    const blsShare = await buildCommittedBLSShare({
+      hxmsg: entry.hxmsg,
+      requestID: entry.requestID,
+      digest: entry.hmsgDigest,
+      entry,
+    });
     res.json({
       nodeID: teeNodeID,
       entryDigest,
-      teeCertification,
+      blsShare,
     });
   } catch (error) {
     res.status(500).json({ nodeID: teeNodeID, error: error.message });
@@ -1190,8 +1336,6 @@ app.post('/attest', async (req, res) => {
         throw new Error(`TEE cluster quorum not reached: ${teeClusterCertification.reached}/${teeClusterCertification.threshold}`);
       }
       res.json({
-        teePubKey: teeClusterCertification.certifications[0].teeAddress,
-        teeCertification: teeClusterCertification.certifications[0],
         teeClusterCertification,
         verificationResult: localResult.verificationResult,
       });
@@ -1272,8 +1416,6 @@ app.post('/attest-response', async (req, res) => {
     }
     res.json({
       responseDigest: computeResponseDigest(response),
-      teePubKey: teeClusterCertification.certifications[0].teeAddress,
-      teeCertification: teeClusterCertification.certifications[0],
       teeClusterCertification,
       verificationResult: localVerification,
     });
@@ -1285,6 +1427,13 @@ app.post('/attest-response', async (req, res) => {
 
 async function sendHeartbeats() {
   if (consensusState.role !== 'leader') return;
+  if (!hasCommittedEntryInCurrentTerm()) {
+    try {
+      await ensureCurrentTermCommitBarrier();
+    } catch (error) {
+      console.error(`[${teeNodeID}] current-term barrier failed:`, error.message);
+    }
+  }
   await Promise.all(clusterPeerDefs().map(async (peer) => {
     try {
       await sendAppendEntries(peer, makeAppendEntriesPayload({

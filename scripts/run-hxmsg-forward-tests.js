@@ -11,10 +11,13 @@ const {
   FeedbackType,
   hashJson,
   toMinimalHXMsg,
+  getExecutionData,
+  getAuditRecord,
 } = require('../shared/hxmsg');
 const { buildHXMsgBatch } = require('../shared/hxmsg/batch');
 const { buildHXMsgFromFabricEvent, TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { writeJSON } = require('../shared/utils');
+const { registerEVMTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 const TEST_DATA = path.join(__dirname, '..', 'test-data', 'fabric-real-cases.json');
@@ -30,6 +33,8 @@ const DEFAULT_CASE_TOTAL = Number(process.env.HXMSG_CASE_TOTAL || 8);
 const CASE_LIMIT = Number(process.env.HXMSG_CASE_LIMIT || DEFAULT_CASE_TOTAL);
 const FABRIC_EMIT_DELAY_MS = Number(process.env.HXMSG_FABRIC_EMIT_DELAY_MS || 1500);
 const CASE_RUN_ID = process.env.HXMSG_CASE_RUN_ID || '';
+const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes32,bytes,bytes32,uint64,uint64)';
+const TEE_REGISTRATION_ABI = '(address teeAddress,uint16 signerIndex,bytes32 enclavePubKeyHash,bytes32 blsPublicKeyHash,bytes32 measurement,bytes32 quoteHash,bytes32 initialSyncStateHash,uint64 epoch,uint64 notAfter,bytes attestationSignature)';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -131,9 +136,8 @@ async function relayHXMsg(hxmsg, teeUrl) {
   if (!cluster?.quorumReached) {
     throw new Error(`TEE cluster quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
   }
-  const certs = cluster.certifications || [];
-  if (certs.length < Number(cluster.threshold || 1)) {
-    throw new Error(`Committed TEE certifications below threshold: ${certs.length}/${cluster.threshold}`);
+  if (Number(cluster.participantCount || 0) < Number(cluster.threshold || 1)) {
+    throw new Error(`Committed TEE BLS participants below threshold: ${cluster.participantCount}/${cluster.threshold}`);
   }
 
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
@@ -143,32 +147,24 @@ async function relayHXMsg(hxmsg, teeUrl) {
 
   const registry = new ethers.Contract(
     deployment.teeRegistry,
-    ['function trustedTEE(address) view returns (bool)', 'function registerTEE(address) external'],
+    [
+      'function isActiveTEE(address) view returns (bool)',
+      `function registerTEE(${TEE_REGISTRATION_ABI}) external`,
+    ],
     deployer
   );
-  for (const cert of certs) {
-    if (!(await registry.trustedTEE(cert.teeAddress))) {
-      const tx = await registry.registerTEE(cert.teeAddress);
-      await tx.wait();
-    }
-  }
+  await registerEVMTEEs({ registry, certificate: cluster, teeURLs: TEE_URLS });
 
   const gateway = new ethers.Contract(
     deployment.hxmsgGateway,
-    ['function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,(bytes32,bytes32,address,uint64,bytes)[]) external'],
+    [`function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,${CLUSTER_CERT_ABI}) external`],
     deployer
   );
   const tx = await gateway.executeHXMsgMinimalCluster(
     toMinimalHXMsg(hxmsg),
     deployment.targetContract,
-    hxmsg.callData,
-    certs.map((cert) => [
-      cert.requestID,
-      cert.hmsgDigest,
-      cert.teeAddress,
-      cert.verifiedAt,
-      cert.signature,
-    ])
+    getExecutionData(hxmsg).callData,
+    clusterCertificateTuple(cluster)
   );
   const receipt = await tx.wait();
   return {
@@ -190,9 +186,8 @@ async function relayHXMsgBatch(hxmsgs, teeUrl) {
   if (!cluster?.quorumReached) {
     throw new Error(`TEE batch quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
   }
-  const certs = cluster.certifications || [];
-  if (certs.length < Number(cluster.threshold || 1)) {
-    throw new Error(`Committed TEE batch certifications below threshold: ${certs.length}/${cluster.threshold}`);
+  if (Number(cluster.participantCount || 0) < Number(cluster.threshold || 1)) {
+    throw new Error(`Committed TEE batch BLS participants below threshold: ${cluster.participantCount}/${cluster.threshold}`);
   }
 
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
@@ -202,15 +197,13 @@ async function relayHXMsgBatch(hxmsgs, teeUrl) {
 
   const registry = new ethers.Contract(
     deployment.teeRegistry,
-    ['function trustedTEE(address) view returns (bool)', 'function registerTEE(address) external'],
+    [
+      'function isActiveTEE(address) view returns (bool)',
+      `function registerTEE(${TEE_REGISTRATION_ABI}) external`,
+    ],
     deployer
   );
-  for (const cert of certs) {
-    if (!(await registry.trustedTEE(cert.teeAddress))) {
-      const tx = await registry.registerTEE(cert.teeAddress);
-      await tx.wait();
-    }
-  }
+  await registerEVMTEEs({ registry, certificate: cluster, teeURLs: TEE_URLS });
 
   const built = buildHXMsgBatch(hxmsgs);
   if (built.batchID.toLowerCase() !== teeResp.data.batchID.toLowerCase()) throw new Error('TEE batchID mismatch');
@@ -218,28 +211,22 @@ async function relayHXMsgBatch(hxmsgs, teeUrl) {
 
   const gateway = new ethers.Contract(
     deployment.hxmsgGateway,
-    ['function executeFabricEVMCompactBatchCluster((bytes32 requestID,bytes32 hmsgDigest,bytes32 callDataHash,uint64 expireAt)[],address,(uint16,bytes32,bytes32,address,int256,bytes32,bool)[],bytes32,bytes32,(bytes32,bytes32,address,uint64,bytes)[]) external'],
+    [`function executeFabricEVMCompactBatchCluster((bytes32 requestID,bytes32 hmsgDigest,bytes32 callDataHash,uint64 expireAt)[],address,(uint16,bytes32,bytes32,address,int256,bytes32,bool)[],bytes32,bytes32,${CLUSTER_CERT_ABI}) external`],
     deployer
   );
   const compactDeliveries = hxmsgs.map((hxmsg) => [
     hxmsg.header.requestID,
     hxmsg.hmsgDigest,
     hxmsg.targetAction.callDataHash,
-    hxmsg.header.expireAt,
+    hxmsg.header.deliveryExpireAt,
   ]);
   const tx = await gateway.executeFabricEVMCompactBatchCluster(
     compactDeliveries,
     deployment.targetContract,
-    hxmsgs.map((hxmsg) => compactBusinessCallTuple(hxmsg.compactCall)),
+    hxmsgs.map((hxmsg) => compactBusinessCallTuple(getExecutionData(hxmsg).compactCall)),
     built.batchID,
     built.batchRoot,
-    certs.map((cert) => [
-      cert.requestID,
-      cert.hmsgDigest,
-      cert.teeAddress,
-      cert.verifiedAt,
-      cert.signature,
-    ]),
+    clusterCertificateTuple(cluster),
     process.env.HXMSG_EVM_GAS_LIMIT ? { gasLimit: BigInt(process.env.HXMSG_EVM_GAS_LIMIT) } : {}
   );
   const receipt = await tx.wait();
@@ -423,7 +410,7 @@ async function main() {
           challengeResponseExpected: false,
         };
         caseResult.requestID = hxmsg.header.requestID;
-        caseResult.srcHeight = hxmsg.srcHeight;
+        caseResult.srcHeight = getAuditRecord(hxmsg).srcHeight;
         caseResult.hmsgDigest = hxmsg.hmsgDigest;
         caseResult.feedback = hxmsg.feedback;
         caseResult.atomicity = hxmsg.atomicity || null;
@@ -431,7 +418,7 @@ async function main() {
         caseResult.atomicityRequired = Boolean(hxmsg.atomicity?.required);
         caseResult.protocolCheck = protocolCheck;
 
-        console.log(`  h-xmsg ${hxmsg.header.requestID}, block ${hxmsg.srcHeight}`);
+        console.log(`  h-xmsg ${hxmsg.header.requestID}, block ${getAuditRecord(hxmsg).srcHeight}`);
         pending.push({ index: i, hxmsg, caseResult, expectedFields, t0 });
       } catch (error) {
         fail += 1;
@@ -453,9 +440,10 @@ async function main() {
           const item = batch[j];
           const { hxmsg, caseResult, expectedFields, t0 } = item;
           const targetState = await queryTargetState(caseResult.requestID);
-          const payloadHash = ethers.keccak256(hxmsg.callData);
+          const executionData = getExecutionData(hxmsg);
+          const payloadHash = ethers.keccak256(executionData.callData);
           const expected = expectedFields;
-          const compact = hxmsg.compactCall;
+          const compact = executionData.compactCall;
           const verification = relay.verificationResults[j] || {};
           const fieldCheck = {
             requestIDMatch: targetState.business.requestID === caseResult.requestID,

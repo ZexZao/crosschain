@@ -24,9 +24,11 @@ const {
   hashJson,
   AtomicityMode,
   CommitmentType,
+  getExecutionData,
 } = require('../shared/hxmsg');
 const { encodeCompactBusinessCall, normalizeBusinessPayload } = require('../shared/xmsg');
 const { writeJSON } = require('../shared/utils');
+const { registerFabricTEEs } = require('../shared/tee/registration');
 
 loadDotEnv();
 
@@ -52,6 +54,7 @@ const PROOF_CONCURRENCY = Number(process.env.HXMSG_PROOF_CONCURRENCY || (USE_SEP
 const TEE_CONCURRENCY = Number(process.env.HXMSG_TEE_CONCURRENCY || 1);
 const FABRIC_CONCURRENCY = Number(process.env.HXMSG_FABRIC_CONCURRENCY || 2);
 const DEFAULT_CASE_TOTAL = Number(process.env.HXMSG_CASE_TOTAL || 64);
+const TEE_BATCH_SIZE = Math.max(1, Number(process.env.HXMSG_TEE_BATCH_SIZE || 1));
 const NO_WRITE_RESULTS = process.env.HXMSG_NO_WRITE_RESULTS === 'true';
 
 const SOURCE_ABI = [
@@ -483,10 +486,11 @@ async function attestWithTEE({ item, teeUrl }) {
       },
     }, { timeout: Number(process.env.HXMSG_TEE_TIMEOUT_MS || 60000) });
     result.timings.teeAttestMs = monotonicMs() - teeStartedAt;
-    const voucher = teeResp.data.teeClusterCertification || teeResp.data.teeCertification;
+    const voucher = teeResp.data.teeClusterCertification;
+    if (!voucher?.quorumReached) throw new Error(`TEE quorum not reached: ${voucher?.reached || 0}/${voucher?.threshold || '?'}`);
     result.teeVerification = teeResp.data.verificationResult;
     result.teeCluster = teeResp.data.teeClusterCertification;
-    console.log(`${tc.caseId} TEE quorum=${result.teeCluster ? `${result.teeCluster.reached}/${result.teeCluster.threshold}` : 'single'}`);
+    console.log(`${tc.caseId} TEE quorum=${result.teeCluster.reached}/${result.teeCluster.threshold}`);
     return { ...item, hxmsg, voucher };
   } catch (error) {
     result.error = error.response?.data?.error || error.message;
@@ -496,21 +500,67 @@ async function attestWithTEE({ item, teeUrl }) {
   }
 }
 
-async function registerTrustedTEEs(contract, attestedItems) {
-  const addresses = new Set();
-  for (const item of attestedItems) {
-    const voucher = item.voucher;
-    const certs = voucher?.certifications || (voucher ? [voucher] : []);
-    for (const cert of certs) {
-      if (cert?.teeAddress) addresses.add(ethers.getAddress(cert.teeAddress));
+function chunkItems(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
+async function attestBatchWithTEE({ items, teeUrl }) {
+  const eligible = items.filter((item) => !item.sourceFailed && !item.error && item.hxmsg && item.receiptProof);
+  if (eligible.length === 0) return items;
+  const teeStartedAt = monotonicMs();
+  try {
+    const teeResp = await axios.post(`${teeUrl}/attest-batch`, {
+      hxmsgs: eligible.map((item) => item.hxmsg),
+      helperDataList: eligible.map((item) => ({
+        evmReceiptProof: item.receiptProof,
+        committeeHeaderUpdate: item.committeeHeaderUpdate,
+        syncCommitteeUpdate: item.syncCommitteeUpdate,
+        evmRpc: TEE_EVM_RPC,
+      })),
+    }, { timeout: Number(process.env.HXMSG_TEE_TIMEOUT_MS || 120000) });
+    const elapsed = monotonicMs() - teeStartedAt;
+    const batchCert = teeResp.data.teeBatchCertification;
+    if (!batchCert?.quorumReached) throw new Error(`TEE batch quorum not reached: ${batchCert?.reached || 0}/${batchCert?.threshold || '?'}`);
+    eligible.forEach((item, index) => {
+      item.result.timings.teeAttestMs = elapsed;
+      item.result.teeVerification = teeResp.data.verificationResults?.[index] || null;
+      item.result.teeCluster = batchCert;
+      item.result.teeBatch = {
+        batchID: teeResp.data.batchID,
+        batchRoot: teeResp.data.batchRoot,
+        batchSize: teeResp.data.batchSize,
+        batchSigningDigest: teeResp.data.batchSigningDigest,
+      };
+      item.voucher = {
+        ...batchCert,
+        batchID: teeResp.data.batchID,
+        batchRoot: teeResp.data.batchRoot,
+        batchSize: teeResp.data.batchSize,
+        batchSigningDigest: teeResp.data.batchSigningDigest,
+        merkleProof: teeResp.data.merkleProofs?.[index] || [],
+      };
+      console.log(`${item.tc.caseId} TEE batch quorum=${batchCert.reached}/${batchCert.threshold} batchSize=${teeResp.data.batchSize}`);
+    });
+    return items;
+  } catch (error) {
+    const message = error.response?.data?.error || error.message;
+    for (const item of eligible) {
+      item.result.error = message;
+      item.result.errorDetail = error.response?.data || null;
+      console.log(`${item.tc.caseId} TEE BATCH ERROR ${message}`);
     }
+    return items;
   }
+}
+
+async function registerTrustedTEEs(contract, attestedItems) {
+  const certificates = attestedItems.map((item) => item.voucher).filter(Boolean);
   const startedAt = monotonicMs();
-  for (const address of addresses) {
-    await contract.submitTransaction('RegisterTrustedTEE', address);
-  }
+  const registration = await registerFabricTEEs({ contract, certificates, teeURLs: TEE_URLS });
   return {
-    teeAddresses: Array.from(addresses),
+    teeAddresses: registration.teeAddresses,
     elapsedMs: monotonicMs() - startedAt,
   };
 }
@@ -537,7 +587,7 @@ async function executeOnFabric({ item, contract, sourceView }) {
     const fabricResp = await contract.submitTransaction(
       'ExecuteHXMsg',
       JSON.stringify(hxmsg),
-      hxmsg.callData,
+      getExecutionData(hxmsg).callData,
       JSON.stringify(voucher)
     );
     result.timings.fabricExecuteMs = monotonicMs() - fabricStartedAt;
@@ -609,6 +659,7 @@ function writeSummary({ output, finalityTimeoutMs, sharedFinality }) {
       `**通过率**：${output.pass}/${output.total}\n` +
       `**运行模式**：${output.executionMode}\n` +
       `**并发配置**：source=${output.concurrency.sourceTx}, proof=${output.concurrency.proof}, tee=${output.concurrency.tee}, fabric=${output.concurrency.fabric}\n` +
+      `**TEE 批签名大小**：${output.teeBatchSize || 1}\n` +
       `**finality 等待上限**：${finalityTimeoutMs} ms\n` +
       `**共享 finality 等待**：${sharedFinality ? `${sharedFinality.waitMs} ms, finalizedHeight=${sharedFinality.finalizedHeight}` : '-'}\n\n` +
       `| 用例 | RESPONSE | Atomicity | EVM tx | EVM Gas | Source tx ms | Finality wait ms | Proof ms | TEE ms | Fabric ms | Total ms | TEE quorum | Fabric 状态 | 状态 |\n` +
@@ -747,10 +798,17 @@ async function main() {
     return buildProofItem({ item, provider, deployment, sharedSyncCommitteeUpdate });
   });
 
-  const attestedItems = await mapLimit(proofItems, TEE_CONCURRENCY, async (item) => {
-    if (item.sourceFailed || item.error) return item;
-    return attestWithTEE({ item, teeUrl });
-  });
+  let attestedItems;
+  if (TEE_BATCH_SIZE > 1) {
+    const batches = chunkItems(proofItems, TEE_BATCH_SIZE);
+    const attestedBatches = await mapLimit(batches, TEE_CONCURRENCY, (items) => attestBatchWithTEE({ items, teeUrl }));
+    attestedItems = attestedBatches.flat();
+  } else {
+    attestedItems = await mapLimit(proofItems, TEE_CONCURRENCY, async (item) => {
+      if (item.sourceFailed || item.error) return item;
+      return attestWithTEE({ item, teeUrl });
+    });
+  }
 
   const { gateway, contract } = await getFabricContract();
   try {
@@ -787,6 +845,7 @@ async function main() {
       tee: TEE_CONCURRENCY,
       fabric: FABRIC_CONCURRENCY,
     },
+    teeBatchSize: TEE_BATCH_SIZE,
     sharedFinality: latestSharedFinality,
     syncCommitteeState,
     elapsedMs: monotonicMs() - startedAt,

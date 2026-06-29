@@ -5,32 +5,19 @@ const { toCanonicalHXMsg } = require('./canonical');
 function getSourceEvidence(hxmsgOrEnvelope, helperData = {}) {
   return hxmsgOrEnvelope?.hxmsgEnvelope?.sourceEvidence
     || hxmsgOrEnvelope?.sourceEvidence
-    || {
-      encodedRef: hxmsgOrEnvelope?.sourceRef?.encodedRef,
-      sourceRecord: hxmsgOrEnvelope?.sourceRecord,
-      proof: helperData,
-      helperData,
-    };
+    || { proof: helperData, helperData };
 }
 
 function getExecutionData(hxmsgOrEnvelope) {
   return hxmsgOrEnvelope?.hxmsgEnvelope?.executionData
     || hxmsgOrEnvelope?.executionData
-    || {
-      callData: hxmsgOrEnvelope?.callData,
-      compactCall: hxmsgOrEnvelope?.compactCall,
-      businessPayload: hxmsgOrEnvelope?.callDataDecoded,
-    };
+    || {};
 }
 
 function getAuditRecord(hxmsgOrEnvelope) {
   return hxmsgOrEnvelope?.hxmsgEnvelope?.auditRecord
     || hxmsgOrEnvelope?.auditRecord
-    || {
-      txId: hxmsgOrEnvelope?.txId,
-      srcHeight: hxmsgOrEnvelope?.srcHeight,
-      proofMeta: hxmsgOrEnvelope?.proofMeta,
-    };
+    || {};
 }
 
 function buildHXMsgEnvelope({

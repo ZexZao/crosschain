@@ -3,6 +3,7 @@ const { stableStringify } = require('./codec');
 const { toCanonicalHXMsg } = require('./canonical');
 
 function normalizeFeedback(feedback = {}) {
+  feedback = feedback || {};
   return {
     required: Boolean(feedback.required),
     expectedMsgType: Number(feedback.expectedMsgType || 0),
@@ -12,6 +13,7 @@ function normalizeFeedback(feedback = {}) {
 }
 
 function normalizeAtomicity(atomicity = {}) {
+  atomicity = atomicity || {};
   return {
     required: Boolean(atomicity.required),
     mode: Number(atomicity.mode || 0),

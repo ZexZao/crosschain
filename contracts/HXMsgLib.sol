@@ -60,12 +60,18 @@ library HXMsgLib {
         uint64 expireAt;
     }
 
-    struct TEECertification {
-        bytes32 requestID;
-        bytes32 hmsgDigest;
-        address teeAddress;
-        uint64 verifiedAt;
-        bytes signature;
+    struct ClusterCertificate {
+        bytes32 clusterID;
+        uint64 epoch;
+        uint16 threshold;
+        uint16 participantCount;
+        uint256 signerBitmap;
+        bytes32 selectedPublicKeyHash;
+        bytes32 aggregatePublicKeyHash;
+        bytes aggregateSignature;
+        bytes32 signingDigest;
+        uint64 committedTerm;
+        uint64 committedIndex;
     }
 
     struct Atomicity {

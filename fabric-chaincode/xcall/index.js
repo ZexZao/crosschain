@@ -4,6 +4,9 @@ const { Contract } = require('fabric-contract-api');
 const { ethers } = require('ethers');
 
 const ABI = ethers.AbiCoder.defaultAbiCoder();
+const TEE_CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes('HXMSG_TEE_CLUSTER_LOCAL_V1'));
+const BATCH_DOMAIN = ethers.id('HXMSG_BATCH_V1');
+let blsPromise = null;
 
 function parseJson(value, fieldName) {
   try {
@@ -13,46 +16,36 @@ function parseJson(value, fieldName) {
   }
 }
 
-function computeCoreHash(xmsg, teePubKey) {
+function strip0x(value) {
+  return String(value || '').startsWith('0x') ? String(value).slice(2) : String(value || '');
+}
+
+function hexToBytes(hex) {
+  return Uint8Array.from(Buffer.from(strip0x(hex), 'hex'));
+}
+
+async function getBLS() {
+  if (!blsPromise) {
+    blsPromise = import('@chainsafe/bls/herumi').then(async (mod) => {
+      const bls = mod.default || mod;
+      if (typeof bls.init === 'function') await bls.init();
+      return bls;
+    });
+  }
+  return blsPromise;
+}
+
+function selectedPublicKeyHash(participants) {
+  const sorted = [...participants].sort((a, b) => Number(a.signerIndex) - Number(b.signerIndex));
   return ethers.keccak256(
     ABI.encode(
+      ['uint16[]', 'bytes32[]'],
       [
-        'uint8',
-        'bytes32',
-        'bytes32',
-        'bytes32',
-        'bytes32',
-        'address',
-        'bytes32',
-        'bytes32',
-        'uint64',
-        'bytes32',
-        'bytes32',
-        'uint64',
-        'address'
-      ],
-      [
-        Number(xmsg.version),
-        xmsg.requestID,
-        xmsg.srcChainID,
-        xmsg.dstChainID,
-        xmsg.srcEmitter,
-        xmsg.dstContract || ethers.ZeroAddress,
-        ethers.keccak256(xmsg.payload),
-        xmsg.payloadHash,
-        Number(xmsg.srcHeight),
-        ethers.keccak256(ethers.toUtf8Bytes(xmsg.eventProof)),
-        ethers.keccak256(ethers.toUtf8Bytes(xmsg.finalityInfo)),
-        Number(xmsg.nonce),
-        teePubKey
+        sorted.map((item) => Number(item.signerIndex)),
+        sorted.map((item) => item.blsPublicKeyHash),
       ]
     )
   );
-}
-
-function computeDigest(xmsg, ctr, prevDigest, teePubKey) {
-  const coreHash = computeCoreHash(xmsg, teePubKey);
-  return ethers.keccak256(ABI.encode(['bytes32', 'uint64', 'bytes32'], [coreHash, Number(ctr), prevDigest]));
 }
 
 function decodeBusinessPayload(payloadHex) {
@@ -95,6 +88,7 @@ function bytes32FromText(text) {
 }
 
 function normalizeFeedback(feedback = {}) {
+  feedback = feedback || {};
   return {
     required: Boolean(feedback.required),
     expectedMsgType: Number(feedback.expectedMsgType || 0),
@@ -125,6 +119,7 @@ function hashCompactBusinessCall(compact) {
 }
 
 function normalizeAtomicity(atomicity = {}) {
+  atomicity = atomicity || {};
   return {
     required: Boolean(atomicity.required),
     mode: Number(atomicity.mode || 0),
@@ -245,6 +240,9 @@ function computeTargetExecutionHashFromHXMsg(hxmsg) {
 }
 
 function canonicalHeader(hxmsg) {
+  if (hxmsg.header.deliveryExpireAt === undefined) {
+    throw new Error('canonical header.deliveryExpireAt is required');
+  }
   return {
     version: Number(hxmsg.header.version),
     requestID: hxmsg.header.requestID,
@@ -252,7 +250,7 @@ function canonicalHeader(hxmsg) {
     nonce: Number(hxmsg.header.nonce),
     nonceScope: hxmsg.header.nonceScope || ethers.ZeroHash,
     sourceTimestamp: Number(hxmsg.header.sourceTimestamp ?? hxmsg.header.createdAt ?? 0),
-    deliveryExpireAt: Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt ?? 0)
+    deliveryExpireAt: Number(hxmsg.header.deliveryExpireAt)
   };
 }
 
@@ -280,18 +278,15 @@ function getEnvelope(hxmsg) {
 }
 
 function getExecutionData(hxmsg) {
-  return getEnvelope(hxmsg).executionData || {
-    callData: hxmsg.callData,
-    compactCall: hxmsg.compactCall,
-    businessPayload: hxmsg.callDataDecoded
-  };
+  const executionData = getEnvelope(hxmsg).executionData;
+  if (!executionData) throw new Error('hxmsgEnvelope.executionData is required');
+  return executionData;
 }
 
 function getAuditRecord(hxmsg) {
-  return getEnvelope(hxmsg).auditRecord || {
-    txId: hxmsg.txId,
-    srcHeight: hxmsg.srcHeight
-  };
+  const auditRecord = getEnvelope(hxmsg).auditRecord;
+  if (!auditRecord) throw new Error('hxmsgEnvelope.auditRecord is required');
+  return auditRecord;
 }
 
 function computeHXMsgDigest(hxmsg) {
@@ -396,7 +391,6 @@ function computeHXMsgDigest(hxmsg) {
 function computeHXMsgDeliveryDigest(hxmsg) {
   const feedback = normalizeFeedback(hxmsg.feedback);
   const targetExecutionHash = hxmsg.deliveryMessage?.targetExecutionHash
-    || hxmsg.payloadBinding.targetExecutionHash
     || computeTargetExecutionHashFromHXMsg(hxmsg);
   const minimal = [
     hxmsg.header.requestID,
@@ -413,7 +407,7 @@ function computeHXMsgDeliveryDigest(hxmsg) {
     feedback.expectedMsgType,
     feedback.timeout,
     feedback.callbackRefHash,
-    hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt
+    hxmsg.header.deliveryExpireAt
   ];
   const chainHash = ethers.keccak256(
     ABI.encode(
@@ -437,6 +431,60 @@ function computeHXMsgDeliveryDigest(hxmsg) {
     ABI.encode(
       ['bytes32', 'bytes32', 'bytes32'],
       [chainHash, actionHash, feedbackHash]
+    )
+  );
+}
+
+function toMinimalHXMsg(hxmsg, hmsgDigest) {
+  const feedback = normalizeFeedback(hxmsg.feedback);
+  return [
+    hxmsg.header.requestID,
+    hmsgDigest || hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg),
+    hxmsg.target.chainType,
+    hxmsg.target.chainID,
+    hxmsg.targetAction.actionType,
+    hxmsg.targetAction.targetObject,
+    hxmsg.targetAction.functionSelector,
+    hxmsg.targetAction.callDataHash,
+    hxmsg.targetAction.receiver,
+    hxmsg.deliveryMessage?.targetExecutionHash || computeTargetExecutionHashFromHXMsg(hxmsg),
+    feedback.required,
+    feedback.expectedMsgType,
+    feedback.timeout,
+    feedback.callbackRefHash,
+    hxmsg.header.deliveryExpireAt
+  ];
+}
+
+function computeBatchLeaf(hxmsg, hmsgDigest) {
+  const minimal = toMinimalHXMsg(hxmsg, hmsgDigest);
+  const deliveryDigest = computeHXMsgDeliveryDigest({ ...hxmsg, hmsgDigest: minimal[1] });
+  return ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes32', 'bytes32'],
+      [minimal[0], minimal[1], deliveryDigest]
+    )
+  );
+}
+
+function hashPair(left, right) {
+  const [a, b] = BigInt(left) <= BigInt(right) ? [left, right] : [right, left];
+  return ethers.keccak256(ABI.encode(['bytes32', 'bytes32'], [a, b]));
+}
+
+function verifyMerkleProof(leaf, proof, expectedRoot) {
+  let value = leaf;
+  for (const sibling of proof || []) {
+    value = hashPair(value, sibling);
+  }
+  return String(value).toLowerCase() === String(expectedRoot).toLowerCase();
+}
+
+function computeBatchSigningDigest({ batchID, batchRoot, batchSize, targetChainID }) {
+  return ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes32', 'bytes32', 'uint64', 'bytes32'],
+      [BATCH_DOMAIN, batchID, batchRoot, Number(batchSize), targetChainID]
     )
   );
 }
@@ -635,18 +683,29 @@ async function applyBusinessAction(ctx, { requestID, hmsgDigest, callDataHash, p
   return record;
 }
 
-async function isTrustedTEE(ctx, address) {
-  const key = `trustedTEE:${ethers.getAddress(address)}`;
+async function getTrustedTEEBySignerIndex(ctx, signerIndex) {
+  const indexData = await ctx.stub.getState(`teeSignerIndex:${Number(signerIndex)}`);
+  if (!indexData || indexData.length === 0) return null;
+  const address = ethers.getAddress(indexData.toString());
+  const key = `trustedTEE:${address}`;
   const data = await ctx.stub.getState(key);
-  return data && data.length > 0;
+  if (!data || data.length === 0) return null;
+  const identity = JSON.parse(data.toString());
+  const config = await getTEEClusterConfig(ctx);
+  const now = getTxTime(ctx);
+  const trusted = Boolean(identity.active)
+    && Number(identity.epoch || 0) === Number(config.epoch || 1)
+    && (!Number(identity.notAfter || 0) || Number(identity.notAfter) > now);
+  return trusted ? identity : null;
 }
 
 const TEE_CLUSTER_CONFIG_KEY = 'teeClusterConfig';
+const SIMULATED_ATTESTATION_TYPE = 'SIMULATED_TDX_QUOTE_V1';
 
 async function getTEEClusterConfig(ctx) {
   const data = await ctx.stub.getState(TEE_CLUSTER_CONFIG_KEY);
   if (!data || data.length === 0) {
-    return { epoch: 1, activeTEECount: 0, members: [] };
+    return { epoch: 1, activeTEECount: 0, members: [], signerIndexes: [] };
   }
   const parsed = JSON.parse(data.toString());
   const members = Array.isArray(parsed.members)
@@ -655,7 +714,8 @@ async function getTEEClusterConfig(ctx) {
   return {
     epoch: Number(parsed.epoch || 1),
     activeTEECount: Number(parsed.activeTEECount || members.length || 0),
-    members
+    members,
+    signerIndexes: Array.isArray(parsed.signerIndexes) ? parsed.signerIndexes.map(Number) : []
   };
 }
 
@@ -667,8 +727,103 @@ async function putTEEClusterConfig(ctx, config) {
     epoch: Number(config.epoch || 1),
     activeTEECount: members.length,
     members,
+    signerIndexes: Array.isArray(config.signerIndexes) ? Array.from(new Set(config.signerIndexes.map(Number))) : [],
     updatedAt: new Date().toISOString()
   })));
+}
+
+function normalizeTEERegistration(input) {
+  const identity = typeof input === 'string' ? parseJson(input, 'teeIdentityJson') : input;
+  const teeAddress = ethers.getAddress(identity.teeAddress || identity.address);
+  return {
+    teeAddress,
+    signerIndex: Number(identity.signerIndex),
+    enclavePubKeyHash: identity.enclavePubKeyHash,
+    blsPublicKey: identity.blsPublicKey,
+    blsPublicKeyHash: identity.blsPublicKeyHash,
+    measurement: identity.measurement,
+    quoteHash: identity.quoteHash,
+    initialSyncStateHash: identity.initialSyncStateHash || ethers.ZeroHash,
+    epoch: Number(identity.epoch || 1),
+    notAfter: Number(identity.notAfter || 0),
+    attestationType: identity.attestationType || SIMULATED_ATTESTATION_TYPE,
+    attestationSignature: identity.attestationSignature || '0x',
+    nodeID: identity.nodeID || ''
+  };
+}
+
+function simulatedQuoteHash(identity) {
+  return ethers.keccak256(
+    ABI.encode(
+      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
+      [
+        SIMULATED_ATTESTATION_TYPE,
+        identity.teeAddress,
+        identity.signerIndex,
+        identity.enclavePubKeyHash,
+        identity.blsPublicKeyHash,
+        identity.measurement,
+        identity.initialSyncStateHash,
+        identity.epoch,
+        identity.notAfter
+      ]
+    )
+  );
+}
+
+function teeRegistrationDigest(identity) {
+  return ethers.keccak256(
+    ABI.encode(
+      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
+      [
+        identity.attestationType,
+        identity.teeAddress,
+        identity.signerIndex,
+        identity.enclavePubKeyHash,
+        identity.blsPublicKeyHash,
+        identity.measurement,
+        identity.quoteHash,
+        identity.initialSyncStateHash,
+        identity.epoch,
+        identity.notAfter
+      ]
+    )
+  );
+}
+
+function verifyTEERegistration(identity, expectedEpoch) {
+  if (identity.attestationType !== SIMULATED_ATTESTATION_TYPE) {
+    throw new Error(`unsupported attestation type: ${identity.attestationType}`);
+  }
+  if (identity.epoch !== expectedEpoch) throw new Error('bad TEE epoch');
+  if (!identity.enclavePubKeyHash || identity.enclavePubKeyHash === ethers.ZeroHash) {
+    throw new Error('missing enclavePubKeyHash');
+  }
+  if (!Number.isInteger(identity.signerIndex) || identity.signerIndex < 0 || identity.signerIndex >= 256) {
+    throw new Error('bad signerIndex');
+  }
+  if (!identity.blsPublicKey || strip0x(identity.blsPublicKey).length !== 96) {
+    throw new Error('bad BLS public key');
+  }
+  if (!identity.blsPublicKeyHash || identity.blsPublicKeyHash === ethers.ZeroHash) {
+    throw new Error('missing BLS public key hash');
+  }
+  if (ethers.keccak256(hexToBytes(identity.blsPublicKey)).toLowerCase() !== identity.blsPublicKeyHash.toLowerCase()) {
+    throw new Error('bad BLS public key hash');
+  }
+  if (!identity.measurement || identity.measurement === ethers.ZeroHash) {
+    throw new Error('missing enclave measurement');
+  }
+  if (!identity.quoteHash || identity.quoteHash === ethers.ZeroHash) {
+    throw new Error('missing quoteHash');
+  }
+  if (identity.quoteHash.toLowerCase() !== simulatedQuoteHash(identity).toLowerCase()) {
+    throw new Error('bad simulated TDX quote');
+  }
+  const digest = teeRegistrationDigest(identity);
+  const signer = ethers.getAddress(ethers.recoverAddress(digest, identity.attestationSignature));
+  if (signer !== identity.teeAddress) throw new Error('bad attestation signature');
+  return digest;
 }
 
 async function currentTEEQuorumThreshold(ctx) {
@@ -685,55 +840,92 @@ function assertTEERegistrar(ctx) {
   }
 }
 
-async function verifyTEECertification(ctx, hxmsg, certEnvelope) {
-  const hmsgDigest = computeHXMsgDigest(hxmsg);
-  const certs = certEnvelope.certifications || (
-    certEnvelope.teeCertification ? [certEnvelope.teeCertification] : [certEnvelope]
-  );
+async function verifyTEEClusterCertificate(ctx, expectedDigest, certEnvelope) {
+  const cert = certEnvelope.clusterCertificate || certEnvelope.teeClusterCertification || certEnvelope;
+  if (!cert || cert.scheme !== 'BLS_THRESHOLD_V1') throw new Error('bad BLS cluster certificate');
+  if (String(cert.clusterID).toLowerCase() !== TEE_CLUSTER_ID.toLowerCase()) throw new Error('bad TEE clusterID');
+  if (String(cert.signingDigest).toLowerCase() !== String(expectedDigest).toLowerCase()) {
+    throw new Error('TEE certificate digest mismatch');
+  }
   const threshold = await currentTEEQuorumThreshold(ctx);
+  if (Number(cert.threshold) !== threshold) throw new Error('bad TEE threshold');
+  if (Number(cert.participantCount) < threshold) throw new Error(`TEE quorum not satisfied: ${cert.participantCount}/${threshold}`);
+  if (!Array.isArray(cert.participants) || cert.participants.length !== Number(cert.participantCount)) {
+    throw new Error('bad TEE participants');
+  }
+  if (strip0x(cert.aggregateSignature).length !== 192) throw new Error('bad BLS aggregate signature');
+
   const seen = new Set();
-  let valid = 0;
-  for (const cert of certs) {
-    if (!cert || cert.requestID !== hxmsg.header.requestID) continue;
-    if (String(cert.hmsgDigest).toLowerCase() !== hmsgDigest.toLowerCase()) continue;
-    const expectedSigningDigest = cert.signatureDigestType === 'deliveryDigest'
-      ? computeHXMsgDeliveryDigest({ ...hxmsg, hmsgDigest })
-      : hmsgDigest;
-    if (String(cert.signingDigest || expectedSigningDigest).toLowerCase() !== expectedSigningDigest.toLowerCase()) continue;
-    const signer = ethers.getAddress(ethers.recoverAddress(expectedSigningDigest, cert.signature));
-    if (signer !== ethers.getAddress(cert.teeAddress)) continue;
-    if (!(await isTrustedTEE(ctx, signer))) continue;
-    if (seen.has(signer)) continue;
-    seen.add(signer);
-    valid += 1;
+  const participants = [];
+  const publicKeys = [];
+  let bitmap = 0n;
+  for (const participant of cert.participants) {
+    const signerIndex = Number(participant.signerIndex);
+    if (seen.has(signerIndex)) throw new Error('duplicate TEE signer');
+    seen.add(signerIndex);
+    bitmap |= 1n << BigInt(signerIndex);
+    const identity = await getTrustedTEEBySignerIndex(ctx, signerIndex);
+    if (!identity) throw new Error(`untrusted TEE signer index: ${signerIndex}`);
+    if (ethers.getAddress(participant.teeAddress) !== ethers.getAddress(identity.address)) {
+      throw new Error('TEE signer address mismatch');
+    }
+    if (String(participant.blsPublicKeyHash).toLowerCase() !== String(identity.blsPublicKeyHash).toLowerCase()) {
+      throw new Error('TEE BLS key hash mismatch');
+    }
+    participants.push({
+      signerIndex,
+      blsPublicKeyHash: identity.blsPublicKeyHash,
+    });
+    publicKeys.push(identity.blsPublicKey);
   }
-  if (valid < threshold) {
-    throw new Error(`TEE quorum not satisfied: ${valid}/${threshold}`);
+  if (bitmap !== BigInt(cert.signerBitmap)) throw new Error('bad TEE signer bitmap');
+  if (selectedPublicKeyHash(participants).toLowerCase() !== String(cert.selectedPublicKeyHash).toLowerCase()) {
+    throw new Error('bad selected BLS public key hash');
   }
-  return { hmsgDigest, validTEECount: valid, threshold, signers: Array.from(seen) };
+  const bls = await getBLS();
+  const ok = bls.verifyAggregate(
+    publicKeys.map(hexToBytes),
+    hexToBytes(cert.signingDigest),
+    hexToBytes(cert.aggregateSignature)
+  );
+  if (!ok) throw new Error('bad BLS aggregate signature');
+  return {
+    digest: expectedDigest,
+    validTEECount: Number(cert.participantCount),
+    threshold,
+    signerIndexes: Array.from(seen).sort((a, b) => a - b),
+    clusterID: cert.clusterID
+  };
 }
 
-async function verifyTEEDigestCertification(ctx, requestID, digest, certEnvelope) {
-  const certs = certEnvelope.certifications || (
-    certEnvelope.teeCertification ? [certEnvelope.teeCertification] : [certEnvelope]
-  );
-  const threshold = await currentTEEQuorumThreshold(ctx);
-  const seen = new Set();
-  let valid = 0;
-  for (const cert of certs) {
-    if (!cert || cert.requestID !== requestID) continue;
-    if (String(cert.hmsgDigest).toLowerCase() !== String(digest).toLowerCase()) continue;
-    const signer = ethers.getAddress(ethers.recoverAddress(digest, cert.signature));
-    if (signer !== ethers.getAddress(cert.teeAddress)) continue;
-    if (!(await isTrustedTEE(ctx, signer))) continue;
-    if (seen.has(signer)) continue;
-    seen.add(signer);
-    valid += 1;
+function expectedHXMsgSigningDigest(hxmsg, hmsgDigest, certEnvelope) {
+  const cert = certEnvelope.clusterCertificate || certEnvelope.teeClusterCertification || certEnvelope;
+  if (cert?.signatureDigestType === 'batchDigest') {
+    const batchID = certEnvelope.batchID || cert.batchID;
+    const batchRoot = certEnvelope.batchRoot || cert.batchRoot;
+    const batchSize = certEnvelope.batchSize || cert.batchSize;
+    const batchSigningDigest = certEnvelope.batchSigningDigest || cert.batchSigningDigest || cert.signingDigest;
+    const merkleProof = certEnvelope.merkleProof || cert.merkleProof || [];
+    if (!batchID || !batchRoot || !batchSize) throw new Error('missing batch certificate metadata');
+    const expectedBatchDigest = computeBatchSigningDigest({
+      batchID,
+      batchRoot,
+      batchSize,
+      targetChainID: hxmsg.target.chainID
+    });
+    if (String(expectedBatchDigest).toLowerCase() !== String(batchSigningDigest).toLowerCase()) {
+      throw new Error('bad batch signing digest');
+    }
+    const leaf = computeBatchLeaf(hxmsg, hmsgDigest);
+    if (!verifyMerkleProof(leaf, merkleProof, batchRoot)) {
+      throw new Error('bad batch merkle proof');
+    }
+    return batchSigningDigest;
   }
-  if (valid < threshold) {
-    throw new Error(`TEE quorum not satisfied: ${valid}/${threshold}`);
+  if (cert?.signatureDigestType === 'deliveryDigest') {
+    return computeHXMsgDeliveryDigest({ ...hxmsg, hmsgDigest });
   }
-  return { digest, validTEECount: valid, threshold, signers: Array.from(seen) };
+  return hmsgDigest;
 }
 
 function getTxTime(ctx) {
@@ -1025,24 +1217,51 @@ class XCallContract extends Contract {
     return data.toString();
   }
 
-  async RegisterTrustedTEE(ctx, teeAddress) {
+  async RegisterTrustedTEE(ctx, teeIdentityJson) {
     assertTEERegistrar(ctx);
-    const address = ethers.getAddress(teeAddress);
-    const key = `trustedTEE:${address}`;
     const config = await getTEEClusterConfig(ctx);
+    const identity = normalizeTEERegistration(teeIdentityJson);
+    const now = getTxTime(ctx);
+    if (identity.notAfter && identity.notAfter <= now) {
+      throw new Error('TEE attestation expired');
+    }
+    const attestationDigest = verifyTEERegistration(identity, Number(config.epoch || 1));
+    const address = identity.teeAddress;
+    const key = `trustedTEE:${address}`;
+    const signerIndexKey = `teeSignerIndex:${identity.signerIndex}`;
+    const existingIndex = await ctx.stub.getState(signerIndexKey);
+    if (existingIndex && existingIndex.length > 0 && ethers.getAddress(existingIndex.toString()) !== address) {
+      throw new Error('TEE signerIndex already registered');
+    }
     if (!config.members.includes(address)) {
       config.members.push(address);
     }
+    config.signerIndexes = Array.from(new Set([...(config.signerIndexes || []), identity.signerIndex]));
     await putTEEClusterConfig(ctx, config);
+    await ctx.stub.putState(signerIndexKey, Buffer.from(address));
     await ctx.stub.putState(key, Buffer.from(JSON.stringify({
       address,
+      signerIndex: identity.signerIndex,
+      enclavePubKeyHash: identity.enclavePubKeyHash,
+      blsPublicKey: identity.blsPublicKey,
+      blsPublicKeyHash: identity.blsPublicKeyHash,
+      measurement: identity.measurement,
+      quoteHash: identity.quoteHash,
+      initialSyncStateHash: identity.initialSyncStateHash,
+      attestationType: identity.attestationType,
+      attestationDigest,
       epoch: config.epoch,
+      notAfter: identity.notAfter,
+      nodeID: identity.nodeID,
+      active: true,
       registeredByMSP: ctx.clientIdentity.getMSPID(),
       updatedAt: new Date().toISOString()
     })));
     return JSON.stringify({
       ok: true,
       address,
+      attestationDigest,
+      measurement: identity.measurement,
       epoch: config.epoch,
       activeTEECount: config.members.length,
       quorumThreshold: Math.floor(config.members.length / 2) + 1
@@ -1079,7 +1298,7 @@ class XCallContract extends Contract {
     }
 
     const now = Number(ctx.stub.getTxTimestamp().seconds.low || ctx.stub.getTxTimestamp().seconds || Math.floor(Date.now() / 1000));
-    if (Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt) < now) throw new Error('h-xmsg expired');
+    if (Number(hxmsg.header.deliveryExpireAt) < now) throw new Error('h-xmsg expired');
     if (Number(hxmsg.target.chainType) !== 2) throw new Error('target is not Fabric');
     if (Number(hxmsg.targetAction.actionType) !== 5) throw new Error('action is not chaincode invoke');
 
@@ -1106,12 +1325,17 @@ class XCallContract extends Contract {
       throw new Error('callDataHash mismatch');
     }
     const targetExecutionHash = computeTargetExecutionHashFromHXMsg(hxmsg);
-    const expectedTargetExecutionHash = hxmsg.deliveryMessage?.targetExecutionHash || hxmsg.payloadBinding.targetExecutionHash || targetExecutionHash;
+    const expectedTargetExecutionHash = hxmsg.deliveryMessage?.targetExecutionHash || targetExecutionHash;
     if (String(expectedTargetExecutionHash).toLowerCase() !== targetExecutionHash.toLowerCase()) {
       throw new Error('targetExecutionHash mismatch');
     }
 
-    const certResult = await verifyTEECertification(ctx, hxmsg, certEnvelope);
+    const hmsgDigest = computeHXMsgDigest(hxmsg);
+    const certResult = await verifyTEEClusterCertificate(
+      ctx,
+      expectedHXMsgSigningDigest(hxmsg, hmsgDigest, certEnvelope),
+      certEnvelope
+    );
     const parsedPayload = compactCall ? businessPayload : decodeBusinessPayload(callDataHex);
     if (!parsedPayload) throw new Error('businessPayload is required for compact h-xmsg');
     if (hashJson(parsedPayload).toLowerCase() !== String(hxmsg.payloadBinding.businessPayloadHash).toLowerCase()) {
@@ -1119,7 +1343,7 @@ class XCallContract extends Contract {
     }
     const businessRecord = await applyBusinessAction(ctx, {
       requestID,
-      hmsgDigest: certResult.hmsgDigest,
+      hmsgDigest,
       callDataHash: hxmsg.targetAction.callDataHash,
       parsedPayload,
       sourceChainType: hxmsg.source.chainType
@@ -1128,10 +1352,10 @@ class XCallContract extends Contract {
       requestID,
       txId: ctx.stub.getTxID(),
       callerMSP: ctx.clientIdentity.getMSPID(),
-      hmsgDigest: certResult.hmsgDigest,
+      hmsgDigest,
       validTEECount: certResult.validTEECount,
       teeThreshold: certResult.threshold,
-      teeSigners: certResult.signers,
+      teeSigners: certResult.signerIndexes,
       sourceChainType: hxmsg.source.chainType,
       sourceTxID: auditRecord.txId || '',
       srcHeight: auditRecord.srcHeight || 0,
@@ -1197,8 +1421,13 @@ class XCallContract extends Contract {
     if (String(targetExecutionHash).toLowerCase() !== String(record.targetExecutionHash).toLowerCase()) {
       throw new Error('targetExecutionHash mismatch');
     }
-    const certResult = await verifyTEECertification(ctx, hxmsg, certEnvelope);
-    record.hmsgDigest = certResult.hmsgDigest;
+    const hmsgDigest = computeHXMsgDigest(hxmsg);
+    const certResult = await verifyTEEClusterCertificate(
+      ctx,
+      expectedHXMsgSigningDigest(hxmsg, hmsgDigest, certEnvelope),
+      certEnvelope
+    );
+    record.hmsgDigest = hmsgDigest;
     record.validTEECount = certResult.validTEECount;
     record.teeThreshold = certResult.threshold;
     record.boundAt = getTxTime(ctx);
@@ -1265,7 +1494,7 @@ class XCallContract extends Contract {
     if (consumed && consumed.length > 0) {
       throw new Error('response replay');
     }
-    const certResult = await verifyTEEDigestCertification(ctx, requestID, responseDigest, certEnvelope);
+    const certResult = await verifyTEEClusterCertificate(ctx, responseDigest, certEnvelope);
     record.status = 'Completed';
     record.responseDigest = responseDigest;
     record.validTEECount = certResult.validTEECount;

@@ -12,11 +12,14 @@ const {
   toMinimalHXMsg,
   AtomicityMode,
   CommitmentType,
+  buildDeliveryMessage,
+  getExecutionData,
 } = require('../shared/hxmsg');
 const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { buildCommitteeHeaderUpdate } = require('../shared/evm/header-committee');
 const { buildHXMsgFromFabricEvent, TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { buildEvmExecutionProofRef, buildExecutedResponse } = require('../hxmsg-builder/response');
+const { registerEVMTEEs, registerFabricTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004')
@@ -25,6 +28,8 @@ const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0
   .filter(Boolean);
 const EVM_RPC = process.env.EVM_RPC || 'http://127.0.0.1:8545';
 const PRIV_KEY = process.env.DEPLOYER_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes32,bytes,bytes32,uint64,uint64)';
+const TEE_REGISTRATION_ABI = '(address teeAddress,uint16 signerIndex,bytes32 enclavePubKeyHash,bytes32 blsPublicKeyHash,bytes32 measurement,bytes32 quoteHash,bytes32 initialSyncStateHash,uint64 epoch,uint64 notAfter,bytes attestationSignature)';
 
 function nowMs() {
   return Number(process.hrtime.bigint() / 1000000n);
@@ -109,27 +114,26 @@ async function relayToEvm(hxmsg, deployment, teeUrl, stageTimings) {
   };
   const registry = new ethers.Contract(
     deployment.teeRegistry,
-    ['function trustedTEE(address) view returns (bool)', 'function registerTEE(address) external'],
+    [
+      'function isActiveTEE(address) view returns (bool)',
+      `function registerTEE(${TEE_REGISTRATION_ABI}) external`,
+    ],
     signer
   );
-  for (const cert of cluster.certifications) {
-    if (!(await registry.trustedTEE(cert.teeAddress))) {
-      const receipt = await timed(stageTimings, 'evmRegisterTEEMs', async () =>
-        (await registry.registerTEE(cert.teeAddress)).wait());
-      gas.registerTEE += gasOf(receipt);
-    }
-  }
+  const registration = await timed(stageTimings, 'evmRegisterTEEMs', () =>
+    registerEVMTEEs({ registry, certificate: cluster, teeURLs: TEE_URLS }));
+  gas.registerTEE += Number(registration.gasUsed || 0n);
   const gateway = new ethers.Contract(
     deployment.hxmsgGateway,
-    ['function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,(bytes32,bytes32,address,uint64,bytes)[]) external'],
+    [`function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,${CLUSTER_CERT_ABI}) external`],
     signer
   );
   const receipt = await timed(stageTimings, 'evmTargetExecutionMs', async () => {
     const tx = await gateway.executeHXMsgMinimalCluster(
       toMinimalHXMsg(hxmsg),
       deployment.targetContract,
-      hxmsg.callData,
-      cluster.certifications.map((cert) => [cert.requestID, cert.hmsgDigest, cert.teeAddress, cert.verifiedAt, cert.signature])
+      getExecutionData(hxmsg).callData,
+      clusterCertificateTuple(cluster)
     );
     return tx.wait();
   });
@@ -207,10 +211,8 @@ async function main() {
       createdAt: eventRecord.createdAt,
     });
     const relay = await relayToEvm(hxmsg, deployment, teeUrl, stageTimings);
-    for (const cert of relay.teeCluster.certifications) {
-      await timed(stageTimings, 'fabricRegisterTEEMs', () =>
-        contract.submitTransaction('RegisterTrustedTEE', cert.teeAddress));
-    }
+    await timed(stageTimings, 'fabricRegisterTEEMs', () =>
+      registerFabricTEEs({ contract, certificate: relay.teeCluster, teeURLs: TEE_URLS }));
     await timed(stageTimings, 'fabricBindCommitmentHXMsgMs', () =>
       contract.submitTransaction('BindCommitmentHXMsg', JSON.stringify(hxmsg), JSON.stringify(relay.teeCluster)));
     const evmReceipt = await timed(stageTimings, 'evmGetTargetReceiptMs', () =>
@@ -224,7 +226,7 @@ async function main() {
     const response = buildExecutedResponse({
       originRequestID: hxmsg.header.requestID,
       originHmsgDigest: hxmsg.hmsgDigest,
-      targetExecutionHash: hxmsg.payloadBinding.targetExecutionHash,
+      targetExecutionHash: (hxmsg.deliveryMessage || buildDeliveryMessage(hxmsg)).targetExecutionHash,
       targetProofRefHash: buildEvmExecutionProofRef(evmReceipt),
       responsePayload: { txHash: evmReceipt.hash, status: 'executed' },
     });
@@ -238,10 +240,8 @@ async function main() {
       },
     }, { timeout: 30000 }));
     const voucher = responseAttest.data.teeClusterCertification;
-    for (const cert of voucher.certifications) {
-      await timed(stageTimings, 'fabricRegisterResponseTEEMs', () =>
-        contract.submitTransaction('RegisterTrustedTEE', cert.teeAddress));
-    }
+    await timed(stageTimings, 'fabricRegisterResponseTEEMs', () =>
+      registerFabricTEEs({ contract, certificate: voucher, teeURLs: TEE_URLS }));
     await timed(stageTimings, 'fabricCompleteWithResponseMs', () =>
       contract.submitTransaction('CompleteWithResponse', hxmsg.header.requestID, JSON.stringify(response), JSON.stringify(voucher)));
     const commitment = JSON.parse((await timed(stageTimings, 'fabricQueryCommitmentMs', () =>

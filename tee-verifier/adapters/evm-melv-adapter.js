@@ -10,6 +10,7 @@ const {
   computeAtomicityHash,
   computeFeedbackHash,
   computeTargetExecutionHash,
+  buildDeliveryMessage,
   normalizeAtomicity,
   normalizeFeedback,
   getSourceEvidence,
@@ -293,7 +294,8 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
   }
 
   const sourceEvidence = getSourceEvidence(hxmsg, helperData);
-  const encodedRef = sourceEvidence.encodedRef || hxmsg.sourceRef.encodedRef;
+  const encodedRef = sourceEvidence.encodedRef;
+  if (!encodedRef) throw new Error('EVM sourceEvidence.encodedRef is required');
   const ref = decodeJsonRef(encodedRef);
   const expectedRefHash = hashBytes(encodedRef);
   if (!sameHex(expectedRefHash, hxmsg.sourceRef.refHash)) {
@@ -369,7 +371,7 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
 
   if (!sameHex(event.requestID, hxmsg.header.requestID)) throw new Error('EVM event requestID mismatch');
   if (Number(event.nonce) !== Number(hxmsg.header.nonce)) throw new Error('EVM event nonce mismatch');
-  if (Number(event.expireAt) !== Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt)) throw new Error('EVM event expireAt mismatch');
+  if (Number(event.expireAt) !== Number(hxmsg.header.deliveryExpireAt)) throw new Error('EVM event expireAt mismatch');
   if (!sameHex(event.targetChainID, hxmsg.target.chainID)) throw new Error('EVM event targetChainID mismatch');
   if (!sameHex(event.targetDomainID, hxmsg.target.domainID)) throw new Error('EVM event targetDomainID mismatch');
   if (!sameHex(event.targetObject, hxmsg.targetAction.targetObject)) throw new Error('EVM event targetObject mismatch');
@@ -416,7 +418,7 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     callDataHash: hxmsg.targetAction.callDataHash,
     receiver: hxmsg.targetAction.receiver,
   });
-  const expectedTargetExecutionHash = hxmsg.deliveryMessage?.targetExecutionHash || hxmsg.payloadBinding.targetExecutionHash || targetExecutionHash;
+  const expectedTargetExecutionHash = (hxmsg.deliveryMessage || buildDeliveryMessage(hxmsg)).targetExecutionHash;
   if (!sameHex(targetExecutionHash, expectedTargetExecutionHash)) {
     throw new Error('EVM targetExecutionHash mismatch');
   }

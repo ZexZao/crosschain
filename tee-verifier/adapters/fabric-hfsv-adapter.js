@@ -310,7 +310,7 @@ function validatePayloadBinding({ hxmsg, ref, hfsv, auditRecord = {} }) {
   if (record.requestID !== requestID) throw new Error('Fabric state requestID mismatch');
   if (auditRecord.txId && record.sourceTxID !== auditRecord.txId) throw new Error('Fabric state sourceTxID mismatch');
   if (Number(record.nonce) !== Number(hxmsg.header.nonce)) throw new Error('Fabric state nonce mismatch');
-  if (Number(record.expireAt) !== Number(hxmsg.header.deliveryExpireAt ?? hxmsg.header.expireAt)) throw new Error('Fabric state expireAt mismatch');
+  if (Number(record.expireAt) !== Number(hxmsg.header.deliveryExpireAt)) throw new Error('Fabric state expireAt mismatch');
   if (record.status !== 'COMMITTED') throw new Error(`Fabric state status is not COMMITTED: ${record.status}`);
   if (hfsv.payloadHash.toLowerCase() !== hxmsg.payloadBinding.sourcePayloadHash.toLowerCase()) {
     throw new Error('sourcePayloadHash mismatch');
@@ -355,7 +355,9 @@ function validatePayloadBinding({ hxmsg, ref, hfsv, auditRecord = {} }) {
 async function verifyHFsv({ hxmsg, helperData = {} }) {
   const sourceEvidence = getSourceEvidence(hxmsg, helperData);
   const auditRecord = getAuditRecord(hxmsg);
-  const encodedRef = sourceEvidence.encodedRef || hxmsg.sourceRef.encodedRef;
+  const encodedRef = sourceEvidence.encodedRef;
+  if (!encodedRef) throw new Error('Fabric sourceEvidence.encodedRef is required');
+  if (auditRecord.srcHeight === undefined) throw new Error('Fabric auditRecord.srcHeight is required');
   const ref = decodeJsonRef(encodedRef);
   const computedRefHash = hashBytes(encodedRef);
   if (computedRefHash.toLowerCase() !== hxmsg.sourceRef.refHash.toLowerCase()) {

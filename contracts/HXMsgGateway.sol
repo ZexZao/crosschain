@@ -49,7 +49,7 @@ contract HXMsgGateway {
         uint64 expireAt;
     }
 
-    event HXMsgAccepted(bytes32 indexed requestID, address indexed tee, address indexed target);
+    event HXMsgAccepted(bytes32 indexed requestID, bytes32 indexed clusterID, address indexed target);
     event HXMsgBatchAccepted(bytes32 indexed batchID, bytes32 indexed batchRoot, uint256 size);
     event HXMsgRejected(bytes32 indexed requestID, string reason);
 
@@ -61,14 +61,14 @@ contract HXMsgGateway {
         HXMsgLib.HXMsgMinimal calldata hxmsg,
         address target,
         bytes calldata callData,
-        HXMsgLib.TEECertification[] calldata certs
+        HXMsgLib.ClusterCertificate calldata cert
     ) external {
         bytes32 deliveryDigest = hxmsg.hashDelivery();
         _validateMinimal(hxmsg, target, callData);
-        _verifyCerts(hxmsg.requestID, hxmsg.hmsgDigest, deliveryDigest, certs);
+        _verifyClusterCert(deliveryDigest, cert);
 
         _executeTarget(hxmsg, target, callData);
-        emit HXMsgAccepted(hxmsg.requestID, certs[0].teeAddress, target);
+        emit HXMsgAccepted(hxmsg.requestID, cert.clusterID, target);
     }
 
     function executeHXMsgMinimalBatchCluster(
@@ -78,21 +78,21 @@ contract HXMsgGateway {
         bytes32 batchID,
         bytes32 batchRoot,
         bytes32[][] calldata merkleProofs,
-        HXMsgLib.TEECertification[] calldata batchCerts
+        HXMsgLib.ClusterCertificate calldata batchCert
     ) external {
         require(hxmsgs.length > 0, "empty batch");
         require(hxmsgs.length == callDatas.length, "bad calldata count");
         require(hxmsgs.length == merkleProofs.length, "bad proof count");
 
         bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(hxmsgs.length), bytes32(uint256(block.chainid)));
-        _verifyCerts(batchID, batchDigest, batchDigest, batchCerts);
+        _verifyClusterCert(batchDigest, batchCert);
 
         for (uint256 i = 0; i < hxmsgs.length; i += 1) {
             _validateMinimal(hxmsgs[i], target, callDatas[i]);
             bytes32 leaf = hashBatchLeaf(hxmsgs[i]);
             require(_verifyMerkleProof(leaf, merkleProofs[i], batchRoot), "bad batch proof");
             _executeTarget(hxmsgs[i], target, callDatas[i]);
-            emit HXMsgAccepted(hxmsgs[i].requestID, batchCerts[0].teeAddress, target);
+            emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target);
         }
         emit HXMsgBatchAccepted(batchID, batchRoot, hxmsgs.length);
     }
@@ -104,21 +104,21 @@ contract HXMsgGateway {
         bytes32 batchID,
         bytes32 batchRoot,
         bytes32[][] calldata merkleProofs,
-        HXMsgLib.TEECertification[] calldata batchCerts
+        HXMsgLib.ClusterCertificate calldata batchCert
     ) external {
         require(hxmsgs.length > 0, "empty batch");
         require(hxmsgs.length == calls.length, "bad call count");
         require(hxmsgs.length == merkleProofs.length, "bad proof count");
 
         bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(hxmsgs.length), bytes32(uint256(block.chainid)));
-        _verifyCerts(batchID, batchDigest, batchDigest, batchCerts);
+        _verifyClusterCert(batchDigest, batchCert);
 
         for (uint256 i = 0; i < hxmsgs.length; i += 1) {
             _validateMinimalCompact(hxmsgs[i], target, calls[i]);
             bytes32 leaf = hashBatchLeaf(hxmsgs[i]);
             require(_verifyMerkleProof(leaf, merkleProofs[i], batchRoot), "bad batch proof");
             _executeCompactTarget(hxmsgs[i], target, calls[i]);
-            emit HXMsgAccepted(hxmsgs[i].requestID, batchCerts[0].teeAddress, target);
+            emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target);
         }
         emit HXMsgBatchAccepted(batchID, batchRoot, hxmsgs.length);
     }
@@ -130,21 +130,21 @@ contract HXMsgGateway {
         bytes32 batchID,
         bytes32 batchRoot,
         bytes32[][] calldata merkleProofs,
-        HXMsgLib.TEECertification[] calldata batchCerts
+        HXMsgLib.ClusterCertificate calldata batchCert
     ) external {
         require(deliveries.length > 0, "empty batch");
         require(deliveries.length == calls.length, "bad call count");
         require(deliveries.length == merkleProofs.length, "bad proof count");
 
         bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(deliveries.length), bytes32(uint256(block.chainid)));
-        _verifyCerts(batchID, batchDigest, batchDigest, batchCerts);
+        _verifyClusterCert(batchDigest, batchCert);
 
         for (uint256 i = 0; i < deliveries.length; i += 1) {
             _validateFabricEVMCompact(deliveries[i], target, calls[i]);
             bytes32 leaf = hashFabricEVMCompactBatchLeaf(deliveries[i], target);
             require(_verifyMerkleProof(leaf, merkleProofs[i], batchRoot), "bad batch proof");
             _executeCompactDelivery(deliveries[i], target, calls[i]);
-            emit HXMsgAccepted(deliveries[i].requestID, batchCerts[0].teeAddress, target);
+            emit HXMsgAccepted(deliveries[i].requestID, batchCert.clusterID, target);
         }
         emit HXMsgBatchAccepted(batchID, batchRoot, deliveries.length);
     }
@@ -155,7 +155,7 @@ contract HXMsgGateway {
         CompactCall[] calldata calls,
         bytes32 batchID,
         bytes32 batchRoot,
-        HXMsgLib.TEECertification[] calldata batchCerts
+        HXMsgLib.ClusterCertificate calldata batchCert
     ) external {
         require(deliveries.length > 0, "empty batch");
         require(deliveries.length == calls.length, "bad call count");
@@ -163,12 +163,12 @@ contract HXMsgGateway {
         bytes32 recomputedRoot = _computeFabricEVMCompactBatchRoot(deliveries, target);
         require(recomputedRoot == batchRoot, "bad batch root");
         bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(deliveries.length), bytes32(uint256(block.chainid)));
-        _verifyCerts(batchID, batchDigest, batchDigest, batchCerts);
+        _verifyClusterCert(batchDigest, batchCert);
 
         for (uint256 i = 0; i < deliveries.length; i += 1) {
             _validateFabricEVMCompact(deliveries[i], target, calls[i]);
             _executeCompactDelivery(deliveries[i], target, calls[i]);
-            emit HXMsgAccepted(deliveries[i].requestID, batchCerts[0].teeAddress, target);
+            emit HXMsgAccepted(deliveries[i].requestID, batchCert.clusterID, target);
         }
         emit HXMsgBatchAccepted(batchID, batchRoot, deliveries.length);
     }
@@ -325,28 +325,23 @@ contract HXMsgGateway {
         return keccak256(abi.encode(chainHash, actionHash, feedbackHash));
     }
 
-    function _verifyCerts(
-        bytes32 expectedRequestID,
-        bytes32 expectedDigest,
+    function _verifyClusterCert(
         bytes32 signingDigest,
-        HXMsgLib.TEECertification[] calldata certs
+        HXMsgLib.ClusterCertificate calldata cert
     ) internal view {
-        uint256 threshold = teeRegistry.quorumThreshold();
-        require(threshold > 0, "bad threshold");
-        require(certs.length >= threshold, "not enough certs");
-        uint256 validCount = 0;
-        for (uint256 i = 0; i < certs.length; i += 1) {
-            require(certs[i].requestID == expectedRequestID, "cert request mismatch");
-            require(certs[i].hmsgDigest == expectedDigest, "cert digest mismatch");
-            address signer = _recover(signingDigest, certs[i].signature);
-            require(signer == certs[i].teeAddress, "bad tee signature");
-            require(teeRegistry.trustedTEE(signer), "untrusted tee");
-            for (uint256 j = 0; j < i; j += 1) {
-                require(certs[j].teeAddress != signer, "duplicate tee");
-            }
-            validCount += 1;
-        }
-        require(validCount >= threshold, "tee quorum not reached");
+        require(teeRegistry.verifyClusterCertificate(signingDigest, TEERegistry.ClusterCertificate({
+            clusterID: cert.clusterID,
+            epoch: cert.epoch,
+            threshold: cert.threshold,
+            participantCount: cert.participantCount,
+            signerBitmap: cert.signerBitmap,
+            selectedPublicKeyHash: cert.selectedPublicKeyHash,
+            aggregatePublicKeyHash: cert.aggregatePublicKeyHash,
+            aggregateSignature: cert.aggregateSignature,
+            signingDigest: cert.signingDigest,
+            committedTerm: cert.committedTerm,
+            committedIndex: cert.committedIndex
+        })), "bad cluster cert");
     }
 
     function _executeTarget(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, bytes calldata callData) internal {
@@ -434,18 +429,4 @@ contract HXMsgGateway {
         return left <= right ? keccak256(abi.encode(left, right)) : keccak256(abi.encode(right, left));
     }
 
-    function _recover(bytes32 digest, bytes calldata signature) internal pure returns (address) {
-        require(signature.length == 65, "bad sig length");
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-        assembly {
-            r := calldataload(signature.offset)
-            s := calldataload(add(signature.offset, 32))
-            v := byte(0, calldataload(add(signature.offset, 64)))
-        }
-        if (v < 27) v += 27;
-        require(v == 27 || v == 28, "bad v");
-        return ecrecover(digest, v, r, s);
-    }
 }

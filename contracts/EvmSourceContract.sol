@@ -286,7 +286,7 @@ contract EvmSourceContract {
     function completeWithResponse(
         bytes32 requestID,
         HXMsgLib.ResponseProof calldata response,
-        HXMsgLib.TEECertification[] calldata certs
+        HXMsgLib.ClusterCertificate calldata cert
     ) external {
         RequestRecord storage record = requests[requestID];
         require(
@@ -298,7 +298,7 @@ contract EvmSourceContract {
         require(response.responseStatus == RESPONSE_STATUS_EXECUTED, "not executed");
         bytes32 responseDigest = HXMsgLib.hashResponse(response);
         require(!consumedResponses[responseDigest], "response replay");
-        _verifyTEEQuorum(requestID, responseDigest, certs);
+        _verifyTEECluster(responseDigest, cert);
 
         RequestStatus from = record.status;
         consumedResponses[responseDigest] = true;
@@ -329,41 +329,19 @@ contract EvmSourceContract {
         emit TokenEscrowRefunded(requestID, escrow.token, escrow.owner, escrow.amount);
     }
 
-    function _verifyTEEQuorum(
-        bytes32 requestID,
-        bytes32 digest,
-        HXMsgLib.TEECertification[] calldata certs
-    ) internal view {
-        uint256 threshold = teeRegistry.quorumThreshold();
-        require(threshold > 0, "bad threshold");
-        require(certs.length >= threshold, "not enough certs");
-        uint256 validCount = 0;
-        for (uint256 i = 0; i < certs.length; i += 1) {
-            require(certs[i].requestID == requestID, "cert request mismatch");
-            require(certs[i].hmsgDigest == digest, "cert digest mismatch");
-            address signer = _recover(digest, certs[i].signature);
-            require(signer == certs[i].teeAddress, "bad tee signature");
-            require(teeRegistry.trustedTEE(signer), "untrusted tee");
-            for (uint256 j = 0; j < i; j += 1) {
-                require(certs[j].teeAddress != signer, "duplicate tee");
-            }
-            validCount += 1;
-        }
-        require(validCount >= threshold, "tee quorum not reached");
-    }
-
-    function _recover(bytes32 digest, bytes calldata signature) internal pure returns (address) {
-        require(signature.length == 65, "bad sig length");
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-        assembly {
-            r := calldataload(signature.offset)
-            s := calldataload(add(signature.offset, 32))
-            v := byte(0, calldataload(add(signature.offset, 64)))
-        }
-        if (v < 27) v += 27;
-        require(v == 27 || v == 28, "bad v");
-        return ecrecover(digest, v, r, s);
+    function _verifyTEECluster(bytes32 digest, HXMsgLib.ClusterCertificate calldata cert) internal view {
+        require(teeRegistry.verifyClusterCertificate(digest, TEERegistry.ClusterCertificate({
+            clusterID: cert.clusterID,
+            epoch: cert.epoch,
+            threshold: cert.threshold,
+            participantCount: cert.participantCount,
+            signerBitmap: cert.signerBitmap,
+            selectedPublicKeyHash: cert.selectedPublicKeyHash,
+            aggregatePublicKeyHash: cert.aggregatePublicKeyHash,
+            aggregateSignature: cert.aggregateSignature,
+            signingDigest: cert.signingDigest,
+            committedTerm: cert.committedTerm,
+            committedIndex: cert.committedIndex
+        })), "bad cluster cert");
     }
 }

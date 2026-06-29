@@ -2,6 +2,9 @@ const fs = require('fs-extra');
 const path = require('path');
 const { ethers, network } = require('hardhat');
 const { computeResponseDigest, CommitmentType, AtomicityMode, FeedbackType, ResponseStatus } = require('../shared/hxmsg');
+const { buildSimulatedAttestationIdentityWithBLS, evmRegistrationTuple } = require('../shared/tee/attestation');
+const { signShare, aggregateShares } = require('../shared/tee/bls-threshold');
+const { clusterCertificateTuple } = require('../shared/tee/registration');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 
@@ -18,10 +21,7 @@ async function increaseTime(seconds) {
   await network.provider.send('evm_mine');
 }
 
-function certFor(wallet, requestID, digest) {
-  const signature = wallet.signingKey.sign(digest).serialized;
-  return [requestID, digest, wallet.address, Math.floor(Date.now() / 1000), signature];
-}
+const CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes('HXMSG_TEE_CLUSTER_LOCAL_V1'));
 
 async function submitAtomic(source, params = {}) {
   const latest = await ethers.provider.getBlock('latest');
@@ -155,6 +155,38 @@ async function expectRevert(label, fn) {
   }
 }
 
+async function clusterCertFor(teeIdentities, digest, count) {
+  const selected = teeIdentities.slice(0, count);
+  const shares = [];
+  for (const item of selected) {
+    const share = await signShare({
+      privateKey: item.wallet.privateKey,
+      nodeID: item.identity.nodeID,
+      digest,
+    });
+    shares.push({
+      nodeID: item.identity.nodeID,
+      teeAddress: item.identity.teeAddress,
+      signerIndex: item.identity.signerIndex,
+      blsPublicKey: item.identity.blsPublicKey,
+      blsPublicKeyHash: item.identity.blsPublicKeyHash,
+      signingDigest: digest,
+      signature: share.signature,
+    });
+  }
+  const cert = await aggregateShares({
+    shares,
+    clusterID: CLUSTER_ID,
+    epoch: 1,
+    threshold: Math.floor(teeIdentities.length / 2) + 1,
+    signingDigest: digest,
+    signatureDigestType: 'responseDigest',
+    term: 1,
+    index: 1,
+  });
+  return clusterCertificateTuple(cert);
+}
+
 async function main() {
   const suiteStartedMs = nowMs();
   fs.ensureDirSync(RUNTIME_DIR);
@@ -169,9 +201,17 @@ async function main() {
   const token = await Token.deploy('Escrow Test Token', 'ETT', 4, deployer.address);
   await token.waitForDeployment();
 
+  const teeIdentities = [];
   const teeWallets = [ethers.Wallet.createRandom(), ethers.Wallet.createRandom(), ethers.Wallet.createRandom()];
-  for (const wallet of teeWallets) {
-    await (await registry.registerTEE(wallet.address)).wait();
+  for (let i = 0; i < teeWallets.length; i += 1) {
+    const wallet = teeWallets[i];
+    const identity = await buildSimulatedAttestationIdentityWithBLS({
+      privateKey: wallet.privateKey,
+      nodeID: `tee-verifier-${i + 1}`,
+      signerIndex: i,
+    });
+    teeIdentities.push({ wallet, identity });
+    await (await registry.registerTEE(evmRegistrationTuple(identity))).wait();
   }
   const threshold = 2;
   const cases = [];
@@ -181,8 +221,8 @@ async function main() {
     const test = { caseId: 'CR-EVM-001', name: 'Pending -> Completed', pass: false };
     const req = await submitAtomic(source);
     const response = buildResponse(req.requestID, req.record);
-    const certs = teeWallets.slice(0, threshold).map((wallet) => certFor(wallet, req.requestID, response.digest));
-    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), certs)).wait();
+    const cert = await clusterCertFor(teeIdentities, response.digest, threshold);
+    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), cert)).wait();
     const finalRecord = await source.requests(req.requestID);
     test.status = Number(finalRecord.status);
     test.durationMs = nowMs() - startedMs;
@@ -203,8 +243,8 @@ async function main() {
     const challengeReceipt = await (await source.startChallenge(req.requestID)).wait();
     const challenged = await source.requests(req.requestID);
     const response = buildResponse(req.requestID, req.record);
-    const certs = teeWallets.slice(0, threshold).map((wallet) => certFor(wallet, req.requestID, response.digest));
-    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), certs)).wait();
+    const cert = await clusterCertFor(teeIdentities, response.digest, threshold);
+    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), cert)).wait();
     const finalRecord = await source.requests(req.requestID);
     test.challengeDeadline = Number(challenged.challengeDeadline);
     test.status = Number(finalRecord.status);
@@ -244,9 +284,9 @@ async function main() {
     const startedMs = nowMs();
     const req = await submitTokenEscrowAtomic(source, token, deployer);
     const response = buildResponse(req.requestID, req.record);
-    const certs = teeWallets.slice(0, 1).map((wallet) => certFor(wallet, req.requestID, response.digest));
+    const cert = await clusterCertFor(teeIdentities, response.digest, 1);
     const result = await expectRevert('insufficient TEE quorum rejected', async () => {
-      await source.completeWithResponse(req.requestID, responseTuple(response), certs);
+      await source.completeWithResponse(req.requestID, responseTuple(response), cert);
     });
     cases.push({
       caseId: 'CR-EVM-004',
@@ -264,9 +304,9 @@ async function main() {
     await increaseTime(7);
     const compensateReceipt = await (await source.compensateAfterChallenge(req.requestID, ethers.toUtf8Bytes(req.failureData))).wait();
     const response = buildResponse(req.requestID, req.record);
-    const certs = teeWallets.slice(0, threshold).map((wallet) => certFor(wallet, req.requestID, response.digest));
+    const cert = await clusterCertFor(teeIdentities, response.digest, threshold);
     const result = await expectRevert('late RESPONSE after compensation rejected', async () => {
-      await source.completeWithResponse(req.requestID, responseTuple(response), certs);
+      await source.completeWithResponse(req.requestID, responseTuple(response), cert);
     });
     cases.push({
       caseId: 'CR-EVM-005',
