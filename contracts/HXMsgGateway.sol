@@ -335,9 +335,8 @@ contract HXMsgGateway {
             threshold: cert.threshold,
             participantCount: cert.participantCount,
             signerBitmap: cert.signerBitmap,
-            selectedPublicKeyHash: cert.selectedPublicKeyHash,
-            aggregatePublicKeyHash: cert.aggregatePublicKeyHash,
-            aggregateSignature: cert.aggregateSignature,
+            selectedSignerHash: cert.selectedSignerHash,
+            signatures: cert.signatures,
             signingDigest: cert.signingDigest,
             committedTerm: cert.committedTerm,
             committedIndex: cert.committedIndex

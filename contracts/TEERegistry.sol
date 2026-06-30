@@ -9,13 +9,12 @@ contract TEERegistry {
 
     mapping(address => TEEIdentity) public teeIdentities;
     mapping(uint16 => address) public teeBySignerIndex;
-    mapping(uint16 => bytes32) public blsPublicKeyHashByIndex;
+    mapping(uint16 => bytes32) public enclavePubKeyHashByIndex;
 
     struct TEERegistration {
         address teeAddress;
         uint16 signerIndex;
         bytes32 enclavePubKeyHash;
-        bytes32 blsPublicKeyHash;
         bytes32 measurement;
         bytes32 quoteHash;
         bytes32 initialSyncStateHash;
@@ -26,7 +25,6 @@ contract TEERegistry {
 
     struct TEEIdentity {
         bytes32 enclavePubKeyHash;
-        bytes32 blsPublicKeyHash;
         bytes32 measurement;
         bytes32 quoteHash;
         bytes32 initialSyncStateHash;
@@ -42,9 +40,8 @@ contract TEERegistry {
         uint16 threshold;
         uint16 participantCount;
         uint256 signerBitmap;
-        bytes32 selectedPublicKeyHash;
-        bytes32 aggregatePublicKeyHash;
-        bytes aggregateSignature;
+        bytes32 selectedSignerHash;
+        bytes signatures;
         bytes32 signingDigest;
         uint64 committedTerm;
         uint64 committedIndex;
@@ -55,7 +52,6 @@ contract TEERegistry {
         uint16 indexed signerIndex,
         bytes32 indexed measurement,
         bytes32 enclavePubKeyHash,
-        bytes32 blsPublicKeyHash,
         bytes32 quoteHash,
         uint64 epoch,
         uint64 notAfter
@@ -76,7 +72,6 @@ contract TEERegistry {
         require(registration.teeAddress != address(0), "bad tee");
         require(registration.epoch == teeEpoch, "bad tee epoch");
         require(registration.enclavePubKeyHash != bytes32(0), "missing enclave key");
-        require(registration.blsPublicKeyHash != bytes32(0), "missing bls key");
         require(registration.measurement != bytes32(0), "missing measurement");
         require(registration.quoteHash != bytes32(0), "missing quote");
         require(registration.notAfter == 0 || registration.notAfter > block.timestamp, "attestation expired");
@@ -92,7 +87,6 @@ contract TEERegistry {
                 registration.teeAddress,
                 registration.signerIndex,
                 registration.enclavePubKeyHash,
-                registration.blsPublicKeyHash,
                 registration.measurement,
                 registration.initialSyncStateHash,
                 registration.epoch,
@@ -106,10 +100,9 @@ contract TEERegistry {
             activeTEECount += 1;
         }
         teeBySignerIndex[registration.signerIndex] = registration.teeAddress;
-        blsPublicKeyHashByIndex[registration.signerIndex] = registration.blsPublicKeyHash;
+        enclavePubKeyHashByIndex[registration.signerIndex] = registration.enclavePubKeyHash;
         teeIdentities[registration.teeAddress] = TEEIdentity({
             enclavePubKeyHash: registration.enclavePubKeyHash,
-            blsPublicKeyHash: registration.blsPublicKeyHash,
             measurement: registration.measurement,
             quoteHash: registration.quoteHash,
             initialSyncStateHash: registration.initialSyncStateHash,
@@ -124,7 +117,6 @@ contract TEERegistry {
             registration.signerIndex,
             registration.measurement,
             registration.enclavePubKeyHash,
-            registration.blsPublicKeyHash,
             registration.quoteHash,
             registration.epoch,
             registration.notAfter
@@ -158,11 +150,12 @@ contract TEERegistry {
         require(cert.signingDigest == expectedDigest, "bad cert digest");
         require(cert.threshold == quorumThreshold(), "bad threshold");
         require(cert.participantCount >= cert.threshold, "below threshold");
-        require(cert.aggregateSignature.length == 96, "bad bls signature length");
-        require(cert.aggregatePublicKeyHash != bytes32(0), "missing aggregate key");
 
+        bytes[] memory signatures = abi.decode(cert.signatures, (bytes[]));
+        require(signatures.length == cert.participantCount, "bad signature count");
         uint16 counted = 0;
         uint16[] memory indexes = new uint16[](cert.participantCount);
+        address[] memory signers = new address[](cert.participantCount);
         bytes32[] memory keyHashes = new bytes32[](cert.participantCount);
         for (uint16 i = 0; i < 256; i += 1) {
             if ((cert.signerBitmap & (uint256(1) << i)) != 0) {
@@ -170,13 +163,15 @@ contract TEERegistry {
                 address tee = teeBySignerIndex[i];
                 require(tee != address(0), "unknown signer");
                 require(isActiveTEE(tee), "inactive tee");
+                require(_recover(expectedDigest, signatures[counted]) == tee, "bad tee signature");
                 indexes[counted] = i;
-                keyHashes[counted] = blsPublicKeyHashByIndex[i];
+                signers[counted] = tee;
+                keyHashes[counted] = enclavePubKeyHashByIndex[i];
                 counted += 1;
             }
         }
         require(counted == cert.participantCount, "bad participant count");
-        require(keccak256(abi.encode(indexes, keyHashes)) == cert.selectedPublicKeyHash, "bad participant keys");
+        require(keccak256(abi.encode(indexes, signers, keyHashes)) == cert.selectedSignerHash, "bad participant keys");
         return true;
     }
 
@@ -192,7 +187,6 @@ contract TEERegistry {
                 registration.teeAddress,
                 registration.signerIndex,
                 registration.enclavePubKeyHash,
-                registration.blsPublicKeyHash,
                 registration.measurement,
                 registration.quoteHash,
                 registration.initialSyncStateHash,

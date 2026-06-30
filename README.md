@@ -18,7 +18,7 @@
 | h-xmsg 通用消息结构 | 已实现，`shared/hxmsg/` |
 | Fabric -> EVM | 已实现，h-FSV view + TEE quorum + EVM gateway |
 | EVM -> Fabric | 已实现，receipt MPT proof + TEE header window + Fabric chaincode；本地默认使用模拟 committee header，Sepolia 模式支持真实 Ethereum sync committee / finalized header 验证 |
-| 多 TEE quorum | 已实现 5 个模拟 TEE 节点，默认 3/5 quorum |
+| 多 TEE quorum | 已实现 5 个模拟 TEE 节点，默认 3/5 quorum；TEE 证书使用 Raft commit 后的 ECDSA quorum 签名集合 |
 | Raft 风格复制 | 已实现 leader election、heartbeat、AppendEntries、commitIndex |
 | 普通消息与 RESPONSE 消息统一入口 | 已实现，策略字段驱动分支 |
 | 目标链业务执行 | 已实现，EVM 和 Fabric 目标侧按业务类别执行真实动作 |
@@ -34,6 +34,7 @@
 - Fabric 网络当前是本地单组织多 peer 环境，策略按 `Org1MSP` 配置，接口保留多组织扩展。
 - 常驻 watcher / responder 尚未实现，当前由测试脚本触发 RESPONSE、challenge 和 compensation。
 - EVM 合约和 Fabric chaincode 当前仍从调用参数或 certification envelope 读取 quorum threshold；后续应改为从链上/链码可信 cluster 配置读取。
+- 项目自定义 TEE 签名已移除 BLS 聚合签名路径，当前 TEE quorum 证书为 `ECDSA_QUORUM_V1`；README 中提到的 BLS 仅指 Ethereum sync committee 协议本身。
 
 ## 整体架构
 
@@ -77,7 +78,7 @@ TEE fabric-hfsv-adapter
   v
 TEE quorum certification
   |
-  | signs deliveryDigest bound to hmsgDigest
+  | signs deliveryDigest bound to hmsgDigest with ECDSA quorum certificate
   v
 EVM HXMsgGateway
   |
@@ -106,7 +107,7 @@ TEE evm-melv-adapter
   v
 TEE quorum certification
   |
-  | signs hmsgDigest for Fabric execution
+  | signs hmsgDigest for Fabric execution with ECDSA quorum certificate
   v
 Fabric xcall ExecuteHXMsg
   |
@@ -178,7 +179,7 @@ EVM 侧智能合约。
 | `submitTokenEscrowHXMsgRequest` | `EvmSourceContract` 中的资产请求入口；真实锁定 ERC20，超时补偿时自动退款 |
 | `HXMsgGateway.sol` | EVM 目标链网关；验证 `HXMsgMinimal`、TEE quorum、目标绑定、防重放和过期时间 |
 | `HXMsgLib.sol` | 链上 h-xmsg 压缩结构、delivery digest、response digest、atomicity hash |
-| `TEERegistry.sol` | EVM 侧可信 TEE 地址注册表 |
+| `TEERegistry.sol` | EVM 侧可信 TEE 地址注册表；验证 `ECDSA_QUORUM_V1` 证书中的 signer bitmap、注册状态和每个 TEE 的 ECDSA 签名 |
 | `TargetContract.sol` | EVM 目标业务路由器；只接受 gateway 调用，解码业务 payload 并分发到分类服务合约 |
 | `BusinessServiceContracts.sol` | EVM 分类业务服务；资产结算、应收账款、物流、授权、Oracle、多方审批 |
 | `CrossChainToken.sol` | 实验 ERC20；资产类跨链消息可在目标 EVM 发放真实 token |
@@ -275,7 +276,7 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 | `adapters/fabric-hfsv-adapter.js` | Fabric h-FSV 验证：peer view、endorsement、MSP、block、tx、rwset、策略绑定 |
 | `adapters/evm-melv-adapter.js` | EVM MELV-EF 验证：sync-committee 或 committee header、header window、receipt MPT proof、log、策略绑定 |
 | `adapters/fabric-block.js` | Fabric protobuf block / tx / rwset 解码和验证 |
-| `core/certification.js` | TEE 对 h-xmsg、deliveryDigest、ResponseProof 的签名封装 |
+| `shared/tee/quorum-certificate.js` | TEE quorum 证书封装；生成 `ECDSA_QUORUM_V1` 签名集合、signer bitmap 和 selected signer hash |
 | `msp-certs/` | 本地实验用 MSP 根证书和 orderer 证书 |
 
 ### `scripts/`
@@ -503,15 +504,15 @@ npm run hxmsg:test:evm-fabric
 
 Sepolia 模式下，脚本会等待目标源链交易进入 finalized execution block，再使用真实 sync committee 数据验证 finalized header，并用该 header 或其 parentHash 链覆盖目标交易区块的 receipt MPT proof 验证。这里的并发只影响实验调度，不代表 TEE 对交易进行批量签名。
 
-Mercury-style TEE 批量签名当前用于 Fabric -> EVM 方向：
+Mercury-style TEE 批量签名当前用于 Fabric -> EVM 和 EVM -> Fabric 两个方向：
 
 | 参数 | 默认值 | 作用 |
 |---|---:|---|
 | `HXMSG_TEE_BATCH_SIZE` | 8 | 每次提交给 TEE quorum 的 h-xmsg 数量 |
 
-该路径中，每个 TEE 节点仍会逐条验证 h-FSV Fabric View-like 证明。验证通过后，TEE 对这一批 h-xmsg 的 Merkle root、batchID、batchSize 和目标链 ID 形成一个 batch signing digest，并通过 5 节点 TEE quorum 提交一组批签名。EVM 侧 `HXMsgGateway.executeHXMsgMinimalBatchCluster` 只验证一次 TEE quorum，再用每条消息的 Merkle proof 证明其属于该批次，然后逐条执行目标业务合约。
+该路径中，每个 TEE 节点仍会逐条验证源链事实证明。验证通过后，TEE 对这一批 h-xmsg 的 Merkle root、batchID、batchSize 和目标链 ID 形成一个 batch signing digest，并通过 5 节点 TEE quorum 形成一组 ECDSA quorum 签名。EVM 侧 `HXMsgGateway.executeHXMsgMinimalBatchCluster` 只验证一次 TEE quorum，再用每条消息的 Merkle proof 证明其属于该批次，然后逐条执行目标业务合约；Fabric 侧链码同样验证 batch digest、Merkle proof 和 ECDSA quorum 证书。
 
-因此，TEE 批量签名优化的是“多条 Fabric -> EVM 消息在 EVM 目标链上重复验证 TEE quorum”的成本。EVM -> Fabric 方向的 EVM gas 主要发生在源链业务请求提交，目标链是 Fabric，因此不会因为 TEE 批签名直接降低源链 gas。
+因此，TEE 批量签名优化的是目标链重复验证 TEE quorum 的成本。EVM -> Fabric 方向的 EVM gas 主要发生在源链业务请求提交，目标链是 Fabric，因此批签名主要降低 Fabric 目标执行侧的重复验证成本，而不会直接降低源链 EVM 请求 gas。
 
 Sepolia sync committee / finalized header 验证：
 
@@ -611,8 +612,8 @@ npm run hxmsg:test:challenge:evm-fabric
 | 通过率 | 8/8 PASS |
 | TEE 批大小 | `HXMSG_TEE_BATCH_SIZE=8` |
 | TEE batch quorum | 5/3 |
-| EVM batch tx gas | 3703239 |
-| 平均 gas/message | 462905 |
+| EVM batch tx gas | 3197460 |
+| 平均 gas/message | 399682 |
 | 结果文件 | `runtime/hxmsg-fabric-evm-results.json` |
 | 汇总文件 | `runtime/hxmsg-test-summary.md` |
 
@@ -623,8 +624,9 @@ npm run hxmsg:test:challenge:evm-fabric
 | 运行模式 | `local-mock-committee` |
 | 通过率 | 8/8 PASS |
 | 并发配置 | source=1, proof=4, tee=1, fabric=2 |
-| 总耗时 | 21147 ms |
-| TEE quorum | 每条均为 5/3 |
+| 总耗时 | 19886 ms |
+| TEE batch quorum | 3/3，批大小 8 |
+| EVM source tx gas | 总计 2355120，平均 294390/message |
 | Fabric 状态 | 每条均为 `executed` |
 | 结果文件 | `runtime/hxmsg-evm-fabric-results.json` |
 | 汇总文件 | `runtime/hxmsg-evm-fabric-summary.md` |

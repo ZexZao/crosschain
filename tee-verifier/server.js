@@ -18,8 +18,8 @@ const { verifySourceFact } = require('./adapters');
 const { verifyReceiptProof } = require('../shared/evm/receipt-proof');
 const { maintainHeaderWindow } = require('./adapters/evm-melv-adapter');
 const { verifyFabricExecutionView } = require('./adapters/fabric-hfsv-adapter');
-const { buildSimulatedAttestationIdentityWithBLS } = require('../shared/tee/attestation');
-const { signShare, aggregateShares } = require('../shared/tee/bls-threshold');
+const { buildSimulatedAttestationIdentity } = require('../shared/tee/attestation');
+const { signCommittedDigest, buildQuorumCertificate } = require('../shared/tee/quorum-certificate');
 
 loadDotEnv();
 ensureRuntime();
@@ -97,7 +97,7 @@ if (!state) {
 const CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes(process.env.TEE_CLUSTER_ID || 'HXMSG_TEE_CLUSTER_LOCAL_V1'));
 
 async function currentTEEIdentity() {
-  return buildSimulatedAttestationIdentityWithBLS({
+  return buildSimulatedAttestationIdentity({
     privateKey: state.privateKey,
     nodeID: teeNodeID,
     epoch: Number(process.env.TEE_ATTESTATION_EPOCH || 1),
@@ -616,7 +616,7 @@ async function verifyBatchLocally({ batch }) {
   return { rebuilt, verificationResults };
 }
 
-async function buildCommittedBLSShare({ hxmsg, requestID, digest, entry }) {
+async function buildCommittedSignature({ hxmsg, requestID, digest, entry }) {
   const committedEntry = consensusState.log.find((item) => item.entryDigest === entry.entryDigest);
   if (!committedEntry || committedEntry.status !== 'committed') {
     throw new Error('cannot sign before consensus commit');
@@ -627,26 +627,12 @@ async function buildCommittedBLSShare({ hxmsg, requestID, digest, entry }) {
     assertEntryMatchesDigest(committedEntry, requestID, digest);
   }
   const identity = await currentTEEIdentity();
-  const share = await signShare({
-    requestID,
-    digest: committedEntry.signingDigest || committedEntry.hmsgDigest,
+  return signCommittedDigest({
     privateKey: state.privateKey,
     nodeID: teeNodeID,
+    identity,
+    committedEntry,
   });
-  return {
-    nodeID: teeNodeID,
-    teeAddress: state.address,
-    signerIndex: identity.signerIndex,
-    blsPublicKey: identity.blsPublicKey,
-    blsPublicKeyHash: identity.blsPublicKeyHash,
-    requestID: committedEntry.requestID,
-    hmsgDigest: committedEntry.hmsgDigest,
-    signingDigest: committedEntry.signingDigest || committedEntry.hmsgDigest,
-    signatureDigestType: committedEntry.signatureDigestType || 'hmsgDigest',
-    signature: share.signature,
-    committedTerm: committedEntry.term,
-    committedIndex: committedEntry.index,
-  };
 }
 
 async function startElection() {
@@ -868,14 +854,14 @@ async function ensureCurrentTermCommitBarrier() {
 }
 
 async function collectCommittedCertifications({ hxmsg, committedEntry, commitAcks }) {
-  const localShare = await buildCommittedBLSShare({
+  const localSignature = await buildCommittedSignature({
     hxmsg,
     requestID: committedEntry.requestID,
     digest: committedEntry.hmsgDigest,
     entry: committedEntry,
   });
-  const shares = [localShare];
-  const certAcks = [{ nodeID: teeNodeID, signed: true, blsShare: localShare }];
+  const signatures = [localSignature];
+  const certAcks = [{ nodeID: teeNodeID, signed: true, signature: localSignature }];
   await Promise.all(clusterPeerDefs().map(async (peer) => {
     const committed = commitAcks.find((ack) => ack.committed && ack.nodeID === peer.id);
     if (!committed) return;
@@ -890,17 +876,17 @@ async function collectCommittedCertifications({ hxmsg, committedEntry, commitAck
       });
       if (!resp.ok) throw new Error(`status ${resp.status}`);
       const data = await resp.json();
-      shares.push(data.blsShare);
-      certAcks.push({ nodeID: data.nodeID, signed: true, blsShare: data.blsShare });
+      signatures.push(data.signature);
+      certAcks.push({ nodeID: data.nodeID, signed: true, signature: data.signature });
     } catch (error) {
       certAcks.push({ nodeID: peer.id, signed: false, error: error.message });
     }
   }));
-  const selectedShares = shares
-    .filter((share) => share && sameHex(share.signingDigest, committedEntry.signingDigest || committedEntry.hmsgDigest))
+  const selectedSignatures = signatures
+    .filter((signature) => signature && sameHex(signature.signingDigest, committedEntry.signingDigest || committedEntry.hmsgDigest))
     .slice(0, clusterThreshold());
-  const clusterCertificate = await aggregateShares({
-    shares: selectedShares,
+  const clusterCertificate = buildQuorumCertificate({
+    signatures: selectedSignatures,
     clusterID: CLUSTER_ID,
     epoch: Number(process.env.TEE_ATTESTATION_EPOCH || 1),
     threshold: clusterThreshold(),
@@ -909,7 +895,7 @@ async function collectCommittedCertifications({ hxmsg, committedEntry, commitAck
     term: committedEntry.term,
     index: committedEntry.index,
   });
-  return { clusterCertificate, shares: selectedShares, certAcks };
+  return { clusterCertificate, signatures: selectedSignatures, certAcks };
 }
 
 async function collectClusterDigestCertifications({ response, helperData, localResult }) {
@@ -949,7 +935,7 @@ async function collectClusterDigestCertifications({ response, helperData, localR
       verificationResults,
     };
   }
-  const { clusterCertificate, shares, certAcks } = await collectCommittedCertifications({
+  const { clusterCertificate, signatures, certAcks } = await collectCommittedCertifications({
     hxmsg: null,
     committedEntry: raftResult.committedEntry,
     commitAcks: raftResult.commitAcks || [],
@@ -970,7 +956,7 @@ async function collectClusterDigestCertifications({ response, helperData, localR
     signingDigest: digest,
     signatureDigestType: 'responseDigest',
     ...clusterCertificate,
-    shares,
+    signatureDetails: signatures,
     appendAcks: raftResult.appendAcks || [],
     commitAcks: raftResult.commitAcks || [],
     barrierEntry: barrierResult?.committedEntry ? {
@@ -1013,7 +999,7 @@ async function collectClusterAttestations({ hxmsg, helperData, localResult }) {
     };
   }
 
-  const { clusterCertificate, shares, certAcks } = await collectCommittedCertifications({
+  const { clusterCertificate, signatures, certAcks } = await collectCommittedCertifications({
     hxmsg,
     committedEntry: raftResult.committedEntry,
     commitAcks: raftResult.commitAcks || [],
@@ -1034,7 +1020,7 @@ async function collectClusterAttestations({ hxmsg, helperData, localResult }) {
     signingDigest: raftResult.committedEntry.signingDigest,
     signatureDigestType: raftResult.committedEntry.signatureDigestType,
     ...clusterCertificate,
-    shares,
+    signatureDetails: signatures,
     appendAcks: raftResult.appendAcks || [],
     commitAcks: raftResult.commitAcks || [],
     barrierEntry: barrierResult?.committedEntry ? {
@@ -1079,7 +1065,7 @@ async function collectClusterBatchCertifications({ batch, localResult }) {
     };
   }
 
-  const { clusterCertificate, shares, certAcks } = await collectCommittedCertifications({
+  const { clusterCertificate, signatures, certAcks } = await collectCommittedCertifications({
     hxmsg: null,
     committedEntry: raftResult.committedEntry,
     commitAcks: raftResult.commitAcks || [],
@@ -1103,7 +1089,7 @@ async function collectClusterBatchCertifications({ batch, localResult }) {
     signingDigest: batch.batchSigningDigest,
     signatureDigestType: 'batchDigest',
     ...clusterCertificate,
-    shares,
+    signatureDetails: signatures,
     appendAcks: raftResult.appendAcks || [],
     commitAcks: raftResult.commitAcks || [],
     barrierEntry: barrierResult?.committedEntry ? {
@@ -1296,7 +1282,7 @@ app.post('/internal/raft/sign-committed', async (req, res) => {
     const entry = consensusState.log.find((item) => item.entryDigest === entryDigest);
     if (!entry) throw new Error(`entry not found: ${entryDigest}`);
     if (entry.status !== 'committed') throw new Error('entry is not committed');
-    const blsShare = await buildCommittedBLSShare({
+    const signature = await buildCommittedSignature({
       hxmsg: entry.hxmsg,
       requestID: entry.requestID,
       digest: entry.hmsgDigest,
@@ -1305,7 +1291,7 @@ app.post('/internal/raft/sign-committed', async (req, res) => {
     res.json({
       nodeID: teeNodeID,
       entryDigest,
-      blsShare,
+      signature,
     });
   } catch (error) {
     res.status(500).json({ nodeID: teeNodeID, error: error.message });

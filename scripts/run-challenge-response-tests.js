@@ -2,8 +2,8 @@ const fs = require('fs-extra');
 const path = require('path');
 const { ethers, network } = require('hardhat');
 const { computeResponseDigest, CommitmentType, AtomicityMode, FeedbackType, ResponseStatus } = require('../shared/hxmsg');
-const { buildSimulatedAttestationIdentityWithBLS, evmRegistrationTuple } = require('../shared/tee/attestation');
-const { signShare, aggregateShares } = require('../shared/tee/bls-threshold');
+const { buildSimulatedAttestationIdentity, evmRegistrationTuple } = require('../shared/tee/attestation');
+const { signCommittedDigest, buildQuorumCertificate } = require('../shared/tee/quorum-certificate');
 const { clusterCertificateTuple } = require('../shared/tee/registration');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
@@ -157,25 +157,24 @@ async function expectRevert(label, fn) {
 
 async function clusterCertFor(teeIdentities, digest, count) {
   const selected = teeIdentities.slice(0, count);
-  const shares = [];
+  const signatures = [];
   for (const item of selected) {
-    const share = await signShare({
+    signatures.push(signCommittedDigest({
       privateKey: item.wallet.privateKey,
       nodeID: item.identity.nodeID,
-      digest,
-    });
-    shares.push({
-      nodeID: item.identity.nodeID,
-      teeAddress: item.identity.teeAddress,
-      signerIndex: item.identity.signerIndex,
-      blsPublicKey: item.identity.blsPublicKey,
-      blsPublicKeyHash: item.identity.blsPublicKeyHash,
+      identity: item.identity,
+      committedEntry: {
+        requestID: ethers.ZeroHash,
+        hmsgDigest: digest,
       signingDigest: digest,
-      signature: share.signature,
-    });
+        signatureDigestType: 'responseDigest',
+        term: 1,
+        index: 1,
+      },
+    }));
   }
-  const cert = await aggregateShares({
-    shares,
+  const cert = buildQuorumCertificate({
+    signatures,
     clusterID: CLUSTER_ID,
     epoch: 1,
     threshold: Math.floor(teeIdentities.length / 2) + 1,
@@ -183,6 +182,7 @@ async function clusterCertFor(teeIdentities, digest, count) {
     signatureDigestType: 'responseDigest',
     term: 1,
     index: 1,
+    allowBelowThreshold: true,
   });
   return clusterCertificateTuple(cert);
 }
@@ -205,7 +205,7 @@ async function main() {
   const teeWallets = [ethers.Wallet.createRandom(), ethers.Wallet.createRandom(), ethers.Wallet.createRandom()];
   for (let i = 0; i < teeWallets.length; i += 1) {
     const wallet = teeWallets[i];
-    const identity = await buildSimulatedAttestationIdentityWithBLS({
+    const identity = buildSimulatedAttestationIdentity({
       privateKey: wallet.privateKey,
       nodeID: `tee-verifier-${i + 1}`,
       signerIndex: i,

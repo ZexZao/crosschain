@@ -66,9 +66,8 @@ library HXMsgLib {
         uint16 threshold;
         uint16 participantCount;
         uint256 signerBitmap;
-        bytes32 selectedPublicKeyHash;
-        bytes32 aggregatePublicKeyHash;
-        bytes aggregateSignature;
+        bytes32 selectedSignerHash;
+        bytes signatures;
         bytes32 signingDigest;
         uint64 committedTerm;
         uint64 committedIndex;

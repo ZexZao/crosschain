@@ -6,7 +6,6 @@ const { ethers } = require('ethers');
 const ABI = ethers.AbiCoder.defaultAbiCoder();
 const TEE_CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes('HXMSG_TEE_CLUSTER_LOCAL_V1'));
 const BATCH_DOMAIN = ethers.id('HXMSG_BATCH_V1');
-let blsPromise = null;
 
 function parseJson(value, fieldName) {
   try {
@@ -20,29 +19,15 @@ function strip0x(value) {
   return String(value || '').startsWith('0x') ? String(value).slice(2) : String(value || '');
 }
 
-function hexToBytes(hex) {
-  return Uint8Array.from(Buffer.from(strip0x(hex), 'hex'));
-}
-
-async function getBLS() {
-  if (!blsPromise) {
-    blsPromise = import('@chainsafe/bls/herumi').then(async (mod) => {
-      const bls = mod.default || mod;
-      if (typeof bls.init === 'function') await bls.init();
-      return bls;
-    });
-  }
-  return blsPromise;
-}
-
-function selectedPublicKeyHash(participants) {
+function selectedSignerHash(participants) {
   const sorted = [...participants].sort((a, b) => Number(a.signerIndex) - Number(b.signerIndex));
   return ethers.keccak256(
     ABI.encode(
-      ['uint16[]', 'bytes32[]'],
+      ['uint16[]', 'address[]', 'bytes32[]'],
       [
         sorted.map((item) => Number(item.signerIndex)),
-        sorted.map((item) => item.blsPublicKeyHash),
+        sorted.map((item) => ethers.getAddress(item.teeAddress)),
+        sorted.map((item) => item.enclavePubKeyHash),
       ]
     )
   );
@@ -739,8 +724,6 @@ function normalizeTEERegistration(input) {
     teeAddress,
     signerIndex: Number(identity.signerIndex),
     enclavePubKeyHash: identity.enclavePubKeyHash,
-    blsPublicKey: identity.blsPublicKey,
-    blsPublicKeyHash: identity.blsPublicKeyHash,
     measurement: identity.measurement,
     quoteHash: identity.quoteHash,
     initialSyncStateHash: identity.initialSyncStateHash || ethers.ZeroHash,
@@ -755,13 +738,12 @@ function normalizeTEERegistration(input) {
 function simulatedQuoteHash(identity) {
   return ethers.keccak256(
     ABI.encode(
-      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
+      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
       [
         SIMULATED_ATTESTATION_TYPE,
         identity.teeAddress,
         identity.signerIndex,
         identity.enclavePubKeyHash,
-        identity.blsPublicKeyHash,
         identity.measurement,
         identity.initialSyncStateHash,
         identity.epoch,
@@ -774,13 +756,12 @@ function simulatedQuoteHash(identity) {
 function teeRegistrationDigest(identity) {
   return ethers.keccak256(
     ABI.encode(
-      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
+      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
       [
         identity.attestationType,
         identity.teeAddress,
         identity.signerIndex,
         identity.enclavePubKeyHash,
-        identity.blsPublicKeyHash,
         identity.measurement,
         identity.quoteHash,
         identity.initialSyncStateHash,
@@ -801,15 +782,6 @@ function verifyTEERegistration(identity, expectedEpoch) {
   }
   if (!Number.isInteger(identity.signerIndex) || identity.signerIndex < 0 || identity.signerIndex >= 256) {
     throw new Error('bad signerIndex');
-  }
-  if (!identity.blsPublicKey || strip0x(identity.blsPublicKey).length !== 96) {
-    throw new Error('bad BLS public key');
-  }
-  if (!identity.blsPublicKeyHash || identity.blsPublicKeyHash === ethers.ZeroHash) {
-    throw new Error('missing BLS public key hash');
-  }
-  if (ethers.keccak256(hexToBytes(identity.blsPublicKey)).toLowerCase() !== identity.blsPublicKeyHash.toLowerCase()) {
-    throw new Error('bad BLS public key hash');
   }
   if (!identity.measurement || identity.measurement === ethers.ZeroHash) {
     throw new Error('missing enclave measurement');
@@ -842,7 +814,7 @@ function assertTEERegistrar(ctx) {
 
 async function verifyTEEClusterCertificate(ctx, expectedDigest, certEnvelope) {
   const cert = certEnvelope.clusterCertificate || certEnvelope.teeClusterCertification || certEnvelope;
-  if (!cert || cert.scheme !== 'BLS_THRESHOLD_V1') throw new Error('bad BLS cluster certificate');
+  if (!cert || cert.scheme !== 'ECDSA_QUORUM_V1') throw new Error('bad TEE cluster certificate');
   if (String(cert.clusterID).toLowerCase() !== TEE_CLUSTER_ID.toLowerCase()) throw new Error('bad TEE clusterID');
   if (String(cert.signingDigest).toLowerCase() !== String(expectedDigest).toLowerCase()) {
     throw new Error('TEE certificate digest mismatch');
@@ -853,13 +825,15 @@ async function verifyTEEClusterCertificate(ctx, expectedDigest, certEnvelope) {
   if (!Array.isArray(cert.participants) || cert.participants.length !== Number(cert.participantCount)) {
     throw new Error('bad TEE participants');
   }
-  if (strip0x(cert.aggregateSignature).length !== 192) throw new Error('bad BLS aggregate signature');
+  if (!Array.isArray(cert.signatures) || cert.signatures.length !== Number(cert.participantCount)) {
+    throw new Error('bad TEE signature count');
+  }
 
   const seen = new Set();
   const participants = [];
-  const publicKeys = [];
   let bitmap = 0n;
-  for (const participant of cert.participants) {
+  for (let i = 0; i < cert.participants.length; i += 1) {
+    const participant = cert.participants[i];
     const signerIndex = Number(participant.signerIndex);
     if (seen.has(signerIndex)) throw new Error('duplicate TEE signer');
     seen.add(signerIndex);
@@ -869,26 +843,23 @@ async function verifyTEEClusterCertificate(ctx, expectedDigest, certEnvelope) {
     if (ethers.getAddress(participant.teeAddress) !== ethers.getAddress(identity.address)) {
       throw new Error('TEE signer address mismatch');
     }
-    if (String(participant.blsPublicKeyHash).toLowerCase() !== String(identity.blsPublicKeyHash).toLowerCase()) {
-      throw new Error('TEE BLS key hash mismatch');
+    if (String(participant.enclavePubKeyHash).toLowerCase() !== String(identity.enclavePubKeyHash).toLowerCase()) {
+      throw new Error('TEE enclave key hash mismatch');
+    }
+    const recovered = ethers.getAddress(ethers.recoverAddress(expectedDigest, cert.signatures[i]));
+    if (recovered !== ethers.getAddress(identity.address)) {
+      throw new Error('bad TEE signature');
     }
     participants.push({
       signerIndex,
-      blsPublicKeyHash: identity.blsPublicKeyHash,
+      teeAddress: identity.address,
+      enclavePubKeyHash: identity.enclavePubKeyHash,
     });
-    publicKeys.push(identity.blsPublicKey);
   }
   if (bitmap !== BigInt(cert.signerBitmap)) throw new Error('bad TEE signer bitmap');
-  if (selectedPublicKeyHash(participants).toLowerCase() !== String(cert.selectedPublicKeyHash).toLowerCase()) {
-    throw new Error('bad selected BLS public key hash');
+  if (selectedSignerHash(participants).toLowerCase() !== String(cert.selectedSignerHash).toLowerCase()) {
+    throw new Error('bad selected TEE signer hash');
   }
-  const bls = await getBLS();
-  const ok = bls.verifyAggregate(
-    publicKeys.map(hexToBytes),
-    hexToBytes(cert.signingDigest),
-    hexToBytes(cert.aggregateSignature)
-  );
-  if (!ok) throw new Error('bad BLS aggregate signature');
   return {
     digest: expectedDigest,
     validTEECount: Number(cert.participantCount),
@@ -1243,8 +1214,6 @@ class XCallContract extends Contract {
       address,
       signerIndex: identity.signerIndex,
       enclavePubKeyHash: identity.enclavePubKeyHash,
-      blsPublicKey: identity.blsPublicKey,
-      blsPublicKeyHash: identity.blsPublicKeyHash,
       measurement: identity.measurement,
       quoteHash: identity.quoteHash,
       initialSyncStateHash: identity.initialSyncStateHash,

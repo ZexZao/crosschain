@@ -33,8 +33,8 @@ const DEFAULT_CASE_TOTAL = Number(process.env.HXMSG_CASE_TOTAL || 8);
 const CASE_LIMIT = Number(process.env.HXMSG_CASE_LIMIT || DEFAULT_CASE_TOTAL);
 const FABRIC_EMIT_DELAY_MS = Number(process.env.HXMSG_FABRIC_EMIT_DELAY_MS || 1500);
 const CASE_RUN_ID = process.env.HXMSG_CASE_RUN_ID || '';
-const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes32,bytes,bytes32,uint64,uint64)';
-const TEE_REGISTRATION_ABI = '(address teeAddress,uint16 signerIndex,bytes32 enclavePubKeyHash,bytes32 blsPublicKeyHash,bytes32 measurement,bytes32 quoteHash,bytes32 initialSyncStateHash,uint64 epoch,uint64 notAfter,bytes attestationSignature)';
+const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64)';
+const TEE_REGISTRATION_ABI = '(address teeAddress,uint16 signerIndex,bytes32 enclavePubKeyHash,bytes32 measurement,bytes32 quoteHash,bytes32 initialSyncStateHash,uint64 epoch,uint64 notAfter,bytes attestationSignature)';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -137,7 +137,7 @@ async function relayHXMsg(hxmsg, teeUrl) {
     throw new Error(`TEE cluster quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
   }
   if (Number(cluster.participantCount || 0) < Number(cluster.threshold || 1)) {
-    throw new Error(`Committed TEE BLS participants below threshold: ${cluster.participantCount}/${cluster.threshold}`);
+    throw new Error(`Committed TEE participants below threshold: ${cluster.participantCount}/${cluster.threshold}`);
   }
 
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
@@ -187,7 +187,7 @@ async function relayHXMsgBatch(hxmsgs, teeUrl) {
     throw new Error(`TEE batch quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
   }
   if (Number(cluster.participantCount || 0) < Number(cluster.threshold || 1)) {
-    throw new Error(`Committed TEE batch BLS participants below threshold: ${cluster.participantCount}/${cluster.threshold}`);
+    throw new Error(`Committed TEE batch participants below threshold: ${cluster.participantCount}/${cluster.threshold}`);
   }
 
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
