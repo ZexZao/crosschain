@@ -15,6 +15,7 @@
     "hxmsg:test:challenge:fabric-evm": "node scripts/run-fabric-evm-challenge-e2e.js",
     "hxmsg:test:challenge:evm-fabric": "node scripts/run-evm-fabric-challenge-e2e.js",
     "hxmsg:test:asset": "node scripts/run-asset-transfer-refund-tests.js",
+    "hxmsg:test:forgery": "node scripts/run-hxmsg-forgery-attack-tests.js",
     "sepolia:sync-committee": "node scripts/run-sepolia-sync-committee-check.js",
     "sepolia:test:evm-fabric": "node scripts/run-sepolia-evm-fabric-test.js",
     "sepolia:test:fabric-evm": "node scripts/run-sepolia-fabric-evm-test.js",
