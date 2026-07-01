@@ -25,6 +25,7 @@
 | 资产转账和退款 | 已实现实验闭环：Fabric escrow 锁定扣款、EVM ERC20 发放、Fabric challenge timeout 自动退款、EVM token escrow 自动退款 |
 | 挑战响应 | 已实现基础闭环，支持 Completed / Challenged / Compensated |
 | EVM gas 优化 | 已实现 `HXMsgMinimal` 目标链提交，完整 h-xmsg 由 TEE digest 绑定 |
+| 自洽伪造攻击测试 | 已实现，覆盖 Fabric -> EVM 和 EVM -> Fabric 两个方向 |
 | 测试结果落盘 | 已实现，输出到 `runtime/` |
 
 当前仍保留的边界：
@@ -294,6 +295,7 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 | `run-fabric-evm-challenge-e2e.js` | Fabric -> EVM RESPONSE 端到端闭环 |
 | `run-evm-fabric-challenge-e2e.js` | EVM -> Fabric RESPONSE 端到端闭环 |
 | `run-asset-transfer-refund-tests.js` | 真实资产锁定、跨链 mint 和超时退款测试 |
+| `run-hxmsg-forgery-attack-tests.js` | 自洽伪造攻击测试；攻击者同时篡改 h-xmsg、hmsgDigest 和链下传输材料，验证 TEE 是否会被源链事实证明拦下 |
 | `run-raft-cluster-tests.js` | TEE Raft 集群主路径测试 |
 | `export-fabric-wallet.js` | 导出 Fabric wallet 身份 |
 
@@ -572,6 +574,14 @@ npm run hxmsg:test:challenge:fabric-evm
 npm run hxmsg:test:challenge:evm-fabric
 ```
 
+自洽伪造攻击测试：
+
+```bash
+npm run hxmsg:test:forgery
+```
+
+该测试会各构造一条 EVM -> Fabric 和 Fabric -> EVM 的真实源链请求，然后把链下 h-xmsg、`hmsgDigest`、`callDataHash`、`businessPayloadHash`、`targetExecutionHash`、`sourcePayloadHash` 等字段整体改成“内部自洽”的伪造版本。例如真实金额为 `10.0000`，伪造材料改成 `100.0000`。测试预期不是目标链执行失败，而是 TEE 在源链事实验证阶段拒绝该材料：EVM -> Fabric 由 receipt MPT proof 中真实 log 绑定的 `callDataHash` 拦截，Fabric -> EVM 由 h-FSV view / Fabric rwset 中真实 source record 绑定的 `sourcePayloadHash` 拦截。
+
 ## 最近一次验证结果
 
 最近一次本地验证已通过：
@@ -586,6 +596,7 @@ npm run hxmsg:test:challenge:evm-fabric
 | `npm run hxmsg:test:challenge` | 6/6 PASS |
 | `npm run hxmsg:test:challenge:fabric-evm` | PASS |
 | `npm run hxmsg:test:challenge:evm-fabric` | PASS |
+| `npm run hxmsg:test:forgery` | 2/2 PASS |
 
 对应结果文件位于：
 
@@ -603,6 +614,8 @@ npm run hxmsg:test:challenge:evm-fabric
 | `runtime/hxmsg-challenge-response-summary.md` | 挑战响应状态机汇总 |
 | `runtime/hxmsg-fabric-evm-challenge-e2e-results.json` | Fabric -> EVM RESPONSE 端到端 |
 | `runtime/hxmsg-evm-fabric-challenge-e2e-results.json` | EVM -> Fabric RESPONSE 端到端 |
+| `runtime/hxmsg-forgery-attack-results.json` | 自洽伪造攻击测试 JSON 结果 |
+| `runtime/hxmsg-forgery-attack-summary.md` | 自洽伪造攻击测试 Markdown 汇总 |
 
 最近一次本地 Fabric -> EVM TEE 批签名主线测试结果：
 
@@ -703,6 +716,15 @@ npm run hxmsg:test:challenge:evm-fabric
 - Sepolia 模式中，TEE 只接受真实 Ethereum sync committee/finality 认证过的 finalized header；若目标交易区块不是 checkpoint 区块，TEE 会验证从目标区块到 finalized header 的执行层 parentHash 链。
 - TEE 用本地 header 的 `receiptsRoot` 验证 receipt MPT proof。
 - TEE 检查 log、事件参数、feedback/atomicity 策略与 h-xmsg 绑定一致。
+
+### 抵抗自洽伪造
+
+攻击者可以修改所有经过自己之手的链下材料，使 h-xmsg 内部字段、`hmsgDigest`、`callDataHash` 和业务哈希彼此一致。但 TEE 的判断锚点不是链下材料本身，而是源链不可篡改事实：
+
+- EVM -> Fabric：TEE 先用可信 header 的 `receiptsRoot` 验证 receipt MPT proof，再从 receipt log 中取出源链合约真实发出的 `CrossChainCallRequested` 事件。伪造材料即使内部自洽，只要与 log 中的 `callDataHash / businessPayloadHash / feedback / atomicityHash` 不一致，就会被拒绝。
+- Fabric -> EVM：TEE 先验证 h-FSV view 的 peer endorsement、MSP、策略和 payload 一致性，再检查 Fabric block 中对应交易、VALID 状态和 rwset 写入。伪造材料即使重新计算了 `sourcePayloadHash`，只要与 Fabric 状态中的真实 source record 不一致，就会被拒绝。
+
+对应回归命令为 `npm run hxmsg:test:forgery`，当前结果为 2/2 PASS。
 
 ### TEE quorum
 
