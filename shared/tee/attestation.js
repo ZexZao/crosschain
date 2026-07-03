@@ -20,6 +20,8 @@ function normalizeIdentity(identity) {
     attestationType: identity.attestationType || SIMULATED_ATTESTATION_TYPE,
     attestationSignature: identity.attestationSignature || '0x',
     nodeID: identity.nodeID || '',
+    subnetID: identity.subnetID || '',
+    subnetProfile: identity.subnetProfile || '',
   };
 }
 
@@ -70,6 +72,8 @@ function attestationRegistrationDigest(identity) {
 function buildSimulatedAttestationIdentity({
   privateKey,
   nodeID,
+  subnetID,
+  subnetProfile,
   signerIndex: configuredSignerIndex,
   chainState,
   epoch = Number(process.env.TEE_ATTESTATION_EPOCH || 1),
@@ -79,12 +83,17 @@ function buildSimulatedAttestationIdentity({
   if (!privateKey) throw new Error('privateKey is required');
   const wallet = new ethers.Wallet(privateKey);
   const enclavePubKey = wallet.signingKey.publicKey;
-  const signerIndex = optionsSignerIndex({ nodeID, signerIndex: configuredSignerIndex });
+  const signerIndex = optionsSignerIndex({
+    nodeID,
+    signerIndex: configuredSignerIndex ?? process.env.TEE_SIGNER_INDEX,
+  });
   const initialSyncStateHash = chainState
     ? ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(chainState)))
     : ethers.ZeroHash;
   const base = {
     nodeID: nodeID || '',
+    subnetID: subnetID || process.env.TEE_SUBNET_ID || '',
+    subnetProfile: subnetProfile || process.env.TEE_SUBNET_PROFILE || '',
     teeAddress: wallet.address,
     signerIndex,
     enclavePubKey,
@@ -106,7 +115,7 @@ function buildSimulatedAttestationIdentity({
 }
 
 function optionsSignerIndex(options = {}) {
-  return options.signerIndex !== undefined
+  return options.signerIndex !== undefined && options.signerIndex !== null && options.signerIndex !== ''
     ? Number(options.signerIndex)
     : Number(process.env.TEE_SIGNER_INDEX !== undefined
       ? process.env.TEE_SIGNER_INDEX

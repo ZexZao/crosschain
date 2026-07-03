@@ -31,11 +31,11 @@
 当前仍保留的边界：
 
 - TEE 是模拟服务，还没有部署到真实 TEE 服务器。
-- 本地 Hardhat 回归测试仍使用模拟 EVM header committee；Sepolia 路径已接入真实 Beacon light-client 数据，TEE adapter 会验证 sync committee BLS 聚合签名、finality branch、execution payload branch，并把目标交易区块通过执行层 hash 链锚定到 finalized header。
+- 本地 Hardhat 回归测试仍使用模拟 EVM header committee；Sepolia 路径已接入真实 Beacon light-client 数据，TEE adapter 会验证 Ethereum sync committee 聚合签名、finality branch、execution payload branch，并把目标交易区块通过执行层 hash 链锚定到 finalized header。
 - Fabric 网络当前是本地单组织多 peer 环境，策略按 `Org1MSP` 配置，接口保留多组织扩展。
 - 常驻 watcher / responder 尚未实现，当前由测试脚本触发 RESPONSE、challenge 和 compensation。
 - EVM 合约和 Fabric chaincode 当前仍从调用参数或 certification envelope 读取 quorum threshold；后续应改为从链上/链码可信 cluster 配置读取。
-- 项目自定义 TEE 签名已移除 BLS 聚合签名路径，当前 TEE quorum 证书为 `ECDSA_QUORUM_V1`；README 中提到的 BLS 仅指 Ethereum sync committee 协议本身。
+- 项目自定义 TEE 签名已移除门限聚合签名路径，当前 TEE quorum 证书为 `ECDSA_QUORUM_V1`。代码中保留的 Ethereum 共识层签名验证库仅用于验证 sync committee 协议签名，不参与 TEE quorum。
 
 ## 整体架构
 
@@ -200,14 +200,15 @@ Fabric 链码。
 |---|---|
 | `EmitXCall` | Fabric 源链发起跨链请求，写入 `crosschainEvents:{requestID}` |
 | `QueryCrosschainEvent` | h-FSV view 查询入口 |
-| `ExecuteHXMsg` | Fabric 目标链执行 EVM -> Fabric h-xmsg |
+| `ExecuteHXMsgCompact` | Fabric 目标链压缩执行入口；接收 minimal delivery、compact business call、业务 payload 和 TEE cert |
+| `ExecuteHXMsg` | Fabric 目标链兼容执行入口；接收完整 EVM -> Fabric h-xmsg |
 | `QueryBusinessRecord` | 按 `op / recordId` 查询目标链业务状态 |
 | `QueryBusinessRecordByRequest` | 按 `requestID` 查询目标链业务状态 |
 | `InitAssetBalance` | 初始化 Fabric 实验资产余额 |
 | `LockAssetXCall` | Fabric 源链真实扣减余额并创建 escrow 后发起跨链请求 |
 | `RefundAssetEscrow` | Fabric 源链真实退回 escrow 锁定资产 |
 | `CompensateAfterChallenge` | challenge timeout 后按 commitment type 自动分发补偿；`TOKEN_ESCROW` 会触发 escrow refund |
-| `ExecuteHXMsg` | EVM -> Fabric 目标执行入口；验证 TEE quorum 后分发到资产、应收账款、物流、授权、Oracle、审批等业务服务 |
+| `ExecuteHXMsgCompact` | EVM -> Fabric 当前主线目标执行入口；验证 TEE quorum、minimal delivery、compact payload 后分发到资产、应收账款、物流、授权、Oracle、审批等业务服务 |
 | `QueryAssetBalance` / `QueryAssetEscrow` | 查询 Fabric 资产余额和 escrow |
 | `BindCommitmentHXMsg` | Fabric 源链把 atomic commitment 与 TEE 证明过的 `hmsgDigest` 绑定 |
 | `CompleteWithResponse` | 源链收到 TEE quorum RESPONSE 后完成请求 |
@@ -261,7 +262,7 @@ h-xmsg 构造层。该目录负责把不同源链事实和不同目标链动作�
 | `shared/hxmsg/index.js` | h-xmsg 共享库统一导出 |
 | `shared/evm/receipt-proof.js` | EVM receipt MPT proof 构造和验证 |
 | `shared/evm/header-committee.js` | 模拟 Header Committee 的 header update 构造和验证 |
-| `shared/evm/sync-committee-light-client.js` | Sepolia/Ethereum sync committee light-client 验证；验证 bootstrap、finality branch、execution branch 和 BLS 聚合签名 |
+| `shared/evm/sync-committee-light-client.js` | Sepolia/Ethereum sync committee light-client 验证；验证 bootstrap、finality branch、execution branch 和 sync committee 聚合签名 |
 | `shared/env.js` | 轻量 `.env` 加载器，用于脚本和 Hardhat 配置读取本地 Sepolia 参数 |
 | `shared/xmsg.js` | 业务 payload ABI 编码与规范化 |
 | `shared/utils.js` | runtime 目录和 JSON 写入辅助函数 |
@@ -399,14 +400,14 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 7. 本地回归由 `shared/evm/header-committee.js` 构造模拟 committee header update；Sepolia 模式由 `shared/evm/sync-committee-light-client.js` 获取并验证真实 Beacon light-client finality update。
 8. `hxmsg-builder/evm-to-fabric.js` 根据 receipt/log 构造完整 h-xmsg。
 9. relayer 把 h-xmsg、receipt proof 和 header 证明发送到 TEE `/attest`。
-10. TEE EVM adapter 验证 header 证明，并把认证 header 写入本地有限 header window。Sepolia 模式会验证 bootstrap current sync committee branch、finality branch、execution payload branch、sync committee BLS 聚合签名，并检查目标交易区块到 finalized execution header 的 parentHash 链。
+10. TEE EVM adapter 验证 header 证明，并把认证 header 写入本地有限 header window。Sepolia 模式会验证 bootstrap current sync committee branch、finality branch、execution payload branch、Ethereum sync committee 聚合签名，并检查目标交易区块到 finalized execution header 的 parentHash 链。
 11. TEE 使用本地可信 header 的 `receiptsRoot` 验证 receipt MPT proof。
 12. TEE 检查 receipt/log 指向可信 `EvmSourceContract` 和 `CrossChainCallRequested` 事件。
 13. TEE 检查事件参数、feedback 策略、`atomicityHash` 与 h-xmsg 完全一致。
 14. TEE 重新计算 `sourcePayloadHash` 和 `targetExecutionHash`。
 15. TEE 集群形成 quorum certification。
-16. Fabric 侧调用 `ExecuteHXMsg(hxmsg, callData, cert)`。
-17. Fabric 链码检查防重放、过期时间、目标 Fabric chainID/domain、目标 chaincode、`callDataHash`、`targetExecutionHash` 和 TEE quorum。
+16. Fabric 侧调用 `ExecuteHXMsgCompact(delivery, compactCall, businessPayload, cert)`，不再提交完整 h-xmsg。
+17. Fabric 链码检查防重放、过期时间、目标 Fabric chainID、目标 chaincode、`callDataHash`、`targetExecutionHash`、compact payload 语义绑定和 TEE quorum。
 18. Fabric 链码写入 `crosschainExec:{requestID}` 和 `inbound:{requestID}`。
 19. Fabric 链码解码业务 payload，写入 `business:{op}:{recordId}` 和 `businessByRequest:{requestID}`。
 20. 普通消息流程结束。
@@ -522,7 +523,7 @@ Sepolia sync committee / finalized header 验证：
 npm run sepolia:sync-committee
 ```
 
-该命令不会发交易，只会读取 Sepolia execution finalized block、Beacon bootstrap、`LightClientUpdate` 和 `LightClientFinalityUpdate`，并在本地验证 current sync committee Merkle branch、跨 period 的 next sync committee 更新链、finality branch、execution payload branch、sync committee BLS 聚合签名和 2/3 参与阈值。验证通过后会更新 `runtime/sepolia-sync-committee-state.json`，保存下一次实验可继续使用的 trusted beacon root。当前 Alchemy Sepolia execution RPC 继续用于普通 EVM 读写；Alchemy Beacon endpoint 不支持 `/eth/v1/beacon/light_client/*`，因此 `.env` 中的 `SEPOLIA_LIGHT_CLIENT_BEACON_API_URL` 默认使用支持 light-client API 的 PublicNode Sepolia Beacon endpoint。
+该命令不会发交易，只会读取 Sepolia execution finalized block、Beacon bootstrap、`LightClientUpdate` 和 `LightClientFinalityUpdate`，并在本地验证 current sync committee Merkle branch、跨 period 的 next sync committee 更新链、finality branch、execution payload branch、Ethereum sync committee 聚合签名和 2/3 参与阈值。验证通过后会更新 `runtime/sepolia-sync-committee-state.json`，保存下一次实验可继续使用的 trusted beacon root。当前 Alchemy Sepolia execution RPC 继续用于普通 EVM 读写；Alchemy Beacon endpoint 不支持 `/eth/v1/beacon/light_client/*`，因此 `.env` 中的 `SEPOLIA_LIGHT_CLIENT_BEACON_API_URL` 默认使用支持 light-client API 的 PublicNode Sepolia Beacon endpoint。
 
 `SEPOLIA_TRUSTED_BLOCK_ROOT` 是 TEE light client 的弱主观 bootstrap checkpoint，应由实验者从可信渠道固定。代码默认要求该字段或 `runtime/sepolia-sync-committee-state.json` 存在；只有显式设置 `SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT=true` 时，脚本才会为了临时调试从 Beacon API 动态读取 finalized root。TEE 在验证 Sepolia 证明时不会信任 relayer 自带的任意 trusted root，而是使用自身 `chain-state` 中保存的 root 或 `.env` 中的初始 root，验证成功后再自动推进本地 trusted state。
 
@@ -637,9 +638,10 @@ npm run hxmsg:test:forgery
 | 运行模式 | `local-mock-committee` |
 | 通过率 | 8/8 PASS |
 | 并发配置 | source=1, proof=4, tee=1, fabric=2 |
-| 总耗时 | 19886 ms |
-| TEE batch quorum | 3/3，批大小 8 |
-| EVM source tx gas | 总计 2355120，平均 294390/message |
+| 总耗时 | 21184 ms |
+| TEE quorum | 3/3 |
+| EVM source tx gas | 总计 2337996，平均 292250/message |
+| Fabric 目标提交压缩 | legacy avg=23.12 KiB，compact avg=10.55 KiB，减少 54.36% |
 | Fabric 状态 | 每条均为 `executed` |
 | 结果文件 | `runtime/hxmsg-evm-fabric-results.json` |
 | 汇总文件 | `runtime/hxmsg-evm-fabric-summary.md` |

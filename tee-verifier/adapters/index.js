@@ -1,10 +1,12 @@
 const { ChainType, VerificationMethod } = require('../../shared/hxmsg');
 const fabricHFsvAdapter = require('./fabric-hfsv-adapter');
 const evmMelvAdapter = require('./evm-melv-adapter');
+const avalancheIcmAdapter = require('./avalanche-icm-adapter');
 
 const sourceAdapters = [
   fabricHFsvAdapter,
   evmMelvAdapter,
+  avalancheIcmAdapter,
 ];
 
 function resolveSourceAdapter(hxmsg) {

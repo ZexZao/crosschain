@@ -1,3 +1,12 @@
+x-tee-base: &tee-base
+  image: node:20
+  working_dir: /app
+  volumes:
+    - ./:/app
+  command: sh -c "node tee-verifier/server.js"
+  depends_on:
+    - evm-node
+
 services:
   evm-node:
     image: node:20
@@ -9,89 +18,229 @@ services:
       - "8545:8545"
 
   tee-verifier:
-    image: node:20
-    working_dir: /app
+    <<: *tee-base
     environment:
-      - TEE_NODE_ID=tee-verifier-1
-      - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
-      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "node tee-verifier/server.js"
+      TEE_NODE_ID: tee-verifier-1
+      TEE_SIGNER_INDEX: 0
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000001"
+      TEE_SUBNET_ID: ethereum-proof-subnet
+      TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
     ports:
       - "9000:9000"
-    depends_on:
-      - evm-node
 
   tee-verifier-2:
-    image: node:20
-    working_dir: /app
+    <<: *tee-base
     environment:
-      - TEE_NODE_ID=tee-verifier-2
-      - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
-      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "node tee-verifier/server.js"
+      TEE_NODE_ID: tee-verifier-2
+      TEE_SIGNER_INDEX: 1
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000002"
+      TEE_SUBNET_ID: ethereum-proof-subnet
+      TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-verifier:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
     ports:
       - "9001:9000"
-    depends_on:
-      - evm-node
 
   tee-verifier-3:
-    image: node:20
-    working_dir: /app
+    <<: *tee-base
     environment:
-      - TEE_NODE_ID=tee-verifier-3
-      - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
-      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "node tee-verifier/server.js"
+      TEE_NODE_ID: tee-verifier-3
+      TEE_SIGNER_INDEX: 2
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000003"
+      TEE_SUBNET_ID: ethereum-proof-subnet
+      TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
     ports:
       - "9002:9000"
-    depends_on:
-      - evm-node
 
   tee-verifier-4:
-    image: node:20
-    working_dir: /app
+    <<: *tee-base
     environment:
-      - TEE_NODE_ID=tee-verifier-4
-      - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-5:9000
-      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "node tee-verifier/server.js"
+      TEE_NODE_ID: tee-verifier-4
+      TEE_SIGNER_INDEX: 3
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000004"
+      TEE_SUBNET_ID: ethereum-proof-subnet
+      TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
     ports:
       - "9003:9000"
-    depends_on:
-      - evm-node
 
   tee-verifier-5:
-    image: node:20
-    working_dir: /app
+    <<: *tee-base
     environment:
-      - TEE_NODE_ID=tee-verifier-5
-      - TEE_CLUSTER_THRESHOLD=3
-      - TEE_CLUSTER_PEERS=http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000
-      - TEE_RAFT_SHARED_SECRET=${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
-      - EVM_RPC=http://evm-node:8545
-    volumes:
-      - ./:/app
-    command: sh -c "node tee-verifier/server.js"
+      TEE_NODE_ID: tee-verifier-5
+      TEE_SIGNER_INDEX: 4
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000005"
+      TEE_SUBNET_ID: ethereum-proof-subnet
+      TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
     ports:
       - "9004:9000"
-    depends_on:
-      - evm-node
+
+  tee-fabric-1:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-fabric-1
+      TEE_SIGNER_INDEX: 0
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000001"
+      TEE_SUBNET_ID: fabric-proof-subnet
+      TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-fabric-2:9000,http://tee-fabric-3:9000,http://tee-fabric-4:9000,http://tee-fabric-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9100:9000"
+
+  tee-fabric-2:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-fabric-2
+      TEE_SIGNER_INDEX: 1
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000002"
+      TEE_SUBNET_ID: fabric-proof-subnet
+      TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-fabric-1:9000,http://tee-fabric-3:9000,http://tee-fabric-4:9000,http://tee-fabric-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9101:9000"
+
+  tee-fabric-3:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-fabric-3
+      TEE_SIGNER_INDEX: 2
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000003"
+      TEE_SUBNET_ID: fabric-proof-subnet
+      TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-fabric-1:9000,http://tee-fabric-2:9000,http://tee-fabric-4:9000,http://tee-fabric-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9102:9000"
+
+  tee-fabric-4:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-fabric-4
+      TEE_SIGNER_INDEX: 3
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000004"
+      TEE_SUBNET_ID: fabric-proof-subnet
+      TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-fabric-1:9000,http://tee-fabric-2:9000,http://tee-fabric-3:9000,http://tee-fabric-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9103:9000"
+
+  tee-fabric-5:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-fabric-5
+      TEE_SIGNER_INDEX: 4
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000005"
+      TEE_SUBNET_ID: fabric-proof-subnet
+      TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-fabric-1:9000,http://tee-fabric-2:9000,http://tee-fabric-3:9000,http://tee-fabric-4:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9104:9000"
+
+  tee-avalanche-1:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-avalanche-1
+      TEE_SIGNER_INDEX: 0
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000001"
+      TEE_SUBNET_ID: avalanche-proof-subnet
+      TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-avalanche-2:9000,http://tee-avalanche-3:9000,http://tee-avalanche-4:9000,http://tee-avalanche-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9020:9000"
+
+  tee-avalanche-2:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-avalanche-2
+      TEE_SIGNER_INDEX: 1
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000002"
+      TEE_SUBNET_ID: avalanche-proof-subnet
+      TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-avalanche-1:9000,http://tee-avalanche-3:9000,http://tee-avalanche-4:9000,http://tee-avalanche-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9021:9000"
+
+  tee-avalanche-3:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-avalanche-3
+      TEE_SIGNER_INDEX: 2
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000003"
+      TEE_SUBNET_ID: avalanche-proof-subnet
+      TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-avalanche-1:9000,http://tee-avalanche-2:9000,http://tee-avalanche-4:9000,http://tee-avalanche-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9022:9000"
+
+  tee-avalanche-4:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-avalanche-4
+      TEE_SIGNER_INDEX: 3
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000004"
+      TEE_SUBNET_ID: avalanche-proof-subnet
+      TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-avalanche-1:9000,http://tee-avalanche-2:9000,http://tee-avalanche-3:9000,http://tee-avalanche-5:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9023:9000"
+
+  tee-avalanche-5:
+    <<: *tee-base
+    environment:
+      TEE_NODE_ID: tee-avalanche-5
+      TEE_SIGNER_INDEX: 4
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000005"
+      TEE_SUBNET_ID: avalanche-proof-subnet
+      TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_THRESHOLD: 3
+      TEE_CLUSTER_PEERS: http://tee-avalanche-1:9000,http://tee-avalanche-2:9000,http://tee-avalanche-3:9000,http://tee-avalanche-4:9000
+      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      EVM_RPC: http://evm-node:8545
+    ports:
+      - "9024:9000"
 
   deployer:
     image: node:20

@@ -6,6 +6,7 @@ const { Gateway, Wallets } = require('fabric-network');
 const { common } = require('fabric-protos');
 const { encodeCompactBusinessCall, compactBusinessCallTuple } = require('../shared/xmsg');
 const {
+  ChainType,
   addressToBytes32,
   chainIdToBytes32,
   FeedbackType,
@@ -18,15 +19,13 @@ const { buildHXMsgBatch } = require('../shared/hxmsg/batch');
 const { buildHXMsgFromFabricEvent, TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { writeJSON } = require('../shared/utils');
 const { registerEVMTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
+const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 const TEST_DATA = path.join(__dirname, '..', 'test-data', 'fabric-real-cases.json');
 const RESULTS_FILE = 'hxmsg-fabric-evm-results.json';
 const SUMMARY_FILE = 'hxmsg-test-summary.md';
-const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004')
-  .split(',')
-  .map((url) => url.trim())
-  .filter(Boolean);
+const TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.FABRIC });
 const EVM_RPC = process.env.EVM_RPC || 'http://127.0.0.1:8545';
 const PRIV_KEY = process.env.DEPLOYER_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const DEFAULT_CASE_TOTAL = Number(process.env.HXMSG_CASE_TOTAL || 8);

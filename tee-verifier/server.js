@@ -7,6 +7,7 @@ const { readJSON, writeJSON, ensureRuntime } = require('../shared/utils');
 const { loadDotEnv } = require('../shared/env');
 const {
   ChainType,
+  VerificationMethod,
   computeHXMsgDigest,
   computeHXMsgDeliveryDigest,
   computeResponseDigest,
@@ -29,6 +30,8 @@ app.use(express.json({ limit: '10mb' }));  // Larger limit for block data
 // ============ Chain State ============
 
 const teeNodeID = process.env.TEE_NODE_ID || 'tee-verifier-1';
+const teeSubnetID = process.env.TEE_SUBNET_ID || 'ethereum-proof-subnet';
+const teeSubnetProfile = process.env.TEE_SUBNET_PROFILE || 'ethereum';
 const teeStateFile = process.env.TEE_STATE_FILE || `tee-state-${teeNodeID}.json`;
 const teeChainStateFile = process.env.TEE_CHAIN_STATE_FILE || `tee-chain-state-${teeNodeID}.json`;
 const teeConsensusStateFile = process.env.TEE_CONSENSUS_STATE_FILE || `tee-consensus-${teeNodeID}.json`;
@@ -80,8 +83,8 @@ let currentTermBarrierInFlight = null;
 // ============ TEE Identity ============
 
 let state = readJSON(teeStateFile);
-if (!state) {
-  const configuredKey = process.env.TEE_PRIVATE_KEY;
+const configuredKey = process.env.TEE_PRIVATE_KEY;
+if (!state || (configuredKey && state.privateKey !== configuredKey)) {
   const wallet = configuredKey ? new ethers.Wallet(configuredKey) : ethers.Wallet.createRandom();
   state = { privateKey: wallet.privateKey, address: wallet.address };
   writeJSON(teeStateFile, state);
@@ -96,10 +99,64 @@ if (!state) {
 
 const CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes(process.env.TEE_CLUSTER_ID || 'HXMSG_TEE_CLUSTER_LOCAL_V1'));
 
+function parseNumberSet(text) {
+  return new Set(String(text || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map(Number));
+}
+
+function defaultSupportedSourceChains(profile) {
+  switch (String(profile || '').toLowerCase()) {
+    case 'fabric':
+      return new Set([ChainType.FABRIC]);
+    case 'avalanche':
+      return new Set([ChainType.AVALANCHE]);
+    case 'ethereum':
+    case 'evm':
+    default:
+      return new Set([ChainType.EVM]);
+  }
+}
+
+function defaultSupportedVerificationMethods(profile) {
+  switch (String(profile || '').toLowerCase()) {
+    case 'fabric':
+      return new Set([VerificationMethod.H_FSV, VerificationMethod.FABRIC_TX_STATUS]);
+    case 'avalanche':
+      return new Set([VerificationMethod.AVALANCHE_ICM_BLS]);
+    case 'ethereum':
+    case 'evm':
+    default:
+      return new Set([VerificationMethod.EVM_EVENT, VerificationMethod.EVM_RECEIPT, VerificationMethod.EVM_LIGHT_CLIENT]);
+  }
+}
+
+const supportedSourceChains = process.env.TEE_SUPPORTED_SOURCE_CHAINS
+  ? parseNumberSet(process.env.TEE_SUPPORTED_SOURCE_CHAINS)
+  : defaultSupportedSourceChains(teeSubnetProfile);
+const supportedVerificationMethods = process.env.TEE_SUPPORTED_VERIFICATION_METHODS
+  ? parseNumberSet(process.env.TEE_SUPPORTED_VERIFICATION_METHODS)
+  : defaultSupportedVerificationMethods(teeSubnetProfile);
+
+function assertSubnetCanVerify(hxmsg) {
+  const sourceChainType = Number(hxmsg.source?.chainType);
+  const verificationMethod = Number(hxmsg.verification?.verificationMethod);
+  if (!supportedSourceChains.has(sourceChainType)) {
+    throw new Error(`TEE subnet ${teeSubnetID} (${teeSubnetProfile}) cannot verify source chainType=${sourceChainType}`);
+  }
+  if (!supportedVerificationMethods.has(verificationMethod)) {
+    throw new Error(`TEE subnet ${teeSubnetID} (${teeSubnetProfile}) cannot verify verificationMethod=${verificationMethod}`);
+  }
+}
+
 async function currentTEEIdentity() {
   return buildSimulatedAttestationIdentity({
     privateKey: state.privateKey,
     nodeID: teeNodeID,
+    subnetID: teeSubnetID,
+    subnetProfile: teeSubnetProfile,
     epoch: Number(process.env.TEE_ATTESTATION_EPOCH || 1),
   });
 }
@@ -582,6 +639,7 @@ async function verifyHXMsgLocally({ hxmsg, helperData }) {
   if (Number(hxmsg.header.deliveryExpireAt) < Math.floor(Date.now() / 1000)) {
     throw new Error('h-xmsg expired');
   }
+  assertSubnetCanVerify(hxmsg);
   const verificationResult = await verifySourceFact({
     hxmsg,
     helperData,
@@ -1107,6 +1165,8 @@ async function collectClusterBatchCertifications({ batch, localResult }) {
 app.get('/pubkey', async (_req, res) => {
   res.json({
     nodeID: teeNodeID,
+    subnetID: teeSubnetID,
+    subnetProfile: teeSubnetProfile,
     address: state.address,
     attestation: await currentTEEIdentity(),
   });
@@ -1123,6 +1183,8 @@ app.get('/chain-state', (_req, res) => {
 app.get('/raft/status', (_req, res) => {
   res.json({
     nodeID: teeNodeID,
+    subnetID: teeSubnetID,
+    subnetProfile: teeSubnetProfile,
     role: consensusState.role,
     leaderID: consensusState.leaderID,
     term: Number(consensusState.currentTerm || 1),
@@ -1136,6 +1198,8 @@ app.get('/raft/status', (_req, res) => {
     lastLogIndex: lastLogIndex(),
     lastLogTerm: lastLogTerm(),
     logLength: consensusState.log.length,
+    supportedSourceChains: Array.from(supportedSourceChains),
+    supportedVerificationMethods: Array.from(supportedVerificationMethods),
   });
 });
 
@@ -1329,7 +1393,7 @@ app.post('/attest', async (req, res) => {
     }
     throw new Error('h-xmsg is required');
   } catch (error) {
-    console.error('[attest] Error:', error.message);
+    console.error('[attest] Error:', error.stack || error.message);
     res.status(500).json({ error: error.message });
   }
 });

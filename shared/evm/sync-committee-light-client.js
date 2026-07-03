@@ -511,7 +511,7 @@ async function verifySyncCommitteeHeaderUpdate(update, {
     genesis,
     spec,
   });
-  if (!finalityAggregate.signatureOK) throw new Error('sync committee aggregate BLS signature is invalid');
+  if (!finalityAggregate.signatureOK) throw new Error('sync committee aggregate signature is invalid');
 
   const finalizedHeader = normalizeExecutionHeader(finalityUpdate.finalized_header.execution);
   const headers = (update.ancestorHeaders || []).map(normalizeExecutionHeader);

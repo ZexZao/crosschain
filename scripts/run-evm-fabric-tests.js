@@ -20,15 +20,18 @@ const {
 } = require('../shared/evm/sync-committee-state');
 const { FeedbackType } = require('../shared/hxmsg');
 const {
+  ChainType,
   bytes32FromText,
   hashJson,
   AtomicityMode,
   CommitmentType,
   getExecutionData,
+  toMinimalHXMsg,
 } = require('../shared/hxmsg');
 const { encodeCompactBusinessCall, normalizeBusinessPayload } = require('../shared/xmsg');
 const { writeJSON } = require('../shared/utils');
 const { registerFabricTEEs } = require('../shared/tee/registration');
+const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
 
 loadDotEnv();
 
@@ -41,10 +44,7 @@ const EVM_RPC = process.env.EVM_RPC || (USE_SEPOLIA_SYNC_COMMITTEE
 const TEE_EVM_RPC = process.env.TEE_EVM_RPC || (USE_SEPOLIA_SYNC_COMMITTEE
   ? EVM_RPC
   : 'http://evm-node:8545');
-const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004')
-  .split(',')
-  .map((url) => url.trim())
-  .filter(Boolean);
+const TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.EVM });
 
 const REQUESTED_SOURCE_TX_CONCURRENCY = Number(process.env.HXMSG_SOURCE_CONCURRENCY || (USE_SEPOLIA_SYNC_COMMITTEE ? 2 : 1));
 const SOURCE_TX_CONCURRENCY = USE_SEPOLIA_SYNC_COMMITTEE || process.env.HXMSG_ALLOW_LOCAL_PARALLEL_SOURCE === 'true'
@@ -122,6 +122,35 @@ async function resolveTeeLeader() {
   const available = statuses.find((status) => !status.error);
   if (available) return available.url;
   throw new Error(`no reachable TEE node: ${statuses.map((status) => `${status.url}:${status.error}`).join('; ')}`);
+}
+
+function isRetryableTeeLeaderError(error) {
+  const message = error.response?.data?.error || error.message || '';
+  return message.includes('current term barrier requires leader role')
+    || message.includes('Raft leader unavailable')
+    || message.includes('TEE cluster quorum not reached')
+    || message.includes('TEE batch quorum not reached')
+    || Number(error.response?.status || 0) === 409
+    || Number(error.response?.status || 0) === 502
+    || Number(error.response?.status || 0) === 503;
+}
+
+async function postToCurrentTeeLeader(routePath, body, { timeout, maxAttempts = 3 } = {}) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const teeUrl = await resolveTeeLeader();
+    try {
+      const resp = await axios.post(`${teeUrl}${routePath}`, body, { timeout });
+      return { resp, teeUrl, attempt };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableTeeLeaderError(error) || attempt === maxAttempts) throw error;
+      const message = error.response?.data?.error || error.message;
+      console.log(`TEE leader retry ${attempt}/${maxAttempts}: ${message}`);
+      await sleep(1000 * attempt);
+    }
+  }
+  throw lastError;
 }
 
 async function fetchTeeSyncCommitteeRoot(teeUrl) {
@@ -471,12 +500,12 @@ async function buildProofItem({ item, provider, deployment, sharedSyncCommitteeU
   }
 }
 
-async function attestWithTEE({ item, teeUrl }) {
+async function attestWithTEE({ item }) {
   const { tc, result, hxmsg, receiptProof, committeeHeaderUpdate, syncCommitteeUpdate } = item;
   if (!hxmsg || !receiptProof) return item;
   try {
     const teeStartedAt = monotonicMs();
-    const teeResp = await axios.post(`${teeUrl}/attest`, {
+    const { resp: teeResp } = await postToCurrentTeeLeader('/attest', {
       hxmsg,
       helperData: {
         evmReceiptProof: receiptProof,
@@ -506,12 +535,12 @@ function chunkItems(items, size) {
   return chunks;
 }
 
-async function attestBatchWithTEE({ items, teeUrl }) {
+async function attestBatchWithTEE({ items }) {
   const eligible = items.filter((item) => !item.sourceFailed && !item.error && item.hxmsg && item.receiptProof);
   if (eligible.length === 0) return items;
   const teeStartedAt = monotonicMs();
   try {
-    const teeResp = await axios.post(`${teeUrl}/attest-batch`, {
+    const { resp: teeResp } = await postToCurrentTeeLeader('/attest-batch', {
       hxmsgs: eligible.map((item) => item.hxmsg),
       helperDataList: eligible.map((item) => ({
         evmReceiptProof: item.receiptProof,
@@ -575,6 +604,31 @@ async function queryBusinessRecord(contract, requestID) {
   return data && data.length > 0 ? JSON.parse(data.toString()) : null;
 }
 
+function compactDeliveryObject(hxmsg) {
+  const minimal = toMinimalHXMsg(hxmsg);
+  return {
+    requestID: minimal[0],
+    hmsgDigest: minimal[1],
+    targetChainType: Number(minimal[2]),
+    targetChainID: minimal[3],
+    actionType: Number(minimal[4]),
+    targetObject: minimal[5],
+    functionSelector: minimal[6],
+    callDataHash: minimal[7],
+    receiver: minimal[8],
+    targetExecutionHash: minimal[9],
+    feedbackRequired: Boolean(minimal[10]),
+    expectedFeedbackMsgType: Number(minimal[11] || 0),
+    feedbackTimeout: Number(minimal[12] || 0),
+    callbackRefHash: minimal[13],
+    expireAt: Number(minimal[14] || 0),
+  };
+}
+
+function jsonBytes(value) {
+  return Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
+}
+
 async function executeOnFabric({ item, contract, sourceView }) {
   const { result, hxmsg, voucher } = item;
   if (!hxmsg || !voucher) {
@@ -583,14 +637,29 @@ async function executeOnFabric({ item, contract, sourceView }) {
     return item;
   }
   try {
+    const executionData = getExecutionData(hxmsg);
+    const compactDelivery = compactDeliveryObject(hxmsg);
+    const compactCall = executionData.compactCall;
+    const businessPayload = executionData.businessPayload;
+    if (!compactCall || !businessPayload) throw new Error('compact execution data is required');
+    const fullArgs = [JSON.stringify(hxmsg), executionData.callData, JSON.stringify(voucher)];
+    const compactArgs = [
+      JSON.stringify(compactDelivery),
+      JSON.stringify(compactCall),
+      JSON.stringify(businessPayload),
+      JSON.stringify(voucher),
+    ];
     const fabricStartedAt = monotonicMs();
     const fabricResp = await contract.submitTransaction(
-      'ExecuteHXMsg',
-      JSON.stringify(hxmsg),
-      getExecutionData(hxmsg).callData,
-      JSON.stringify(voucher)
+      'ExecuteHXMsgCompact',
+      ...compactArgs
     );
     result.timings.fabricExecuteMs = monotonicMs() - fabricStartedAt;
+    result.fabricSubmissionBytes = {
+      legacyFullJsonArgs: fullArgs.reduce((sum, arg) => sum + jsonBytes(arg), 0),
+      compactJsonArgs: compactArgs.reduce((sum, arg) => sum + jsonBytes(arg), 0),
+      savedBytes: fullArgs.reduce((sum, arg) => sum + jsonBytes(arg), 0) - compactArgs.reduce((sum, arg) => sum + jsonBytes(arg), 0),
+    };
 
     const queryStartedAt = monotonicMs();
     const inbound = await queryInbound(contract, hxmsg.header.requestID);
@@ -652,6 +721,16 @@ function baseResult(tc) {
 }
 
 function writeSummary({ output, finalityTimeoutMs, sharedFinality }) {
+  const compressionRows = output.results
+    .map((r) => r.fabricSubmissionBytes)
+    .filter(Boolean);
+  const sumCompression = (field) => compressionRows.reduce((sum, row) => sum + Number(row[field] || 0), 0);
+  const legacyBytes = sumCompression('legacyFullJsonArgs');
+  const compactBytes = sumCompression('compactJsonArgs');
+  const savedBytes = sumCompression('savedBytes');
+  const compressionSummary = compressionRows.length > 0
+    ? `**Fabric 目标提交压缩**：legacy avg=${(legacyBytes / compressionRows.length / 1024).toFixed(2)} KiB, compact avg=${(compactBytes / compressionRows.length / 1024).toFixed(2)} KiB, saved=${(savedBytes / compressionRows.length / 1024).toFixed(2)} KiB/message, reduction=${(100 * (1 - compactBytes / legacyBytes)).toFixed(2)}%\n`
+    : '';
   fs.writeFileSync(
     path.join(RUNTIME_DIR, 'hxmsg-evm-fabric-summary.md'),
     `# h-xmsg / MELV-EF EVM -> Fabric 测试结果\n\n` +
@@ -661,7 +740,9 @@ function writeSummary({ output, finalityTimeoutMs, sharedFinality }) {
       `**并发配置**：source=${output.concurrency.sourceTx}, proof=${output.concurrency.proof}, tee=${output.concurrency.tee}, fabric=${output.concurrency.fabric}\n` +
       `**TEE 批签名大小**：${output.teeBatchSize || 1}\n` +
       `**finality 等待上限**：${finalityTimeoutMs} ms\n` +
-      `**共享 finality 等待**：${sharedFinality ? `${sharedFinality.waitMs} ms, finalizedHeight=${sharedFinality.finalizedHeight}` : '-'}\n\n` +
+      `**共享 finality 等待**：${sharedFinality ? `${sharedFinality.waitMs} ms, finalizedHeight=${sharedFinality.finalizedHeight}` : '-'}\n` +
+      compressionSummary +
+      `\n` +
       `| 用例 | RESPONSE | Atomicity | EVM tx | EVM Gas | Source tx ms | Finality wait ms | Proof ms | TEE ms | Fabric ms | Total ms | TEE quorum | Fabric 状态 | 状态 |\n` +
       `|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|\n` +
       output.results.map((r) => `| ${r.caseId} | ${r.responseRequired ? 'yes' : 'no'} | ${r.atomicityRequired ? 'yes' : 'no'} | ${r.evmTxHash || '-'} | ${r.evmGasUsed || '-'} | ${r.timings?.sourceTxMs ?? '-'} | ${r.timings?.finalityWaitMs ?? '-'} | ${r.timings?.proofBuildMs ?? '-'} | ${r.timings?.teeAttestMs ?? '-'} | ${r.timings?.fabricExecuteMs ?? '-'} | ${r.timings?.totalMs ?? '-'} | ${r.teeCluster ? `${r.teeCluster.reached}/${r.teeCluster.threshold}` : '-'} | ${r.inbound?.status || '-'} | ${r.pass ? 'PASS' : 'FAIL'} |`).join('\n') +
@@ -690,7 +771,6 @@ async function main() {
   };
   const sourceContract = new ethers.Contract(deployment.evmSourceContract, SOURCE_ABI, signer);
   const sourceView = new ethers.Contract(deployment.evmSourceContract, SOURCE_ABI, provider);
-  const teeUrl = await resolveTeeLeader();
   const now = Date.now();
   const cases = buildCases(now, DEFAULT_CASE_TOTAL);
   const caseLimit = Number(process.env.HXMSG_CASE_LIMIT || cases.length);
@@ -725,7 +805,8 @@ async function main() {
   let sharedSyncCommitteeUpdate = null;
   if (USE_SEPOLIA_SYNC_COMMITTEE && sourceSuccess.length > 0) {
     syncCommitteeState = loadSyncCommitteeState();
-    const teeTrustedBlockRoot = await fetchTeeSyncCommitteeRoot(teeUrl);
+    const teeUrlForState = await resolveTeeLeader();
+    const teeTrustedBlockRoot = await fetchTeeSyncCommitteeRoot(teeUrlForState);
     const trustedBlockRoot = teeTrustedBlockRoot
       || process.env.SEPOLIA_TRUSTED_BLOCK_ROOT
       || resolveTrustedBlockRoot({ state: syncCommitteeState });
@@ -801,12 +882,12 @@ async function main() {
   let attestedItems;
   if (TEE_BATCH_SIZE > 1) {
     const batches = chunkItems(proofItems, TEE_BATCH_SIZE);
-    const attestedBatches = await mapLimit(batches, TEE_CONCURRENCY, (items) => attestBatchWithTEE({ items, teeUrl }));
+    const attestedBatches = await mapLimit(batches, TEE_CONCURRENCY, (items) => attestBatchWithTEE({ items }));
     attestedItems = attestedBatches.flat();
   } else {
     attestedItems = await mapLimit(proofItems, TEE_CONCURRENCY, async (item) => {
       if (item.sourceFailed || item.error) return item;
-      return attestWithTEE({ item, teeUrl });
+      return attestWithTEE({ item });
     });
   }
 

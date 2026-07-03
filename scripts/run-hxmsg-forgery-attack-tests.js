@@ -6,6 +6,7 @@ const { Gateway, Wallets } = require('fabric-network');
 const { common } = require('fabric-protos');
 const { loadDotEnv } = require('../shared/env');
 const {
+  ChainType,
   bytes32FromText,
   chainIdToBytes32,
   computeHXMsgDigest,
@@ -29,6 +30,7 @@ const {
   TARGET_EXECUTE_SELECTOR,
 } = require('../hxmsg-builder/fabric-to-evm');
 const { writeJSON } = require('../shared/utils');
+const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
 
 loadDotEnv();
 
@@ -36,10 +38,10 @@ const PROJECT_ROOT = path.join(__dirname, '..');
 const RUNTIME_DIR = path.join(PROJECT_ROOT, 'runtime');
 const EVM_RPC = process.env.EVM_RPC || 'http://127.0.0.1:8545';
 const TEE_EVM_RPC = process.env.TEE_EVM_RPC || 'http://evm-node:8545';
-const TEE_URLS = (process.env.TEE_URLS || process.env.TEE_URL || 'http://127.0.0.1:9000,http://127.0.0.1:9001,http://127.0.0.1:9002,http://127.0.0.1:9003,http://127.0.0.1:9004')
-  .split(',')
-  .map((url) => url.trim())
-  .filter(Boolean);
+const EVM_TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.EVM });
+const FABRIC_TEE_URLS = process.env.TEE_URLS || process.env.TEE_URL
+  ? teeURLsFromEnv({ sourceChainType: ChainType.EVM })
+  : teeURLsFromEnv({ sourceChainType: ChainType.FABRIC });
 const HARDHAT_DEFAULT_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 const SOURCE_ABI = [
@@ -153,8 +155,8 @@ function forgeFabricHXMsg(validHxmsg, forgedPayload) {
   return { forged, binding };
 }
 
-async function resolveTeeLeader() {
-  const statuses = await Promise.all(TEE_URLS.map(async (url) => {
+async function resolveTeeLeader(urls) {
+  const statuses = await Promise.all(urls.map(async (url) => {
     try {
       const resp = await axios.get(`${url}/raft/status`, { timeout: 3000 });
       return { url, ...resp.data };
@@ -377,15 +379,16 @@ async function runFabricToEvmForgery({ deployment, teeUrl }) {
 async function main() {
   fs.ensureDirSync(RUNTIME_DIR);
   const deployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'deployment.json'));
-  const teeUrl = await resolveTeeLeader();
+  const evmTeeUrl = await resolveTeeLeader(EVM_TEE_URLS);
+  const fabricTeeUrl = await resolveTeeLeader(FABRIC_TEE_URLS);
   const startedAt = Date.now();
   const results = [];
-  results.push(await runEvmToFabricForgery({ deployment, teeUrl }));
-  results.push(await runFabricToEvmForgery({ deployment, teeUrl }));
+  results.push(await runEvmToFabricForgery({ deployment, teeUrl: evmTeeUrl }));
+  results.push(await runFabricToEvmForgery({ deployment, teeUrl: fabricTeeUrl }));
   const output = {
     testType: 'self-consistent-hxmsg-forgery-attack',
     testedAt: new Date().toISOString(),
-    teeUrl,
+    teeUrls: { evm: evmTeeUrl, fabric: fabricTeeUrl },
     total: results.length,
     pass: results.filter((item) => item.pass).length,
     fail: results.filter((item) => !item.pass).length,

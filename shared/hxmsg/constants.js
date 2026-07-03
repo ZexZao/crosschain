@@ -2,6 +2,7 @@ const ChainType = Object.freeze({
   UNKNOWN: 0,
   EVM: 1,
   FABRIC: 2,
+  AVALANCHE: 3,
   CUSTOM: 255,
 });
 
@@ -11,6 +12,7 @@ const RefType = Object.freeze({
   EVM_RECEIPT: 2,
   FABRIC_VIEW: 3,
   FABRIC_TX: 4,
+  AVALANCHE_WARP_MESSAGE: 5,
   CUSTOM: 255,
 });
 
@@ -78,6 +80,7 @@ const VerificationMethod = Object.freeze({
   EVM_LIGHT_CLIENT: 3,
   H_FSV: 4,
   FABRIC_TX_STATUS: 5,
+  AVALANCHE_ICM_BLS: 6,
   CUSTOM_TEE_ADAPTER: 255,
 });
 
@@ -86,6 +89,7 @@ const PolicyType = Object.freeze({
   EVM_FINALITY: 1,
   FABRIC_ENDORSEMENT: 2,
   FABRIC_MEMBERSHIP: 3,
+  AVALANCHE_VALIDATOR_SET: 4,
   ADAPTER_LOCAL: 5,
   CUSTOM: 255,
 });

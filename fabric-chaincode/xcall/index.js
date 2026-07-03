@@ -103,6 +103,60 @@ function hashCompactBusinessCall(compact) {
   );
 }
 
+const COMPACT_OP_CODES = Object.freeze({
+  asset_lock: 1,
+  mint_confirm: 2,
+  receivable_attest: 3,
+  logistics_sync: 4,
+  medical_consent: 5,
+  oracle_update: 6,
+  approval_commit: 7,
+  subsidy_confirm: 8,
+  token_transfer: 9
+});
+
+function parseUintUnits(value) {
+  const text = String(value || '0');
+  if (!/^[0-9]+$/.test(text)) throw new Error(`invalid uint amount: ${text}`);
+  return BigInt(text);
+}
+
+function compactAmountUnitsForPayload(payload) {
+  if (payload.op === 'medical_consent' || payload.op === 'approval_commit') {
+    return parseUintUnits(payload.amount);
+  }
+  return parseAmountUnits(payload.amount);
+}
+
+function isEvmAddress(value) {
+  return /^0x[0-9a-fA-F]{40}$/.test(String(value || ''));
+}
+
+function assertCompactPayloadMatchesBusiness(compact, payload) {
+  const expectedOpCode = COMPACT_OP_CODES[payload.op];
+  if (!expectedOpCode) throw new Error(`unsupported compact business op: ${payload.op}`);
+  if (Number(compact.opCode) !== expectedOpCode) throw new Error('compact opCode mismatch');
+  if (String(compact.recordIdHash).toLowerCase() !== ethers.keccak256(ethers.toUtf8Bytes(String(payload.recordId))).toLowerCase()) {
+    throw new Error('compact recordIdHash mismatch');
+  }
+  if (String(compact.actorHash).toLowerCase() !== ethers.keccak256(ethers.toUtf8Bytes(String(payload.actor))).toLowerCase()) {
+    throw new Error('compact actorHash mismatch');
+  }
+  const expectedActorAddress = isEvmAddress(payload.actor) ? ethers.getAddress(payload.actor) : ethers.ZeroAddress;
+  if (ethers.getAddress(compact.actorAddress || ethers.ZeroAddress) !== expectedActorAddress) {
+    throw new Error('compact actorAddress mismatch');
+  }
+  if (BigInt(compact.amount) !== compactAmountUnitsForPayload(payload)) {
+    throw new Error('compact amount mismatch');
+  }
+  if (String(compact.metadataHash).toLowerCase() !== ethers.keccak256(ethers.toUtf8Bytes(String(payload.metadata || ''))).toLowerCase()) {
+    throw new Error('compact metadataHash mismatch');
+  }
+  if (Boolean(compact.requireAck) !== Boolean(payload.requireAck)) {
+    throw new Error('compact requireAck mismatch');
+  }
+}
+
 function normalizeAtomicity(atomicity = {}) {
   atomicity = atomicity || {};
   return {
@@ -416,6 +470,105 @@ function computeHXMsgDeliveryDigest(hxmsg) {
     ABI.encode(
       ['bytes32', 'bytes32', 'bytes32'],
       [chainHash, actionHash, feedbackHash]
+    )
+  );
+}
+
+function normalizeMinimalDelivery(value) {
+  const input = Array.isArray(value) ? value : [
+    value.requestID,
+    value.hmsgDigest,
+    value.targetChainType,
+    value.targetChainID,
+    value.actionType,
+    value.targetObject,
+    value.functionSelector,
+    value.callDataHash,
+    value.receiver,
+    value.targetExecutionHash,
+    value.feedbackRequired,
+    value.expectedFeedbackMsgType,
+    value.feedbackTimeout,
+    value.callbackRefHash,
+    value.expireAt
+  ];
+  if (!Array.isArray(input) || input.length !== 15) throw new Error('bad compact h-xmsg delivery');
+  return {
+    requestID: input[0],
+    hmsgDigest: input[1],
+    targetChainType: Number(input[2]),
+    targetChainID: input[3],
+    actionType: Number(input[4]),
+    targetObject: input[5],
+    functionSelector: input[6],
+    callDataHash: input[7],
+    receiver: input[8],
+    targetExecutionHash: input[9],
+    feedbackRequired: Boolean(input[10]),
+    expectedFeedbackMsgType: Number(input[11] || 0),
+    feedbackTimeout: Number(input[12] || 0),
+    callbackRefHash: input[13] || ethers.ZeroHash,
+    expireAt: Number(input[14] || 0),
+    sourceChainType: Number(value && !Array.isArray(value) && value.sourceChainType !== undefined ? value.sourceChainType : 1)
+  };
+}
+
+function computeTargetExecutionHashFromMinimal(minimal) {
+  return ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+      [
+        minimal.requestID,
+        minimal.targetChainID,
+        minimal.targetObject,
+        minimal.functionSelector,
+        minimal.callDataHash,
+        minimal.receiver
+      ]
+    )
+  );
+}
+
+function computeHXMsgDeliveryDigestFromMinimal(minimal) {
+  const chainHash = ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8'],
+      [minimal.requestID, minimal.hmsgDigest, minimal.targetChainType, minimal.targetChainID, minimal.actionType]
+    )
+  );
+  const actionHash = ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes4', 'bytes32', 'bytes32', 'bytes32'],
+      [
+        minimal.targetObject,
+        minimal.functionSelector,
+        minimal.callDataHash,
+        minimal.receiver,
+        minimal.targetExecutionHash
+      ]
+    )
+  );
+  const feedbackHash = ethers.keccak256(
+    ABI.encode(
+      ['bool', 'uint8', 'uint64', 'bytes32', 'uint64'],
+      [
+        minimal.feedbackRequired,
+        minimal.expectedFeedbackMsgType,
+        minimal.feedbackTimeout,
+        minimal.callbackRefHash,
+        minimal.expireAt
+      ]
+    )
+  );
+  return ethers.keccak256(ABI.encode(['bytes32', 'bytes32', 'bytes32'], [chainHash, actionHash, feedbackHash]));
+}
+
+function computeBatchLeafFromMinimal(minimal) {
+  const deliveryDigest = computeHXMsgDeliveryDigestFromMinimal(minimal);
+  return ethers.keccak256(
+    ABI.encode(
+      ['bytes32', 'bytes32', 'bytes32'],
+      [minimal.requestID, minimal.hmsgDigest, deliveryDigest]
     )
   );
 }
@@ -899,6 +1052,36 @@ function expectedHXMsgSigningDigest(hxmsg, hmsgDigest, certEnvelope) {
   return hmsgDigest;
 }
 
+function expectedMinimalSigningDigest(minimal, certEnvelope) {
+  const cert = certEnvelope.clusterCertificate || certEnvelope.teeClusterCertification || certEnvelope;
+  if (cert?.signatureDigestType === 'batchDigest') {
+    const batchID = certEnvelope.batchID || cert.batchID;
+    const batchRoot = certEnvelope.batchRoot || cert.batchRoot;
+    const batchSize = certEnvelope.batchSize || cert.batchSize;
+    const batchSigningDigest = certEnvelope.batchSigningDigest || cert.batchSigningDigest || cert.signingDigest;
+    const merkleProof = certEnvelope.merkleProof || cert.merkleProof || [];
+    if (!batchID || !batchRoot || !batchSize) throw new Error('missing batch certificate metadata');
+    const expectedBatchDigest = computeBatchSigningDigest({
+      batchID,
+      batchRoot,
+      batchSize,
+      targetChainID: minimal.targetChainID
+    });
+    if (String(expectedBatchDigest).toLowerCase() !== String(batchSigningDigest).toLowerCase()) {
+      throw new Error('bad batch signing digest');
+    }
+    const leaf = computeBatchLeafFromMinimal(minimal);
+    if (!verifyMerkleProof(leaf, merkleProof, batchRoot)) {
+      throw new Error('bad batch merkle proof');
+    }
+    return batchSigningDigest;
+  }
+  if (cert?.signatureDigestType === 'deliveryDigest') {
+    return computeHXMsgDeliveryDigestFromMinimal(minimal);
+  }
+  return minimal.hmsgDigest;
+}
+
 function getTxTime(ctx) {
   const ts = ctx.stub.getTxTimestamp();
   return Number(ts.seconds.low || ts.seconds || Math.floor(Date.now() / 1000));
@@ -1349,6 +1532,89 @@ class XCallContract extends Contract {
     ctx.stub.setEvent('HXMSG_EXECUTED', Buffer.from(JSON.stringify(record)));
 
     return JSON.stringify({ ok: true, requestID, status: 'executed', validTEECount: certResult.validTEECount });
+  }
+
+  async ExecuteHXMsgCompact(ctx, deliveryJson, compactCallJson, businessPayloadJson, certJson) {
+    const minimal = normalizeMinimalDelivery(parseJson(deliveryJson, 'deliveryJson'));
+    const compactCall = parseJson(compactCallJson, 'compactCallJson');
+    const parsedPayload = parseJson(businessPayloadJson, 'businessPayloadJson');
+    const certEnvelope = parseJson(certJson, 'certJson');
+    const auditRecord = {};
+    const requestID = minimal.requestID;
+    const consumedKey = `hxmsg-consumed:${requestID}`;
+    const consumed = await ctx.stub.getState(consumedKey);
+    if (consumed && consumed.length > 0) {
+      throw new Error('replay requestID');
+    }
+
+    const now = Number(ctx.stub.getTxTimestamp().seconds.low || ctx.stub.getTxTimestamp().seconds || Math.floor(Date.now() / 1000));
+    if (Number(minimal.expireAt) < now) throw new Error('h-xmsg expired');
+    if (Number(minimal.targetChainType) !== 2) throw new Error('target is not Fabric');
+    if (Number(minimal.actionType) !== 5) throw new Error('action is not chaincode invoke');
+
+    const expectedChainID = bytes32FromText(`fabric-${ctx.stub.getChannelID()}`);
+    const expectedTargetObject = bytes32FromText('xcall');
+    if (String(minimal.targetChainID).toLowerCase() !== expectedChainID.toLowerCase()) {
+      throw new Error('Fabric target chainID mismatch');
+    }
+    if (String(minimal.targetObject).toLowerCase() !== expectedTargetObject.toLowerCase()) {
+      throw new Error('Fabric target object mismatch');
+    }
+    const compactCallHash = hashCompactBusinessCall(compactCall);
+    if (String(minimal.callDataHash).toLowerCase() !== compactCallHash.toLowerCase()) {
+      throw new Error('compact callDataHash mismatch');
+    }
+    assertCompactPayloadMatchesBusiness(compactCall, parsedPayload);
+    const targetExecutionHash = computeTargetExecutionHashFromMinimal(minimal);
+    if (String(minimal.targetExecutionHash).toLowerCase() !== targetExecutionHash.toLowerCase()) {
+      throw new Error('targetExecutionHash mismatch');
+    }
+
+    const certResult = await verifyTEEClusterCertificate(
+      ctx,
+      expectedMinimalSigningDigest(minimal, certEnvelope),
+      certEnvelope
+    );
+    const businessRecord = await applyBusinessAction(ctx, {
+      requestID,
+      hmsgDigest: minimal.hmsgDigest,
+      callDataHash: minimal.callDataHash,
+      parsedPayload,
+      sourceChainType: minimal.sourceChainType || 1
+    });
+    const record = {
+      requestID,
+      txId: ctx.stub.getTxID(),
+      callerMSP: ctx.clientIdentity.getMSPID(),
+      hmsgDigest: minimal.hmsgDigest,
+      validTEECount: certResult.validTEECount,
+      teeThreshold: certResult.threshold,
+      teeSigners: certResult.signerIndexes,
+      sourceChainType: minimal.sourceChainType || 1,
+      sourceTxID: auditRecord.txId || '',
+      srcHeight: auditRecord.srcHeight || 0,
+      callDataHash: minimal.callDataHash,
+      businessPayloadHash: hashJson(parsedPayload),
+      targetExecutionHash,
+      op: parsedPayload.op,
+      recordId: parsedPayload.recordId,
+      actor: parsedPayload.actor,
+      amount: parsedPayload.amount,
+      metadata: parsedPayload.metadata,
+      requireAck: Boolean(parsedPayload.requireAck),
+      businessKey: businessRecord.businessKey,
+      businessStatus: businessRecord.status,
+      status: 'executed',
+      compressed: true,
+      updatedAt: new Date().toISOString()
+    };
+
+    await ctx.stub.putState(consumedKey, Buffer.from('1'));
+    await ctx.stub.putState(`crosschainExec:${requestID}`, Buffer.from(JSON.stringify(record)));
+    await ctx.stub.putState(`inbound:${requestID}`, Buffer.from(JSON.stringify(record)));
+    ctx.stub.setEvent('HXMSG_EXECUTED', Buffer.from(JSON.stringify(record)));
+
+    return JSON.stringify({ ok: true, requestID, status: 'executed', compressed: true, validTEECount: certResult.validTEECount });
   }
 
   async GetInboundStatus(ctx, requestID) {
