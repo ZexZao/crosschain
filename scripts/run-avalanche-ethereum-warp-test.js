@@ -3,6 +3,7 @@ const path = require('path');
 const axios = require('axios');
 const { performance } = require('perf_hooks');
 const { ethers } = require('ethers');
+const { loadDotEnv } = require('../shared/env');
 const { composeHXMsg } = require('../hxmsg-builder/compose');
 const { buildEvmContractCallTarget } = require('../hxmsg-builder/target-builders/evm');
 const { encodeBusinessPayload } = require('../shared/xmsg');
@@ -31,9 +32,14 @@ const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
 const { registerEVMTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
 const { writeJSON } = require('../shared/utils');
 
+loadDotEnv();
+
 const PROJECT_ROOT = path.join(__dirname, '..');
 const RUNTIME_DIR = path.join(PROJECT_ROOT, 'runtime');
-const RESULT_FILE = 'avalanche-ethereum-warp-test-result.json';
+const RESULT_FILE = process.env.AVALANCHE_ETHEREUM_RESULT_FILE || 'avalanche-ethereum-warp-test-result.json';
+const TEST_TYPE = process.env.AVALANCHE_ETHEREUM_TEST_TYPE || 'avalanche-to-ethereum-real-warp';
+const TARGET_LABEL = process.env.AVALANCHE_TARGET_LABEL || 'ETH';
+const TARGET_DEPLOYMENT_FILE = process.env.TARGET_EVM_DEPLOYMENT_FILE || path.join(RUNTIME_DIR, 'deployment.json');
 const DEFAULT_AVALANCHE_KEY = '0x56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027';
 const AVALANCHE_RPC = process.env.AVALANCHE_RPC_URL || 'http://127.0.0.1:9650/ext/bc/C/rpc';
 const AVALANCHE_PCHAIN_RPC = process.env.AVALANCHE_PCHAIN_RPC_URL || 'http://127.0.0.1:9650/ext/P';
@@ -42,8 +48,8 @@ const AVALANCHE_NODE_ENDPOINTS = (process.env.AVALANCHE_NODE_ENDPOINTS || 'http:
   .map((item) => item.trim())
   .filter(Boolean);
 const TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.AVALANCHE });
-const EVM_RPC = process.env.EVM_RPC || 'http://127.0.0.1:8545';
-const EVM_KEY = process.env.DEPLOYER_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const EVM_RPC = process.env.TARGET_EVM_RPC || process.env.EVM_RPC || 'http://127.0.0.1:8545';
+const EVM_KEY = process.env.TARGET_EVM_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64)';
 const TEE_REGISTRATION_ABI = '(address teeAddress,uint16 signerIndex,bytes32 enclavePubKeyHash,bytes32 measurement,bytes32 quoteHash,bytes32 initialSyncStateHash,uint64 epoch,uint64 notAfter,bytes attestationSignature)';
 
@@ -342,7 +348,7 @@ async function executeOnEthereum(hxmsg, cluster, ethereumDeployment) {
 async function main() {
   fs.ensureDirSync(RUNTIME_DIR);
   const avalancheDeployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'avalanche-deployment.json'));
-  const ethereumDeployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'deployment.json'));
+  const ethereumDeployment = fs.readJsonSync(TARGET_DEPLOYMENT_FILE);
   const teeUrl = await resolveTeeLeader();
   const totalStartedAt = nowMs();
 
@@ -351,22 +357,22 @@ async function main() {
   const validatorMs = nowMs() - validatorStartedAt;
 
   const sourceResult = await submitAvalancheWarpSource({ avalancheDeployment, ethereumDeployment, validatorSetRef });
-  console.log(`AVAX->ETH SOURCE tx=${sourceResult.sourceTxHash} block=${sourceResult.sourceBlockNumber} gas=${sourceResult.sourceGasUsed}`);
+  console.log(`AVAX->${TARGET_LABEL} SOURCE tx=${sourceResult.sourceTxHash} block=${sourceResult.sourceBlockNumber} gas=${sourceResult.sourceGasUsed}`);
 
   const proofStartedAt = nowMs();
   const signatures = await collectValidatorSignatures(sourceResult.warpMessageID);
   const proofMs = nowMs() - proofStartedAt;
-  console.log(`AVAX->ETH PROOF signatures=${signatures.length} proofMs=${proofMs}`);
+  console.log(`AVAX->${TARGET_LABEL} PROOF signatures=${signatures.length} proofMs=${proofMs}`);
 
   const hxmsg = buildHXMsg({ sourceResult, avalancheDeployment, ethereumDeployment, validators, validatorSetRef, signatures });
   const tee = await attest(hxmsg, teeUrl);
-  console.log(`AVAX->ETH TEE quorum=${tee.cluster.reached}/${tee.cluster.threshold} signedWeight=${tee.verificationResult.signedWeight}/${tee.verificationResult.totalWeight}`);
+  console.log(`AVAX->${TARGET_LABEL} TEE quorum=${tee.cluster.reached}/${tee.cluster.threshold} signedWeight=${tee.verificationResult.signedWeight}/${tee.verificationResult.totalWeight}`);
 
   const target = await executeOnEthereum(hxmsg, tee.cluster, ethereumDeployment);
-  console.log(`AVAX->ETH PASS targetTx=${target.txHash} gas=${target.gasUsed}`);
+  console.log(`AVAX->${TARGET_LABEL} PASS targetTx=${target.txHash} gas=${target.gasUsed}`);
 
   const result = {
-    testType: 'avalanche-to-ethereum-real-warp',
+    testType: TEST_TYPE,
     testedAt: new Date().toISOString(),
     pass: true,
     requestID: hxmsg.header.requestID,
@@ -396,7 +402,7 @@ async function main() {
 
 main().catch((error) => {
   const failure = {
-    testType: 'avalanche-to-ethereum-real-warp',
+    testType: TEST_TYPE,
     testedAt: new Date().toISOString(),
     pass: false,
     error: error.response?.data?.error || error.message,

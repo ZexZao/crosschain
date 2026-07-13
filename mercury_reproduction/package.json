@@ -1,0 +1,31 @@
+{
+  "name": "mercury-ablation-reproduction",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mercury-style Ethereum/EOS ablation harness reusing the crosschain experiment TEE and business components",
+  "scripts": {
+    "tee": "node tee/mercury-tee-server.js",
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:sepolia": "hardhat run scripts/deploy-mercury-vaults.js --network sepolia",
+    "register:sepolia": "node scripts/register-mercury-tees-sepolia.js",
+    "build:eos": "node scripts/build-eos-contracts.js",
+    "bootstrap:eos": "node scripts/bootstrap-eos.js",
+    "test:sepolia-eos": "node scripts/run-sepolia-eos-mercury-ablation.js",
+    "test:raft-local": "node scripts/run-local-mercury-raft-smoke.js",
+    "docker:up": "docker compose -p mercury-ablation up -d",
+    "docker:down": "docker compose -p mercury-ablation down -v",
+    "docker:logs": "docker compose -p mercury-ablation logs -f"
+  },
+  "dependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "axios": "^1.8.1",
+    "eosjs": "^22.1.0",
+    "eosjs-ecc": "^4.0.7",
+    "ethers": "^6.13.5",
+    "express": "^4.21.2",
+    "fs-extra": "^11.3.0",
+    "hardhat": "^2.22.18"
+  },
+  "devDependencies": {}
+}

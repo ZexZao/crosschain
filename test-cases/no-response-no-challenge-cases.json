@@ -1,0 +1,113 @@
+[
+  {
+    "caseId": "NORMAL-001",
+    "name": "Asset lock notification",
+    "payload": {
+      "op": "asset_lock",
+      "assetId": "NORMAL_ASSET_001",
+      "assetType": "XCST",
+      "amount": "12.5",
+      "recipient": "target.asset.receiver.001",
+      "owner": "source.asset.owner.001",
+      "metadata": "asset lock notification",
+      "requireAck": false
+    }
+  },
+  {
+    "caseId": "NORMAL-002",
+    "name": "Mint confirmation notice",
+    "payload": {
+      "op": "mint_confirm",
+      "assetId": "NORMAL_MINT_002",
+      "assetType": "XCST",
+      "amount": "8",
+      "recipient": "target.mint.receiver.002",
+      "issuer": "source.bridge.minter",
+      "metadata": "mint confirmation notice",
+      "requireAck": false
+    }
+  },
+  {
+    "caseId": "NORMAL-003",
+    "name": "Receivable attestation",
+    "payload": {
+      "op": "receivable_attest",
+      "receivableId": "NORMAL_AR_003",
+      "supplier": "target.supplier.003",
+      "amount": "3200",
+      "debtor": "source.buyer.003",
+      "metadata": "receivable attestation",
+      "requireAck": false
+    }
+  },
+  {
+    "caseId": "NORMAL-004",
+    "name": "Logistics status sync",
+    "payload": {
+      "op": "logistics_sync",
+      "waybillId": "NORMAL_WAYBILL_004",
+      "inspector": "target.inspector.004",
+      "reading": "42",
+      "location": "hangzhou-zone-004",
+      "metadata": "logistics state synchronization",
+      "requireAck": false
+    }
+  },
+  {
+    "caseId": "NORMAL-005",
+    "name": "Medical consent grant",
+    "payload": {
+      "op": "medical_consent",
+      "consentId": "NORMAL_CONSENT_005",
+      "grantee": "target.hospital.005",
+      "durationDays": 30,
+      "patient": "source.patient.005",
+      "metadata": "medical consent grant",
+      "requireAck": false
+    }
+  },
+  {
+    "caseId": "NORMAL-006",
+    "name": "Oracle feed update",
+    "payload": {
+      "op": "oracle_update",
+      "feed": "NORMAL_PRICE_006",
+      "price": "1.2345",
+      "sourceAgency": "source.oracle.bridge",
+      "roundId": 1006,
+      "metadata": "oracle feed update",
+      "requireAck": false
+    }
+  },
+  {
+    "caseId": "NORMAL-007",
+    "name": "Approval workflow commit",
+    "payload": {
+      "op": "approval_commit",
+      "workflowId": "NORMAL_APPROVAL_007",
+      "approvers": [
+        "target.approverA.007",
+        "target.approverB.007",
+        "target.approverC.007"
+      ],
+      "threshold": 2,
+      "applicant": "source.applicant.007",
+      "metadata": "approval workflow commit",
+      "requireAck": false
+    }
+  },
+  {
+    "caseId": "NORMAL-008",
+    "name": "Subsidy confirmation",
+    "payload": {
+      "op": "subsidy_confirm",
+      "applicationId": "NORMAL_SUBSIDY_008",
+      "assetType": "XCST",
+      "subsidyAmount": "66",
+      "beneficiary": "target.farmer.008",
+      "institution": "source.agencyA",
+      "metadata": "subsidy confirmation",
+      "requireAck": false
+    }
+  }
+]

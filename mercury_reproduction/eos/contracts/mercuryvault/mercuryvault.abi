@@ -1,0 +1,133 @@
+{
+    "____comment": "This file was generated with eosio-abigen. DO NOT EDIT ",
+    "version": "eosio::abi/1.2",
+    "types": [],
+    "structs": [
+        {
+            "name": "completed_row",
+            "base": "",
+            "fields": [
+                {
+                    "name": "key",
+                    "type": "uint64"
+                },
+                {
+                    "name": "object_id",
+                    "type": "checksum256"
+                }
+            ]
+        },
+        {
+            "name": "config_row",
+            "base": "",
+            "fields": [
+                {
+                    "name": "chain_id",
+                    "type": "checksum256"
+                },
+                {
+                    "name": "token_contract",
+                    "type": "name"
+                },
+                {
+                    "name": "threshold",
+                    "type": "uint16"
+                },
+                {
+                    "name": "operators",
+                    "type": "public_key[]"
+                }
+            ]
+        },
+        {
+            "name": "init",
+            "base": "",
+            "fields": [
+                {
+                    "name": "chain_id",
+                    "type": "checksum256"
+                },
+                {
+                    "name": "token_contract",
+                    "type": "name"
+                },
+                {
+                    "name": "threshold",
+                    "type": "uint16"
+                },
+                {
+                    "name": "operators",
+                    "type": "public_key[]"
+                }
+            ]
+        },
+        {
+            "name": "transfer",
+            "base": "",
+            "fields": [
+                {
+                    "name": "batch_id",
+                    "type": "checksum256"
+                },
+                {
+                    "name": "transfers",
+                    "type": "transfer_item[]"
+                },
+                {
+                    "name": "signatures",
+                    "type": "signature[]"
+                }
+            ]
+        },
+        {
+            "name": "transfer_item",
+            "base": "",
+            "fields": [
+                {
+                    "name": "deposit_id",
+                    "type": "checksum256"
+                },
+                {
+                    "name": "receiver",
+                    "type": "name"
+                },
+                {
+                    "name": "quantity",
+                    "type": "asset"
+                }
+            ]
+        }
+    ],
+    "actions": [
+        {
+            "name": "init",
+            "type": "init",
+            "ricardian_contract": ""
+        },
+        {
+            "name": "transfer",
+            "type": "transfer",
+            "ricardian_contract": ""
+        }
+    ],
+    "tables": [
+        {
+            "name": "completed",
+            "type": "completed_row",
+            "index_type": "i64",
+            "key_names": [],
+            "key_types": []
+        },
+        {
+            "name": "config",
+            "type": "config_row",
+            "index_type": "i64",
+            "key_names": [],
+            "key_types": []
+        }
+    ],
+    "kv_tables": {},
+    "ricardian_clauses": [],
+    "variants": [],
+    "action_results": []
+}

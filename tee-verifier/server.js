@@ -587,7 +587,7 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
     if (!proofEnvelope.receiptProof || !proofEnvelope.blockHeader) {
       throw new Error('EVM execution receipt proof is required');
     }
-    const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || helperData.evmRpc || 'http://evm-node:8545');
+    const provider = new ethers.JsonRpcProvider(helperData.evmRpc || process.env.EVM_RPC || 'http://evm-node:8545');
     const storedHeader = await maintainHeaderWindow({
       provider,
       chainState,
@@ -604,7 +604,7 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
     });
     saveChainState();
     if (Number(receipt.status) !== 1) throw new Error('EVM target execution receipt failed');
-    const eventTopic = ethers.id('HXMsgAccepted(bytes32,address,address)');
+    const eventTopic = ethers.id('HXMsgAccepted(bytes32,bytes32,address)');
     const accepted = (receipt.logs || []).find((log) => {
       if (!sameHex((log.topics || [])[0], eventTopic)) return false;
       return sameHex((log.topics || [])[1], response.originRequestID);

@@ -1,0 +1,102 @@
+x-mercury-tee-env: &mercury-tee-env
+  PARENT_PROJECT_ROOT: /crosschain_experiment
+  MERCURY_CLUSTER_ID: ${MERCURY_CLUSTER_ID:-MERCURY_ETH_EOS_ABLATION_CLUSTER_V1}
+  MERCURY_CLUSTER_THRESHOLD: ${MERCURY_CLUSTER_THRESHOLD:-3}
+  TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-mercury-local-raft-secret}
+  SEPOLIA_RPC_URL: ${SEPOLIA_RPC_URL:-}
+  SEPOLIA_LIGHT_CLIENT_BEACON_API_URL: ${SEPOLIA_LIGHT_CLIENT_BEACON_API_URL:-}
+  SEPOLIA_BEACON_API_URL: ${SEPOLIA_BEACON_API_URL:-}
+  SEPOLIA_TRUSTED_BLOCK_ROOT: ${SEPOLIA_TRUSTED_BLOCK_ROOT:-}
+  EOS_RPC_URL: http://eos-nodeos:8888
+  EOS_CHAIN_ID: ${EOS_CHAIN_ID:-mercury-local-eos}
+  MERCURY_EOS_ALLOW_PUSH_TRACE: ${MERCURY_EOS_ALLOW_PUSH_TRACE:-false}
+  MERCURY_ALLOW_UNFINALIZED_EVM: ${MERCURY_ALLOW_UNFINALIZED_EVM:-false}
+
+x-mercury-tee: &mercury-tee
+  image: node:20
+  working_dir: /mercury
+  volumes:
+    - ./:/mercury
+    - ../crosschain_experiment:/crosschain_experiment:ro
+  command: sh -c "npm install && node tee/mercury-tee-server.js"
+
+services:
+  mercury-tee-1:
+    <<: *mercury-tee
+    environment:
+      <<: *mercury-tee-env
+      TEE_NODE_ID: mercury-tee-1
+      TEE_SIGNER_INDEX: 0
+      TEE_PRIVATE_KEY: "0x1000000000000000000000000000000000000000000000000000000000000001"
+      TEE_CLUSTER_PEERS: http://mercury-tee-2:9300,http://mercury-tee-3:9300,http://mercury-tee-4:9300,http://mercury-tee-5:9300
+    ports:
+      - "9300:9300"
+
+  mercury-tee-2:
+    <<: *mercury-tee
+    environment:
+      <<: *mercury-tee-env
+      TEE_NODE_ID: mercury-tee-2
+      TEE_SIGNER_INDEX: 1
+      TEE_PRIVATE_KEY: "0x1000000000000000000000000000000000000000000000000000000000000002"
+      TEE_CLUSTER_PEERS: http://mercury-tee-1:9300,http://mercury-tee-3:9300,http://mercury-tee-4:9300,http://mercury-tee-5:9300
+    ports:
+      - "9301:9300"
+
+  mercury-tee-3:
+    <<: *mercury-tee
+    environment:
+      <<: *mercury-tee-env
+      TEE_NODE_ID: mercury-tee-3
+      TEE_SIGNER_INDEX: 2
+      TEE_PRIVATE_KEY: "0x1000000000000000000000000000000000000000000000000000000000000003"
+      TEE_CLUSTER_PEERS: http://mercury-tee-1:9300,http://mercury-tee-2:9300,http://mercury-tee-4:9300,http://mercury-tee-5:9300
+    ports:
+      - "9302:9300"
+
+  mercury-tee-4:
+    <<: *mercury-tee
+    environment:
+      <<: *mercury-tee-env
+      TEE_NODE_ID: mercury-tee-4
+      TEE_SIGNER_INDEX: 3
+      TEE_PRIVATE_KEY: "0x1000000000000000000000000000000000000000000000000000000000000004"
+      TEE_CLUSTER_PEERS: http://mercury-tee-1:9300,http://mercury-tee-2:9300,http://mercury-tee-3:9300,http://mercury-tee-5:9300
+    ports:
+      - "9303:9300"
+
+  mercury-tee-5:
+    <<: *mercury-tee
+    environment:
+      <<: *mercury-tee-env
+      TEE_NODE_ID: mercury-tee-5
+      TEE_SIGNER_INDEX: 4
+      TEE_PRIVATE_KEY: "0x1000000000000000000000000000000000000000000000000000000000000005"
+      TEE_CLUSTER_PEERS: http://mercury-tee-1:9300,http://mercury-tee-2:9300,http://mercury-tee-3:9300,http://mercury-tee-4:9300
+    ports:
+      - "9304:9300"
+
+  eos-nodeos:
+    image: eosio/eosio:release_2.2.x
+    command: >
+      nodeos
+      -e -p eosio
+      --delete-all-blocks
+      --plugin eosio::http_plugin
+      --plugin eosio::chain_api_plugin
+      --plugin eosio::producer_api_plugin
+      --http-server-address 0.0.0.0:8888
+      --http-validate-host=false
+      --p2p-listen-endpoint 0.0.0.0:9876
+      --access-control-allow-origin '*'
+      --contracts-console
+      --verbose-http-errors
+    ports:
+      - "8888:8888"
+      - "9876:9876"
+    volumes:
+      - eos-data:/root/.local/share/eosio
+      - ./eos:/mercury-eos
+
+volumes:
+  eos-data:
