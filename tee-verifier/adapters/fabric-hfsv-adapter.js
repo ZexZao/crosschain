@@ -330,6 +330,15 @@ function validatePayloadBinding({ hxmsg, ref, hfsv, auditRecord = {} }) {
   if (String(record.businessPayloadHash).toLowerCase() !== hxmsg.payloadBinding.businessPayloadHash.toLowerCase()) {
     throw new Error('businessPayloadHash mismatch');
   }
+  const recordTargetChainType = typeof record.targetChainType === 'string'
+    ? ChainType[String(record.targetChainType).toUpperCase()]
+    : Number(record.targetChainType);
+  if (Number(recordTargetChainType) !== Number(hxmsg.target.chainType)) {
+    throw new Error('Fabric state targetChainType mismatch');
+  }
+  if (String(record.targetChainID).toLowerCase() !== String(hxmsg.target.chainID).toLowerCase()) {
+    throw new Error('Fabric state targetChainID mismatch');
+  }
   if (record.businessPayload && hxmsg.feedback) {
     const feedback = normalizeFeedback(hxmsg.feedback);
     const recordFeedback = normalizeFeedback(record.feedback);

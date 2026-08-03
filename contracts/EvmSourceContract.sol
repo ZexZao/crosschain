@@ -33,20 +33,8 @@ contract EvmSourceContract {
     uint8 public constant MSG_TYPE_RESPONSE = 2;
 
     struct RequestRecord {
-        address sender;
-        bytes32 targetChainID;
-        bytes32 targetDomainID;
-        bytes32 targetObject;
-        bytes4 functionSelector;
-        bytes32 callDataHash;
-        bytes32 businessPayloadHash;
-        bytes32 receiver;
         bytes32 targetExecutionHash;
-        bytes32 commitmentRefHash;
-        bytes32 successActionHash;
         bytes32 failureActionHash;
-        uint64 nonce;
-        uint64 expireAt;
         uint64 feedbackTimeout;
         uint64 challengeWindow;
         uint64 challengeDeadline;
@@ -221,33 +209,23 @@ contract EvmSourceContract {
                 callDataHash
             )
         );
-        require(requests[requestID].status == RequestStatus.None, "duplicate request");
-
         bytes32 targetExecutionHash = keccak256(
             abi.encode(requestID, targetChainID, targetObject, functionSelector, callDataHash, receiver)
         );
 
-        requests[requestID] = RequestRecord({
-            sender: msg.sender,
-            targetChainID: targetChainID,
-            targetDomainID: targetDomainID,
-            targetObject: targetObject,
-            functionSelector: functionSelector,
-            callDataHash: callDataHash,
-            businessPayloadHash: businessPayloadHash,
-            receiver: receiver,
-            targetExecutionHash: targetExecutionHash,
-            commitmentRefHash: policy.atomicity.commitmentRefHash,
-            successActionHash: policy.atomicity.successActionHash,
-            failureActionHash: policy.atomicity.failureActionHash,
-            nonce: nonce,
-            expireAt: expireAt,
-            feedbackTimeout: policy.feedbackTimeout,
-            challengeWindow: policy.atomicity.challengeWindow,
-            challengeDeadline: 0,
-            commitmentType: CommitmentType(policy.atomicity.commitmentType),
-            status: RequestStatus.Pending
-        });
+        // 普通单向消息的完整事实已由 receipt event 和 MPT proof 绑定，无需重复写入状态。
+        // 只有后续需要响应或挑战的消息才保存紧凑生命周期记录。
+        if (policy.feedbackRequired) {
+            requests[requestID] = RequestRecord({
+                targetExecutionHash: targetExecutionHash,
+                failureActionHash: policy.atomicity.failureActionHash,
+                feedbackTimeout: policy.feedbackTimeout,
+                challengeWindow: policy.atomicity.challengeWindow,
+                challengeDeadline: 0,
+                commitmentType: CommitmentType(policy.atomicity.commitmentType),
+                status: RequestStatus.Pending
+            });
+        }
 
         emit CrossChainCallRequested(
             requestID,
@@ -267,7 +245,9 @@ contract EvmSourceContract {
             policy.callbackRefHash,
             HXMsgLib.hashAtomicity(policy.atomicity)
         );
-        emit RequestStatusChanged(requestID, RequestStatus.None, RequestStatus.Pending);
+        if (policy.feedbackRequired) {
+            emit RequestStatusChanged(requestID, RequestStatus.None, RequestStatus.Pending);
+        }
         return requestID;
     }
 

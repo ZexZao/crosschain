@@ -18,7 +18,8 @@ const {
   getExecutionData,
   toMinimalHXMsg,
 } = require('../shared/hxmsg');
-const { encodeBusinessPayload, normalizeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall, compactBusinessCallTuple, normalizeBusinessPayload } = require('../shared/xmsg');
+const { buildHXMsgBatch } = require('../shared/hxmsg/batch');
 const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
 const { registerEVMTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
 const { writeJSON } = require('../shared/utils');
@@ -37,9 +38,11 @@ const AVALANCHE_KEY = process.env.AVALANCHE_PRIVATE_KEY || DEFAULT_AVALANCHE_KEY
 const EVM_TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.EVM });
 const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64)';
 const TEE_REGISTRATION_ABI = '(address teeAddress,uint16 signerIndex,bytes32 enclavePubKeyHash,bytes32 measurement,bytes32 quoteHash,bytes32 initialSyncStateHash,uint64 epoch,uint64 notAfter,bytes attestationSignature)';
+const MINIMAL_TUPLE = '(bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64)';
+const COMPACT_TUPLE = '(uint16,bytes32,bytes32,address,int256,bytes32,bool)';
 const SOURCE_ABI = [
   'function submitHXMsgRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-  'function requests(bytes32) view returns (address,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,uint64,uint64,uint64,uint64,uint64,uint8,uint8)',
+  'function requests(bytes32) view returns (bytes32 targetExecutionHash,bytes32 failureActionHash,uint64 feedbackTimeout,uint64 challengeWindow,uint64 challengeDeadline,uint8 commitmentType,uint8 status)',
   'function completeWithResponse(bytes32,(bytes32,bytes32,uint8,bytes32,bytes32,bytes32),'
     + `${CLUSTER_CERT_ABI}) external`,
   'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
@@ -132,13 +135,13 @@ function buildPayload(avalancheDeployment) {
 }
 
 function buildSubmitArgs({ avalancheDeployment, payload }) {
-  const { normalized, payloadHex } = encodeBusinessPayload(payload);
-  const callDataHash = ethers.keccak256(payloadHex);
+  const { normalized, payloadHex, compactCallHash } = encodeCompactBusinessCall(payload);
+  const callDataHash = compactCallHash;
   const businessPayloadHash = hashJson(normalized);
   const targetChainID = chainIdToBytes32(avalancheDeployment.chainId);
-  const targetDomainID = bytes32FromText(`evm-local-${avalancheDeployment.chainId}`);
+  const targetDomainID = bytes32FromText(`avalanche-local-${avalancheDeployment.chainId}`);
   const targetObject = ethers.zeroPadValue(avalancheDeployment.targetContract, 32);
-  const functionSelector = ethers.id('execute(bytes32,bytes)').slice(0, 10);
+  const functionSelector = ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10);
   const receiver = ethers.zeroPadValue(avalancheDeployment.targetContract, 32);
   const expireAt = Math.floor(Date.now() / 1000) + 7200;
   const feedbackTimeout = Math.floor(Date.now() / 1000) + 3600;
@@ -209,32 +212,36 @@ async function buildOriginHXMsg({ sourceDeployment, avalancheDeployment, sourceR
     receipt: sourceResult.receipt,
     block,
     businessPayload: sourceResult.payload,
+    targetChainType: ChainType.AVALANCHE,
+    compactTarget: true,
   });
   return { hxmsg, receiptProof, committeeHeaderUpdate };
 }
 
 async function attestOrigin(hxmsg, receiptProof, committeeHeaderUpdate) {
   const startedAt = nowMs();
-  const { resp, teeUrl, attempt } = await postToCurrentTeeLeader('/attest', {
-    hxmsg,
-    helperData: {
+  const built = buildHXMsgBatch([hxmsg]);
+  const { resp, teeUrl, attempt } = await postToCurrentTeeLeader('/attest-batch', {
+    hxmsgs: [hxmsg],
+    helperDataList: [{
       evmReceiptProof: receiptProof,
       committeeHeaderUpdate,
       evmRpc: TEE_EVM_RPC,
-    },
+    }],
   });
-  const cluster = resp.data.teeClusterCertification;
+  const cluster = resp.data.teeBatchCertification;
   if (!cluster?.quorumReached) throw new Error(`origin TEE quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
   return {
     elapsedMs: nowMs() - startedAt,
     teeUrl,
     attempt,
     cluster,
+    batch: built,
     verificationResult: resp.data.verificationResult,
   };
 }
 
-async function executeOnAvalanche(hxmsg, cluster, avalancheDeployment) {
+async function executeOnAvalanche(hxmsg, originTEE, avalancheDeployment) {
   const startedAt = nowMs();
   const provider = new ethers.JsonRpcProvider(AVALANCHE_RPC);
   const wallet = new ethers.Wallet(AVALANCHE_KEY, provider);
@@ -244,19 +251,34 @@ async function executeOnAvalanche(hxmsg, cluster, avalancheDeployment) {
     ['function isActiveTEE(address) view returns (bool)', `function registerTEE(${TEE_REGISTRATION_ABI}) external`],
     deployer
   );
-  const registration = await registerEVMTEEs({ registry, certificate: cluster, teeURLs: EVM_TEE_URLS });
+  const registration = await registerEVMTEEs({ registry, certificate: originTEE.cluster, teeURLs: EVM_TEE_URLS });
+  const executionData = getExecutionData(hxmsg);
+  const businessPayload = executionData.businessPayload;
+  const target = new ethers.Contract(avalancheDeployment.targetContract, ['function assetService() view returns (address)'], provider);
+  const assetService = await target.assetService();
+  const token = new ethers.Contract(avalancheDeployment.settlementToken, ['function balanceOf(address) view returns (uint256)'], provider);
+  const recipient = ethers.getAddress(businessPayload.actor);
+  const amountUnits = ethers.parseUnits(String(businessPayload.amount), 4);
+  const reserveBefore = await token.balanceOf(assetService);
+  const recipientBefore = await token.balanceOf(recipient);
   const gateway = new ethers.Contract(
     avalancheDeployment.hxmsgGateway,
-    [`function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,${CLUSTER_CERT_ABI}) external`],
+    [`function executeHXMsgMinimalCompactBatchCluster(${MINIMAL_TUPLE}[],address,${COMPACT_TUPLE}[],bytes32,bytes32,${CLUSTER_CERT_ABI}) external`],
     deployer
   );
-  const tx = await gateway.executeHXMsgMinimalCluster(
-    toMinimalHXMsg(hxmsg),
+  const tx = await gateway.executeHXMsgMinimalCompactBatchCluster(
+    [toMinimalHXMsg(hxmsg)],
     avalancheDeployment.targetContract,
-    getExecutionData(hxmsg).callData,
-    clusterCertificateTuple(cluster)
+    [compactBusinessCallTuple(executionData.compactCall)],
+    originTEE.batch.batchID,
+    originTEE.batch.batchRoot,
+    clusterCertificateTuple(originTEE.cluster)
   );
   const receipt = await tx.wait();
+  const reserveAfter = await token.balanceOf(assetService);
+  const recipientAfter = await token.balanceOf(recipient);
+  const assetActionVerified = reserveBefore - reserveAfter === amountUnits
+    && recipientAfter - recipientBefore === amountUnits;
   return {
     provider,
     receipt,
@@ -264,6 +286,12 @@ async function executeOnAvalanche(hxmsg, cluster, avalancheDeployment) {
     txHash: receipt.hash,
     gasUsed: Number(receipt.gasUsed),
     registrationGasUsed: Number(registration.gasUsed || 0n),
+    assetActionVerified,
+    assetBalances: {
+      reserve: { address: assetService, before: reserveBefore.toString(), after: reserveAfter.toString() },
+      recipient: { address: recipient, before: recipientBefore.toString(), after: recipientAfter.toString() },
+      amountUnits: amountUnits.toString(),
+    },
   };
 }
 
@@ -353,7 +381,7 @@ async function main() {
   const originTEE = await attestOrigin(originProof.hxmsg, originProof.receiptProof, originProof.committeeHeaderUpdate);
   console.log(`EVM->AVAX TEE quorum=${originTEE.cluster.reached}/${originTEE.cluster.threshold}`);
 
-  const target = await executeOnAvalanche(originProof.hxmsg, originTEE.cluster, avalancheDeployment);
+  const target = await executeOnAvalanche(originProof.hxmsg, originTEE, avalancheDeployment);
   console.log(`EVM->AVAX TARGET tx=${target.txHash} gas=${target.gasUsed}`);
 
   const responseTEE = await attestResponse({ originHxmsg: originProof.hxmsg, avalancheExecution: target });
@@ -365,7 +393,7 @@ async function main() {
   const result = {
     testType: 'local-ethereum-avalanche-response-required-gas',
     testedAt: new Date().toISOString(),
-    pass: true,
+    pass: target.assetActionVerified,
     requestID: originProof.hxmsg.header.requestID,
     hmsgDigest: originProof.hxmsg.hmsgDigest,
     expectedPayload: normalizeBusinessPayload(sourceResult.payload),
@@ -379,6 +407,8 @@ async function main() {
       txHash: target.txHash,
       gasUsed: target.gasUsed,
       registrationGasUsed: target.registrationGasUsed,
+      assetActionVerified: target.assetActionVerified,
+      assetBalances: target.assetBalances,
     },
     response: {
       chain: 'local-ethereum',

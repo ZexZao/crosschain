@@ -26,6 +26,8 @@ function buildHXMsgFromFabricEvent({
   blockNumber,
   nonce,
   createdAt,
+  targetChainType,
+  targetDomainID,
 }) {
   if (!deployment) throw new Error('deployment is required');
   if (!rawPayload?.requestID) throw new Error('Fabric event payload missing requestID');
@@ -47,6 +49,8 @@ function buildHXMsgFromFabricEvent({
     functionSelector: rawPayload.functionSelector || TARGET_EXECUTE_SELECTOR,
     callDataHash,
     receiver: rawPayload.receiver || rawPayload.targetObject,
+    chainType: targetChainType,
+    domainID: targetDomainID,
   });
   const businessPayloadHash = rawPayload.businessPayloadHash || hashJson(normalized);
   const sourcePart = buildFabricSourceFact({

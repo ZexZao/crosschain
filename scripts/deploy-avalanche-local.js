@@ -45,12 +45,15 @@ async function main() {
   const gateway = await deployContract({
     wallet,
     name: 'HXMsgGateway',
-    args: [await teeRegistry.getAddress()],
+    args: [await teeRegistry.getAddress(), 3],
   });
   const target = await deployContract({
     wallet,
     name: 'TargetContract',
-    args: [await gateway.getAddress()],
+    args: [
+      await gateway.getAddress(),
+      BigInt(process.env.INITIAL_ASSET_RESERVE_UNITS || '10000000000000'),
+    ],
   });
 
   const deployment = {
@@ -65,6 +68,7 @@ async function main() {
     targetContract: await target.getAddress(),
     teeRegistry: await teeRegistry.getAddress(),
     settlementToken: await target.token(),
+    initialAssetReserveUnits: process.env.INITIAL_ASSET_RESERVE_UNITS || '10000000000000',
     deployedAt: new Date().toISOString(),
   };
   fs.writeJsonSync(path.join(RUNTIME_DIR, 'avalanche-deployment.json'), deployment, { spaces: 2 });

@@ -8,6 +8,7 @@ const { encodeCompactBusinessCall, compactBusinessCallTuple } = require('../shar
 const {
   ChainType,
   addressToBytes32,
+  bytes32FromText,
   chainIdToBytes32,
   FeedbackType,
   hashJson,
@@ -23,11 +24,16 @@ const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 const TEST_DATA = path.join(__dirname, '..', 'test-data', 'fabric-real-cases.json');
-const RESULTS_FILE = 'hxmsg-fabric-evm-results.json';
-const SUMMARY_FILE = 'hxmsg-test-summary.md';
+const RESULTS_FILE = process.env.HXMSG_RESULTS_FILE || 'hxmsg-fabric-evm-results.json';
+const SUMMARY_FILE = process.env.HXMSG_SUMMARY_FILE || 'hxmsg-test-summary.md';
 const TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.FABRIC });
-const EVM_RPC = process.env.EVM_RPC || 'http://127.0.0.1:8545';
-const PRIV_KEY = process.env.DEPLOYER_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const EVM_RPC = process.env.TARGET_EVM_RPC || process.env.EVM_RPC || 'http://127.0.0.1:8545';
+const PRIV_KEY = process.env.TARGET_EVM_PRIVATE_KEY || process.env.DEPLOYER_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
+const TARGET_DEPLOYMENT_FILE = process.env.TARGET_EVM_DEPLOYMENT_FILE || path.join(RUNTIME_DIR, 'deployment.json');
+const TARGET_CHAIN_TYPE = String(process.env.HXMSG_TARGET_CHAIN_TYPE || 'EVM').toUpperCase() === 'AVALANCHE'
+  ? ChainType.AVALANCHE
+  : ChainType.EVM;
+const TARGET_LABEL = TARGET_CHAIN_TYPE === ChainType.AVALANCHE ? 'Avalanche' : 'EVM';
 const DEFAULT_CASE_TOTAL = Number(process.env.HXMSG_CASE_TOTAL || 8);
 const CASE_LIMIT = Number(process.env.HXMSG_CASE_LIMIT || DEFAULT_CASE_TOTAL);
 const FABRIC_EMIT_DELAY_MS = Number(process.env.HXMSG_FABRIC_EMIT_DELAY_MS || 1500);
@@ -142,7 +148,7 @@ async function relayHXMsg(hxmsg, teeUrl) {
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
   const wallet = new ethers.Wallet(PRIV_KEY, provider);
   const deployer = new ethers.NonceManager(wallet);
-  const deployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'deployment.json'));
+  const deployment = fs.readJsonSync(TARGET_DEPLOYMENT_FILE);
 
   const registry = new ethers.Contract(
     deployment.teeRegistry,
@@ -192,7 +198,7 @@ async function relayHXMsgBatch(hxmsgs, teeUrl) {
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
   const wallet = new ethers.Wallet(PRIV_KEY, provider);
   const deployer = new ethers.NonceManager(wallet);
-  const deployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'deployment.json'));
+  const deployment = fs.readJsonSync(TARGET_DEPLOYMENT_FILE);
 
   const registry = new ethers.Contract(
     deployment.teeRegistry,
@@ -263,7 +269,7 @@ function expectedBusinessStatus(op) {
 
 async function queryTargetState(requestID) {
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
-  const deployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'deployment.json'));
+  const deployment = fs.readJsonSync(TARGET_DEPLOYMENT_FILE);
   const target = new ethers.Contract(
     deployment.targetContract,
     [
@@ -296,7 +302,7 @@ async function queryTargetState(requestID) {
 }
 
 function saveSummary(results, totals) {
-  let md = '# h-xmsg / h-FSV 正向测试结果 (Fabric → EVM)\n\n';
+  let md = `# h-xmsg / h-FSV 正向测试结果 (Fabric → ${TARGET_LABEL})\n\n`;
   md += `**测试时间**：${new Date().toISOString()}\n`;
   md += `**通过率**：${totals.pass}/${totals.total} | **消息结构**：h-xmsg | **Fabric 验证**：h-FSV | **TEE 共识**：Raft-backed TEE batch cluster | **EVM提交**：HXMsgMinimalBatchCluster | **目标合约**：分类业务服务\n`;
   md += `**TEE 批大小**：${totals.teeBatchSize || '-'} | **Batch tx gas**：${totals.totalBatchGas ? totals.totalBatchGas.toLocaleString() : '-'} | **平均 gas/message**：${totals.averageGasPerMessage ? totals.averageGasPerMessage.toLocaleString() : '-'}\n\n`;
@@ -328,7 +334,7 @@ function summarizeBatchGas(results) {
 
 async function main() {
   fs.ensureDirSync(RUNTIME_DIR);
-  const deployment = fs.readJsonSync(path.join(RUNTIME_DIR, 'deployment.json'));
+  const deployment = fs.readJsonSync(TARGET_DEPLOYMENT_FILE);
   if (!deployment.hxmsgGateway || !deployment.teeRegistry) {
     throw new Error('deployment.json missing hxmsgGateway/teeRegistry; run deploy after compiling new contracts');
   }
@@ -372,7 +378,7 @@ async function main() {
         const { normalized, payloadHex, compactCallHash } = encodeCompactBusinessCall(businessPayload);
         const payload = {
           businessPayload,
-          targetChainType: 'EVM',
+          targetChainType: TARGET_LABEL.toUpperCase(),
           targetChainID,
           targetObject,
           functionSelector: TARGET_EXECUTE_SELECTOR,
@@ -399,6 +405,8 @@ async function main() {
           blockNumber,
           nonce: emitResp.nonce,
           createdAt: eventRecord.createdAt,
+          targetChainType: TARGET_CHAIN_TYPE,
+          targetDomainID: bytes32FromText(`${TARGET_CHAIN_TYPE === ChainType.AVALANCHE ? 'avalanche' : 'evm'}-local-${deployment.chainId}`),
         });
         const protocolCheck = {
           feedbackDisabled: hxmsg.feedback?.required === false

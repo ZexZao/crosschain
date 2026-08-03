@@ -157,8 +157,9 @@ contract TEERegistry {
         uint16[] memory indexes = new uint16[](cert.participantCount);
         address[] memory signers = new address[](cert.participantCount);
         bytes32[] memory keyHashes = new bytes32[](cert.participantCount);
-        for (uint16 i = 0; i < 256; i += 1) {
-            if ((cert.signerBitmap & (uint256(1) << i)) != 0) {
+        uint256 remainingBitmap = cert.signerBitmap;
+        for (uint16 i = 0; remainingBitmap != 0; i += 1) {
+            if ((remainingBitmap & 1) != 0) {
                 require(counted < cert.participantCount, "participant overflow");
                 address tee = teeBySignerIndex[i];
                 require(tee != address(0), "unknown signer");
@@ -169,6 +170,7 @@ contract TEERegistry {
                 keyHashes[counted] = enclavePubKeyHashByIndex[i];
                 counted += 1;
             }
+            remainingBitmap >>= 1;
         }
         require(counted == cert.participantCount, "bad participant count");
         require(keccak256(abi.encode(indexes, signers, keyHashes)) == cert.selectedSignerHash, "bad participant keys");

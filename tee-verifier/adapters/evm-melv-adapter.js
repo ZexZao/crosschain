@@ -283,8 +283,8 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
   if (Number(hxmsg.source?.chainType) !== ChainType.EVM) {
     throw new Error('MELV-EF adapter requires source.chainType = EVM');
   }
-  if (![ChainType.FABRIC, ChainType.EVM].includes(Number(hxmsg.target?.chainType))) {
-    throw new Error('MELV-EF adapter requires target.chainType = Fabric or EVM');
+  if (![ChainType.FABRIC, ChainType.EVM, ChainType.AVALANCHE].includes(Number(hxmsg.target?.chainType))) {
+    throw new Error('MELV-EF adapter requires target.chainType = Fabric, EVM, or Avalanche');
   }
   if (Number(hxmsg.verification?.verificationMethod) !== VerificationMethod.EVM_LIGHT_CLIENT) {
     throw new Error('MELV-EF adapter requires verificationMethod = EVM_LIGHT_CLIENT');

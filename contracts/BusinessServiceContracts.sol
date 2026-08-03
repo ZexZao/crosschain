@@ -44,8 +44,18 @@ contract CrossChainAssetService is RoutedService {
         uint256 amountUnits
     );
 
-    constructor(address router_) RoutedService(router_) {
+    event AssetTransferred(
+        bytes32 indexed requestID,
+        bytes32 indexed recordKey,
+        address indexed recipient,
+        uint256 amountUnits
+    );
+
+    constructor(address router_, uint256 initialReserveUnits) RoutedService(router_) {
         token = new CrossChainToken("CrossChain Settlement Token", "XCST", 4, address(this));
+        if (initialReserveUnits > 0) {
+            token.mint(address(this), initialReserveUnits);
+        }
     }
 
     /// @notice 通过 mint XCST 结算一条已验证的跨链资产消息。
@@ -102,6 +112,34 @@ contract CrossChainAssetService is RoutedService {
         token.mint(recipient, amountUnits);
         emit AssetSettled(requestID, recordKey, recipient, amountUnits);
         return keccak256(bytes("ASSET_SETTLED"));
+    }
+
+    /// @notice 批量快速路径中的真实铸造结算。审计事实由事件保存，不重复写 Settlement 映射。
+    function mintSettlementBatchItem(
+        bytes32 requestID,
+        bytes32 recordKey,
+        address recipient,
+        uint256 amountUnits
+    ) external onlyRouter returns (bytes32) {
+        require(recipient != address(0), "bad recipient");
+        require(amountUnits > 0, "zero amount");
+        token.mint(recipient, amountUnits);
+        emit AssetSettled(requestID, recordKey, recipient, amountUnits);
+        return keccak256(bytes("ASSET_SETTLED"));
+    }
+
+    /// @notice 从目标链流动性储备向接收方真实转账，而不是用 mint 近似 token_transfer。
+    function transferSettlementCompact(
+        bytes32 requestID,
+        bytes32 recordKey,
+        address recipient,
+        uint256 amountUnits
+    ) external onlyRouter returns (bytes32) {
+        require(recipient != address(0), "bad recipient");
+        require(amountUnits > 0, "zero amount");
+        require(token.transfer(recipient, amountUnits), "reserve transfer failed");
+        emit AssetTransferred(requestID, recordKey, recipient, amountUnits);
+        return keccak256(bytes("TOKEN_TRANSFERRED"));
     }
 }
 

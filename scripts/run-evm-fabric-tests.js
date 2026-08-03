@@ -59,7 +59,7 @@ const NO_WRITE_RESULTS = process.env.HXMSG_NO_WRITE_RESULTS === 'true';
 
 const SOURCE_ABI = [
   'function submitHXMsgRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-  'function requests(bytes32) view returns (address,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,uint64,uint64,uint64,uint64,uint64,uint8,uint8)',
+  'function requests(bytes32) view returns (bytes32 targetExecutionHash,bytes32 failureActionHash,uint64 feedbackTimeout,uint64 challengeWindow,uint64 challengeDeadline,uint8 commitmentType,uint8 status)',
   'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];
 
@@ -622,6 +622,7 @@ function compactDeliveryObject(hxmsg) {
     feedbackTimeout: Number(minimal[12] || 0),
     callbackRefHash: minimal[13],
     expireAt: Number(minimal[14] || 0),
+    sourceChainType: Number(hxmsg.source?.chainType || ChainType.EVM),
   };
 }
 
@@ -670,11 +671,11 @@ async function executeOnFabric({ item, contract, sourceView }) {
     result.inbound = inbound;
     result.businessRecord = businessRecord;
     result.sourceRequest = {
-      status: Number(sourceRecord.status ?? sourceRecord[18]),
-      feedbackTimeout: Number(sourceRecord.feedbackTimeout ?? sourceRecord[14]),
-      challengeWindow: Number(sourceRecord.challengeWindow ?? sourceRecord[15]),
-      challengeDeadline: Number(sourceRecord.challengeDeadline ?? sourceRecord[16]),
-      commitmentType: Number(sourceRecord.commitmentType ?? sourceRecord[17]),
+      status: Number(sourceRecord.status ?? sourceRecord[6]),
+      feedbackTimeout: Number(sourceRecord.feedbackTimeout ?? sourceRecord[2]),
+      challengeWindow: Number(sourceRecord.challengeWindow ?? sourceRecord[3]),
+      challengeDeadline: Number(sourceRecord.challengeDeadline ?? sourceRecord[4]),
+      commitmentType: Number(sourceRecord.commitmentType ?? sourceRecord[5]),
     };
     result.pass = Boolean(inbound)
       && Boolean(businessRecord)

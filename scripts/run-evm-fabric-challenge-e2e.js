@@ -242,11 +242,11 @@ async function main() {
     result.gas.totalEvmGas = result.gas.evm.total;
     const sourceView = new ethers.Contract(
       deployment.evmSourceContract,
-      ['function requests(bytes32) view returns (address,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,bytes32,uint64,uint64,uint64,uint64,uint64,uint8,uint8)'],
+      ['function requests(bytes32) view returns (bytes32 targetExecutionHash,bytes32 failureActionHash,uint64 feedbackTimeout,uint64 challengeWindow,uint64 challengeDeadline,uint8 commitmentType,uint8 status)'],
       provider
     );
     const sourceRecord = await sourceView.requests(hxmsg.header.requestID);
-    const sourceStatus = Number(sourceRecord.status ?? sourceRecord[18]);
+    const sourceStatus = Number(sourceRecord.status ?? sourceRecord[6]);
     result.pass = sourceStatus === 3;
     Object.assign(result, {
       requestID: hxmsg.header.requestID,

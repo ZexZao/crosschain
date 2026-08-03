@@ -24,6 +24,7 @@ function firstDefined(...values) {
 function normalizeBusinessPayload(rawPayload) {
   const recordId = firstDefined(
     rawPayload.assetId,
+    rawPayload.transferId,
     rawPayload.escrowId,
     rawPayload.receivableId,
     rawPayload.waybillId,

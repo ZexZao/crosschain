@@ -9,7 +9,8 @@ const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { buildCommitteeHeaderUpdate } = require('../shared/evm/header-committee');
 const { buildEvmContractCallTarget } = require('../hxmsg-builder/target-builders/evm');
 const { composeHXMsg } = require('../hxmsg-builder/compose');
-const { encodeBusinessPayload, normalizeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall, compactBusinessCallTuple, normalizeBusinessPayload } = require('../shared/xmsg');
+const { buildHXMsgBatch } = require('../shared/hxmsg/batch');
 const {
   ChainType,
   RefType,
@@ -40,8 +41,8 @@ loadDotEnv();
 const PROJECT_ROOT = path.join(__dirname, '..');
 const RUNTIME_DIR = path.join(PROJECT_ROOT, 'runtime');
 const CASE_FILE = process.env.NO_RESPONSE_CASE_FILE || path.join(PROJECT_ROOT, 'test-cases', 'no-response-no-challenge-cases.json');
-const RESULT_FILE = 'local-evm-avalanche-no-response-gas-results.json';
-const SUMMARY_FILE = path.join(RUNTIME_DIR, 'local-evm-avalanche-no-response-gas-summary.md');
+const RESULT_FILE = process.env.NO_RESPONSE_RESULT_FILE || 'local-evm-avalanche-no-response-gas-results.json';
+const SUMMARY_FILE = path.join(RUNTIME_DIR, process.env.NO_RESPONSE_SUMMARY_FILE || 'local-evm-avalanche-no-response-gas-summary.md');
 const EVM_RPC = process.env.EVM_RPC || 'http://127.0.0.1:8545';
 const TEE_EVM_RPC = process.env.TEE_EVM_RPC || 'http://evm-node:8545';
 const AVALANCHE_RPC = process.env.AVALANCHE_RPC_URL || 'http://127.0.0.1:9650/ext/bc/C/rpc';
@@ -56,6 +57,9 @@ const EVM_TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.EVM });
 const AVALANCHE_TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.AVALANCHE });
 const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64)';
 const TEE_REGISTRATION_ABI = '(address teeAddress,uint16 signerIndex,bytes32 enclavePubKeyHash,bytes32 measurement,bytes32 quoteHash,bytes32 initialSyncStateHash,uint64 epoch,uint64 notAfter,bytes attestationSignature)';
+const MINIMAL_TUPLE = '(bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64)';
+const COMPACT_TUPLE = '(uint16,bytes32,bytes32,address,int256,bytes32,bool)';
+const TEE_BATCH_SIZE = Number(process.env.HXMSG_TEE_BATCH_SIZE || 8);
 const SOURCE_ABI = [
   'function submitHXMsgRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
   'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
@@ -132,13 +136,13 @@ function makePayload(tc, targetDeployment) {
 }
 
 function buildEvmSubmitArgs({ targetDeployment, payload }) {
-  const { normalized, payloadHex } = encodeBusinessPayload(payload);
-  const callDataHash = ethers.keccak256(payloadHex);
+  const { normalized, compact, payloadHex, compactCallHash } = encodeCompactBusinessCall(payload);
+  const callDataHash = compactCallHash;
   const businessPayloadHash = hashJson(normalized);
   const targetChainID = chainIdToBytes32(targetDeployment.chainId);
-  const targetDomainID = bytes32FromText(`evm-local-${targetDeployment.chainId}`);
+  const targetDomainID = bytes32FromText(`avalanche-local-${targetDeployment.chainId}`);
   const targetObject = ethers.zeroPadValue(targetDeployment.targetContract, 32);
-  const functionSelector = ethers.id('execute(bytes32,bytes)').slice(0, 10);
+  const functionSelector = ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10);
   const receiver = ethers.zeroPadValue(targetDeployment.targetContract, 32);
   const expireAt = Math.floor(Date.now() / 1000) + 7200;
   const atomicity = [false, 0, 0, ethers.ZeroHash, ethers.ZeroHash, ethers.ZeroHash, 0];
@@ -156,6 +160,7 @@ function buildEvmSubmitArgs({ targetDeployment, payload }) {
       policy,
     ],
     normalized,
+    compact,
     payloadHex,
   };
 }
@@ -192,54 +197,10 @@ async function buildEvmOriginHXMsg({ sourceDeployment, targetDeployment, sourceR
     receipt: sourceResult.receipt,
     block,
     businessPayload: sourceResult.payload,
+    targetChainType: ChainType.AVALANCHE,
+    compactTarget: true,
   });
   return { hxmsg, receiptProof, committeeHeaderUpdate };
-}
-
-async function attestEvmOrigin(hxmsg, receiptProof, committeeHeaderUpdate) {
-  const startedAt = nowMs();
-  const { resp } = await postToLeader(EVM_TEE_URLS, 'EVM', '/attest', {
-    hxmsg,
-    helperData: {
-      evmReceiptProof: receiptProof,
-      committeeHeaderUpdate,
-      evmRpc: TEE_EVM_RPC,
-    },
-  });
-  const cluster = resp.data.teeClusterCertification;
-  if (!cluster?.quorumReached) throw new Error(`EVM TEE quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
-  return { elapsedMs: nowMs() - startedAt, cluster, verificationResult: resp.data.verificationResult };
-}
-
-async function executeOnEvmTarget({ hxmsg, cluster, targetDeployment, rpcURL, privateKey, teeURLs }) {
-  const startedAt = nowMs();
-  const provider = new ethers.JsonRpcProvider(rpcURL);
-  const wallet = new ethers.Wallet(privateKey, provider);
-  const deployer = new ethers.NonceManager(wallet);
-  const registry = new ethers.Contract(
-    targetDeployment.teeRegistry,
-    ['function isActiveTEE(address) view returns (bool)', `function registerTEE(${TEE_REGISTRATION_ABI}) external`],
-    deployer
-  );
-  const registration = await registerEVMTEEs({ registry, certificate: cluster, teeURLs });
-  const gateway = new ethers.Contract(
-    targetDeployment.hxmsgGateway,
-    [`function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,${CLUSTER_CERT_ABI}) external`],
-    deployer
-  );
-  const tx = await gateway.executeHXMsgMinimalCluster(
-    toMinimalHXMsg(hxmsg),
-    targetDeployment.targetContract,
-    getExecutionData(hxmsg).callData,
-    clusterCertificateTuple(cluster)
-  );
-  const receipt = await tx.wait();
-  return {
-    elapsedMs: nowMs() - startedAt,
-    txHash: receipt.hash,
-    gasUsed: Number(receipt.gasUsed),
-    registrationGasUsed: Number(registration.gasUsed || 0n),
-  };
 }
 
 async function getValidatorSetRef() {
@@ -281,14 +242,15 @@ async function submitAvalancheSource({ tc, avalancheDeployment, targetDeployment
   const sourceArtifact = artifact('AvalancheWarpSourceContract.sol', 'AvalancheWarpSourceContract');
   const source = new ethers.Contract(avalancheDeployment.avalancheWarpSourceContract, sourceArtifact.abi, wallet);
   const payload = makePayload(tc, targetDeployment);
-  const encoded = encodeBusinessPayload(payload);
+  const encoded = encodeCompactBusinessCall(payload);
   const normalized = encoded.normalized;
+  const compact = encoded.compact;
   const callData = encoded.payloadHex;
   const businessPayloadHash = hashJson(normalized);
   const targetChainID = chainIdToBytes32(targetDeployment.chainId);
   const targetDomainID = bytes32FromText(`evm-local-${targetDeployment.chainId}`);
   const targetObject = ethers.zeroPadValue(targetDeployment.targetContract, 32);
-  const functionSelector = ethers.id('execute(bytes32,bytes)').slice(0, 10);
+  const functionSelector = ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10);
   const receiver = ethers.zeroPadValue(targetDeployment.targetContract, 32);
   const expireAt = Math.floor(Date.now() / 1000) + 7200;
   const policyHash = hashJson({ validatorSetRef, canonicalOrdering: validatorSetRef.canonicalOrdering });
@@ -317,6 +279,7 @@ async function submitAvalancheSource({ tc, avalancheDeployment, targetDeployment
   return {
     payload,
     normalized,
+    compact,
     callData,
     businessPayloadHash,
     requestID: event.args.requestID,
@@ -339,6 +302,7 @@ function buildAvalancheOriginHXMsg({ sourceResult, avalancheDeployment, targetDe
     functionSelector: warpPayload.functionSelector,
     callDataHash: warpPayload.callDataHash,
     receiver: warpPayload.receiver,
+    chainType: ChainType.EVM,
   });
   const sourceProof = {
     proofType: 'AvalancheWarpMessage',
@@ -418,7 +382,7 @@ function buildAvalancheOriginHXMsg({ sourceResult, avalancheDeployment, targetDe
     },
     atomicity: null,
     callData: warpPayload.callData,
-    compactCall: null,
+    compactCall: sourceResult.compact,
     callDataDecoded: sourceResult.normalized,
     txId: sourceResult.warpMessageID,
     srcHeight: Number(validatorSetRef.pChainHeight || 0),
@@ -443,15 +407,105 @@ function buildAvalancheOriginHXMsg({ sourceResult, avalancheDeployment, targetDe
   return hxmsg;
 }
 
-async function attestAvalancheOrigin(hxmsg) {
+function chunkItems(items, size) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
+  return chunks;
+}
+
+async function attestBatch({ items, teeURLs, label }) {
   const startedAt = nowMs();
-  const { resp } = await postToLeader(AVALANCHE_TEE_URLS, 'Avalanche', '/attest', {
-    hxmsg,
-    helperData: hxmsg._blockData,
+  const { resp } = await postToLeader(teeURLs, label, '/attest-batch', {
+    hxmsgs: items.map((item) => item.hxmsg),
+    helperDataList: items.map((item) => item.helperData),
   });
-  const cluster = resp.data.teeClusterCertification;
-  if (!cluster?.quorumReached) throw new Error(`Avalanche TEE quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
-  return { elapsedMs: nowMs() - startedAt, cluster, verificationResult: resp.data.verificationResult };
+  const cluster = resp.data.teeBatchCertification;
+  if (!cluster?.quorumReached) throw new Error(`${label} TEE batch quorum not reached`);
+  const built = buildHXMsgBatch(items.map((item) => item.hxmsg));
+  if (built.batchRoot.toLowerCase() !== String(resp.data.batchRoot).toLowerCase()) {
+    throw new Error(`${label} TEE batch root mismatch`);
+  }
+  return {
+    elapsedMs: nowMs() - startedAt,
+    cluster,
+    built,
+    verificationResults: resp.data.verificationResults || [],
+  };
+}
+
+async function executeCompactBatch({ items, batch, targetDeployment, rpcURL, privateKey, teeURLs }) {
+  const startedAt = nowMs();
+  const provider = new ethers.JsonRpcProvider(rpcURL);
+  const wallet = new ethers.Wallet(privateKey, provider);
+  const deployer = new ethers.NonceManager(wallet);
+  const registry = new ethers.Contract(
+    targetDeployment.teeRegistry,
+    ['function isActiveTEE(address) view returns (bool)', `function registerTEE(${TEE_REGISTRATION_ABI}) external`],
+    deployer
+  );
+  const registration = await registerEVMTEEs({ registry, certificate: batch.cluster, teeURLs });
+  const calls = items.map((item) => getExecutionData(item.hxmsg).compactCall);
+  const allTransfers = calls.every((call) => Number(call.opCode) === 9);
+  let assetCheck = null;
+  let token;
+  let assetService;
+  let reserveBefore;
+  const expectedByRecipient = new Map();
+  const recipientBefore = new Map();
+  if (allTransfers) {
+    const target = new ethers.Contract(targetDeployment.targetContract, ['function assetService() view returns (address)'], provider);
+    assetService = await target.assetService();
+    token = new ethers.Contract(targetDeployment.settlementToken, ['function balanceOf(address) view returns (uint256)'], provider);
+    reserveBefore = await token.balanceOf(assetService);
+    for (const call of calls) {
+      const recipient = ethers.getAddress(call.actorAddress);
+      expectedByRecipient.set(recipient, (expectedByRecipient.get(recipient) || 0n) + BigInt(call.amount));
+    }
+    for (const recipient of expectedByRecipient.keys()) {
+      recipientBefore.set(recipient, await token.balanceOf(recipient));
+    }
+  }
+  const gateway = new ethers.Contract(
+    targetDeployment.hxmsgGateway,
+    [`function executeHXMsgMinimalCompactBatchCluster(${MINIMAL_TUPLE}[],address,${COMPACT_TUPLE}[],bytes32,bytes32,${CLUSTER_CERT_ABI}) external`],
+    deployer
+  );
+  const tx = await gateway.executeHXMsgMinimalCompactBatchCluster(
+    items.map((item) => toMinimalHXMsg(item.hxmsg)),
+    targetDeployment.targetContract,
+    calls.map(compactBusinessCallTuple),
+    batch.built.batchID,
+    batch.built.batchRoot,
+    clusterCertificateTuple(batch.cluster),
+    process.env.HXMSG_EVM_GAS_LIMIT ? { gasLimit: BigInt(process.env.HXMSG_EVM_GAS_LIMIT) } : {}
+  );
+  const receipt = await tx.wait();
+  if (allTransfers) {
+    const reserveAfter = await token.balanceOf(assetService);
+    const expectedReserveDelta = calls.reduce((sum, call) => sum + BigInt(call.amount), 0n);
+    const recipients = [];
+    let verified = reserveBefore - reserveAfter === expectedReserveDelta;
+    for (const [recipient, expectedDelta] of expectedByRecipient.entries()) {
+      const before = recipientBefore.get(recipient);
+      const after = await token.balanceOf(recipient);
+      const actualDelta = after - before;
+      if (actualDelta !== expectedDelta) verified = false;
+      recipients.push({ recipient, before: before.toString(), after: after.toString(), expectedDelta: expectedDelta.toString(), actualDelta: actualDelta.toString() });
+    }
+    assetCheck = {
+      verified,
+      reserve: { address: assetService, before: reserveBefore.toString(), after: reserveAfter.toString(), expectedDelta: expectedReserveDelta.toString(), actualDelta: (reserveBefore - reserveAfter).toString() },
+      recipients,
+    };
+  }
+  return {
+    elapsedMs: nowMs() - startedAt,
+    txHash: receipt.hash,
+    gasUsed: Number(receipt.gasUsed),
+    gasPerMessage: Math.ceil(Number(receipt.gasUsed) / items.length),
+    registrationGasUsed: Number(registration.gasUsed || 0n),
+    assetCheck,
+  };
 }
 
 function summarize(results) {
@@ -504,102 +558,6 @@ function writeSummary(output) {
   fs.writeFileSync(SUMMARY_FILE, `${lines.join('\n')}\n`);
 }
 
-async function runEvmToAvalanche({ tc, sourceDeployment, avalancheDeployment, provider, source, nextNonce }) {
-  const sourceResult = await submitEvmSource({
-    tc,
-    sourceDeployment,
-    targetDeployment: avalancheDeployment,
-    provider,
-    source,
-    nextNonce,
-  });
-  const proof = await buildEvmOriginHXMsg({
-    sourceDeployment,
-    targetDeployment: avalancheDeployment,
-    sourceResult,
-    provider,
-  });
-  const tee = await attestEvmOrigin(proof.hxmsg, proof.receiptProof, proof.committeeHeaderUpdate);
-  const target = await executeOnEvmTarget({
-    hxmsg: proof.hxmsg,
-    cluster: tee.cluster,
-    targetDeployment: avalancheDeployment,
-    rpcURL: AVALANCHE_RPC,
-    privateKey: AVALANCHE_KEY,
-    teeURLs: EVM_TEE_URLS,
-  });
-  return {
-    caseId: tc.caseId,
-    name: tc.name,
-    direction: 'EVM->Avalanche',
-    pass: true,
-    requestID: proof.hxmsg.header.requestID,
-    hmsgDigest: proof.hxmsg.hmsgDigest,
-    sourceTxHash: sourceResult.sourceTxHash,
-    targetTxHash: target.txHash,
-    sourceGasUsed: sourceResult.sourceGasUsed,
-    targetGasUsed: target.gasUsed,
-    targetRegistrationGasUsed: target.registrationGasUsed,
-    teeCluster: tee.cluster,
-    teeVerification: tee.verificationResult,
-    timings: {
-      sourceMs: sourceResult.elapsedMs,
-      teeMs: tee.elapsedMs,
-      targetMs: target.elapsedMs,
-    },
-    payload: normalizeBusinessPayload(makePayload(tc, avalancheDeployment)),
-  };
-}
-
-async function runAvalancheToEvm({ tc, sourceDeployment, avalancheDeployment, validatorInfo }) {
-  const sourceResult = await submitAvalancheSource({
-    tc,
-    avalancheDeployment,
-    targetDeployment: sourceDeployment,
-    validatorSetRef: validatorInfo.ref,
-  });
-  const signatures = await collectValidatorSignatures(sourceResult.warpMessageID);
-  const hxmsg = buildAvalancheOriginHXMsg({
-    sourceResult,
-    avalancheDeployment,
-    targetDeployment: sourceDeployment,
-    validators: validatorInfo.validators,
-    validatorSetRef: validatorInfo.ref,
-    signatures,
-  });
-  const tee = await attestAvalancheOrigin(hxmsg);
-  const target = await executeOnEvmTarget({
-    hxmsg,
-    cluster: tee.cluster,
-    targetDeployment: sourceDeployment,
-    rpcURL: EVM_RPC,
-    privateKey: LOCAL_EVM_KEY,
-    teeURLs: AVALANCHE_TEE_URLS,
-  });
-  return {
-    caseId: tc.caseId,
-    name: tc.name,
-    direction: 'Avalanche->EVM',
-    pass: true,
-    requestID: hxmsg.header.requestID,
-    hmsgDigest: hxmsg.hmsgDigest,
-    sourceTxHash: sourceResult.sourceTxHash,
-    targetTxHash: target.txHash,
-    sourceGasUsed: sourceResult.sourceGasUsed,
-    targetGasUsed: target.gasUsed,
-    targetRegistrationGasUsed: target.registrationGasUsed,
-    validatorSignatures: signatures.length,
-    teeCluster: tee.cluster,
-    teeVerification: tee.verificationResult,
-    timings: {
-      sourceMs: sourceResult.elapsedMs,
-      teeMs: tee.elapsedMs,
-      targetMs: target.elapsedMs,
-    },
-    payload: normalizeBusinessPayload(makePayload(tc, sourceDeployment)),
-  };
-}
-
 async function main() {
   fs.ensureDirSync(RUNTIME_DIR);
   const cases = fs.readJsonSync(CASE_FILE);
@@ -621,53 +579,123 @@ async function main() {
   const results = [];
   const startedAt = nowMs();
 
+  const evmItems = [];
   for (const tc of cases) {
     try {
-      const result = await runEvmToAvalanche({
+      const sourceResult = await submitEvmSource({ tc, sourceDeployment, targetDeployment: avalancheDeployment, provider, source, nextNonce });
+      const proof = await buildEvmOriginHXMsg({ sourceDeployment, targetDeployment: avalancheDeployment, sourceResult, provider });
+      evmItems.push({
         tc,
-        sourceDeployment,
-        avalancheDeployment,
-        provider,
-        source,
-        nextNonce,
+        hxmsg: proof.hxmsg,
+        helperData: {
+          evmReceiptProof: proof.receiptProof,
+          committeeHeaderUpdate: proof.committeeHeaderUpdate,
+          evmRpc: TEE_EVM_RPC,
+        },
+        sourceResult,
       });
-      console.log(`${tc.caseId} EVM->Avalanche PASS sourceGas=${result.sourceGasUsed} targetGas=${result.targetGasUsed}`);
-      results.push(result);
     } catch (error) {
-      const failed = {
-        caseId: tc.caseId,
-        name: tc.name,
-        direction: 'EVM->Avalanche',
-        pass: false,
-        error: error.response?.data?.error || error.message,
-        errorDetail: error.response?.data || null,
-      };
-      console.log(`${tc.caseId} EVM->Avalanche ERROR ${failed.error}`);
-      results.push(failed);
+      results.push({ caseId: tc.caseId, name: tc.name, direction: 'EVM->Avalanche', pass: false, error: error.message });
+    }
+  }
+  for (const items of chunkItems(evmItems, TEE_BATCH_SIZE)) {
+    try {
+      const batch = await attestBatch({ items, teeURLs: EVM_TEE_URLS, label: 'EVM' });
+      const target = await executeCompactBatch({
+        items,
+        batch,
+        targetDeployment: avalancheDeployment,
+        rpcURL: AVALANCHE_RPC,
+        privateKey: AVALANCHE_KEY,
+        teeURLs: EVM_TEE_URLS,
+      });
+      items.forEach((item, index) => {
+        const result = {
+          caseId: item.tc.caseId,
+          name: item.tc.name,
+          direction: 'EVM->Avalanche',
+          pass: target.assetCheck?.verified !== false,
+          requestID: item.hxmsg.header.requestID,
+          hmsgDigest: item.hxmsg.hmsgDigest,
+          sourceTxHash: item.sourceResult.sourceTxHash,
+          targetTxHash: target.txHash,
+          sourceGasUsed: item.sourceResult.sourceGasUsed,
+          targetGasUsed: target.gasPerMessage,
+          batchTargetGasUsed: target.gasUsed,
+          targetRegistrationGasUsed: index === 0 ? target.registrationGasUsed : 0,
+          batchID: batch.built.batchID,
+          batchSize: items.length,
+          teeCluster: batch.cluster,
+          teeVerification: batch.verificationResults[index],
+          assetCheck: index === 0 ? target.assetCheck : null,
+          timings: { sourceMs: item.sourceResult.elapsedMs, teeMs: batch.elapsedMs, targetMs: target.elapsedMs },
+          payload: normalizeBusinessPayload(makePayload(item.tc, avalancheDeployment)),
+        };
+        console.log(`${item.tc.caseId} EVM->Avalanche PASS sourceGas=${result.sourceGasUsed} batchTargetGas=${target.gasUsed} avgTargetGas=${result.targetGasUsed}`);
+        results.push(result);
+      });
+    } catch (error) {
+      items.forEach((item) => results.push({ caseId: item.tc.caseId, name: item.tc.name, direction: 'EVM->Avalanche', pass: false, error: error.response?.data?.error || error.message }));
     }
   }
 
+  const avalancheItems = [];
   for (const tc of cases) {
     try {
-      const result = await runAvalancheToEvm({
-        tc,
-        sourceDeployment,
+      const sourceResult = await submitAvalancheSource({ tc, avalancheDeployment, targetDeployment: sourceDeployment, validatorSetRef: validatorInfo.ref });
+      const signatures = await collectValidatorSignatures(sourceResult.warpMessageID);
+      const hxmsg = buildAvalancheOriginHXMsg({
+        sourceResult,
         avalancheDeployment,
-        validatorInfo,
+        targetDeployment: sourceDeployment,
+        validators: validatorInfo.validators,
+        validatorSetRef: validatorInfo.ref,
+        signatures,
       });
-      console.log(`${tc.caseId} Avalanche->EVM PASS sourceGas=${result.sourceGasUsed} targetGas=${result.targetGasUsed}`);
-      results.push(result);
+      avalancheItems.push({ tc, hxmsg, helperData: hxmsg._blockData, sourceResult, signatures });
     } catch (error) {
-      const failed = {
-        caseId: tc.caseId,
-        name: tc.name,
-        direction: 'Avalanche->EVM',
-        pass: false,
-        error: error.response?.data?.error || error.message,
-        errorDetail: error.response?.data || null,
-      };
-      console.log(`${tc.caseId} Avalanche->EVM ERROR ${failed.error}`);
-      results.push(failed);
+      results.push({ caseId: tc.caseId, name: tc.name, direction: 'Avalanche->EVM', pass: false, error: error.message });
+    }
+  }
+  for (const items of chunkItems(avalancheItems, TEE_BATCH_SIZE)) {
+    try {
+      const batch = await attestBatch({ items, teeURLs: AVALANCHE_TEE_URLS, label: 'Avalanche' });
+      const target = await executeCompactBatch({
+        items,
+        batch,
+        targetDeployment: sourceDeployment,
+        rpcURL: EVM_RPC,
+        privateKey: LOCAL_EVM_KEY,
+        teeURLs: AVALANCHE_TEE_URLS,
+      });
+      items.forEach((item, index) => {
+        const result = {
+          caseId: item.tc.caseId,
+          name: item.tc.name,
+          direction: 'Avalanche->EVM',
+          pass: target.assetCheck?.verified !== false,
+          requestID: item.hxmsg.header.requestID,
+          hmsgDigest: item.hxmsg.hmsgDigest,
+          sourceTxHash: item.sourceResult.sourceTxHash,
+          targetTxHash: target.txHash,
+          sourceGasUsed: item.sourceResult.sourceGasUsed,
+          targetGasUsed: target.gasPerMessage,
+          batchTargetGasUsed: target.gasUsed,
+          targetRegistrationGasUsed: index === 0 ? target.registrationGasUsed : 0,
+          validatorSignatures: item.signatures.length,
+          batchID: batch.built.batchID,
+          batchSize: items.length,
+          teeCluster: batch.cluster,
+          teeVerification: batch.verificationResults[index],
+          assetCheck: index === 0 ? target.assetCheck : null,
+          timings: { sourceMs: item.sourceResult.elapsedMs, teeMs: batch.elapsedMs, targetMs: target.elapsedMs },
+          payload: normalizeBusinessPayload(makePayload(item.tc, sourceDeployment)),
+        };
+        console.log(`${item.tc.caseId} Avalanche->EVM PASS sourceGas=${result.sourceGasUsed} batchTargetGas=${target.gasUsed} avgTargetGas=${result.targetGasUsed}`);
+        results.push(result);
+      });
+    } catch (error) {
+      items.forEach((item) => results.push({ caseId: item.tc.caseId, name: item.tc.name, direction: 'Avalanche->EVM', pass: false, error: error.response?.data?.error || error.message }));
     }
   }
 
@@ -675,6 +703,7 @@ async function main() {
     testType: 'local-ethereum-avalanche-no-response-no-challenge-gas',
     testedAt: new Date().toISOString(),
     caseFile: CASE_FILE,
+    teeBatchSize: TEE_BATCH_SIZE,
     total: results.length,
     summary: summarize(results),
     timings: {

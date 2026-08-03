@@ -18,6 +18,8 @@ function buildEvmContractCallTarget({
   functionSelector = TARGET_EXECUTE_SELECTOR,
   callDataHash,
   receiver,
+  chainType = ChainType.EVM,
+  domainID,
 }) {
   const resolvedTargetObject = targetObject || addressToBytes32(targetAddress);
   const resolvedReceiver = receiver || resolvedTargetObject;
@@ -31,9 +33,9 @@ function buildEvmContractCallTarget({
   };
   return {
     target: {
-      chainType: ChainType.EVM,
+      chainType,
       chainID: targetChainID,
-      domainID: bytes32FromText(`evm-local-${chainId}`),
+      domainID: domainID || bytes32FromText(`${chainType === ChainType.AVALANCHE ? 'avalanche' : 'evm'}-local-${chainId}`),
     },
     targetAction,
     targetExecutionHash: computeTargetExecutionHash({

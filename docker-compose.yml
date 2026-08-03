@@ -4,8 +4,6 @@ x-tee-base: &tee-base
   volumes:
     - ./:/app
   command: sh -c "node tee-verifier/server.js"
-  depends_on:
-    - evm-node
 
 services:
   evm-node:

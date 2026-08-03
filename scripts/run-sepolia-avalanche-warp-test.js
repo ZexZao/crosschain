@@ -4,7 +4,7 @@ const axios = require('axios');
 const { performance } = require('perf_hooks');
 const { ethers } = require('ethers');
 const { loadDotEnv } = require('../shared/env');
-const { buildHXMsgFromEvmReceiptToEvm, EVM_EXECUTE_SELECTOR } = require('../hxmsg-builder/evm-to-evm');
+const { buildHXMsgFromEvmReceiptToEvm } = require('../hxmsg-builder/evm-to-evm');
 const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const {
   fetchBeaconLightClientInputs,
@@ -25,7 +25,8 @@ const {
   getExecutionData,
   toMinimalHXMsg,
 } = require('../shared/hxmsg');
-const { encodeBusinessPayload, normalizeBusinessPayload } = require('../shared/xmsg');
+const { encodeCompactBusinessCall, compactBusinessCallTuple, normalizeBusinessPayload } = require('../shared/xmsg');
+const { buildHXMsgBatch } = require('../shared/hxmsg/batch');
 const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
 const { registerEVMTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
 const { writeJSON } = require('../shared/utils');
@@ -43,6 +44,8 @@ const AVALANCHE_RPC = process.env.AVALANCHE_RPC_URL || 'http://127.0.0.1:9650/ex
 const TEE_URLS = teeURLsFromEnv({ sourceChainType: ChainType.EVM });
 const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64)';
 const TEE_REGISTRATION_ABI = '(address teeAddress,uint16 signerIndex,bytes32 enclavePubKeyHash,bytes32 measurement,bytes32 quoteHash,bytes32 initialSyncStateHash,uint64 epoch,uint64 notAfter,bytes attestationSignature)';
+const MINIMAL_TUPLE = '(bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64)';
+const COMPACT_TUPLE = '(uint16,bytes32,bytes32,address,int256,bytes32,bool)';
 const SOURCE_ABI = [
   'function submitHXMsgRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
   'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
@@ -178,11 +181,11 @@ function buildBusinessPayload(targetDeployment) {
 }
 
 function buildSubmitArgs({ avalancheDeployment, payload }) {
-  const { normalized, payloadHex } = encodeBusinessPayload(payload);
-  const callDataHash = ethers.keccak256(payloadHex);
+  const { normalized, compact, payloadHex, compactCallHash } = encodeCompactBusinessCall(payload);
+  const callDataHash = compactCallHash;
   const businessPayloadHash = hashJson(normalized);
   const targetChainID = chainIdToBytes32(avalancheDeployment.chainId);
-  const targetDomainID = bytes32FromText(`evm-local-${avalancheDeployment.chainId}`);
+  const targetDomainID = bytes32FromText(`avalanche-local-${avalancheDeployment.chainId}`);
   const targetObject = ethers.zeroPadValue(avalancheDeployment.targetContract, 32);
   const receiver = ethers.zeroPadValue(avalancheDeployment.targetContract, 32);
   const expireAt = Math.floor(Date.now() / 1000) + Number(process.env.SEPOLIA_AVALANCHE_EXPIRE_SECONDS || 7200);
@@ -193,7 +196,7 @@ function buildSubmitArgs({ avalancheDeployment, payload }) {
       targetChainID,
       targetDomainID,
       targetObject,
-      EVM_EXECUTE_SELECTOR,
+      ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10),
       callDataHash,
       businessPayloadHash,
       receiver,
@@ -201,6 +204,7 @@ function buildSubmitArgs({ avalancheDeployment, payload }) {
       policy,
     ],
     normalized,
+    compact,
     payloadHex,
     callDataHash,
     businessPayloadHash,
@@ -292,6 +296,8 @@ async function buildProofAndHXMsg({ provider, sourceDeployment, avalancheDeploym
     receipt: sourceResult.receipt,
     block,
     businessPayload: sourceResult.payload,
+    targetChainType: ChainType.AVALANCHE,
+    compactTarget: true,
   });
   return {
     hxmsg,
@@ -308,26 +314,28 @@ async function buildProofAndHXMsg({ provider, sourceDeployment, avalancheDeploym
 
 async function attest(hxmsg, receiptProof, syncCommitteeUpdate) {
   const startedAt = nowMs();
-  const { resp, teeUrl, attempt } = await postToCurrentTeeLeader('/attest', {
-    hxmsg,
-    helperData: {
+  const helperData = {
       evmReceiptProof: receiptProof,
       syncCommitteeUpdate,
       evmRpc: SEPOLIA_RPC,
-    },
+    };
+  const { resp, teeUrl, attempt } = await postToCurrentTeeLeader('/attest-batch', {
+    hxmsgs: [hxmsg],
+    helperDataList: [helperData],
   }, { timeout: Number(process.env.HXMSG_TEE_TIMEOUT_MS || 120000) });
-  const cluster = resp.data.teeClusterCertification;
+  const cluster = resp.data.teeBatchCertification;
   if (!cluster?.quorumReached) throw new Error(`TEE quorum not reached: ${cluster?.reached || 0}/${cluster?.threshold || '?'}`);
   return {
     elapsedMs: nowMs() - startedAt,
     teeUrl,
     attempt,
     cluster,
-    verificationResult: resp.data.verificationResult,
+    verificationResult: resp.data.verificationResults?.[0],
+    batch: buildHXMsgBatch([hxmsg]),
   };
 }
 
-async function executeOnAvalanche(hxmsg, cluster, avalancheDeployment) {
+async function executeOnAvalanche(hxmsg, tee, avalancheDeployment) {
   const startedAt = nowMs();
   const provider = new ethers.JsonRpcProvider(AVALANCHE_RPC);
   const wallet = new ethers.Wallet(process.env.AVALANCHE_PRIVATE_KEY || '0x56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027', provider);
@@ -337,17 +345,20 @@ async function executeOnAvalanche(hxmsg, cluster, avalancheDeployment) {
     ['function isActiveTEE(address) view returns (bool)', `function registerTEE(${TEE_REGISTRATION_ABI}) external`],
     deployer
   );
-  const registration = await registerEVMTEEs({ registry, certificate: cluster, teeURLs: TEE_URLS });
+  const registration = await registerEVMTEEs({ registry, certificate: tee.cluster, teeURLs: TEE_URLS });
   const gateway = new ethers.Contract(
     avalancheDeployment.hxmsgGateway,
-    [`function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,${CLUSTER_CERT_ABI}) external`],
+    [`function executeHXMsgMinimalCompactBatchCluster(${MINIMAL_TUPLE}[],address,${COMPACT_TUPLE}[],bytes32,bytes32,bytes32[][],${CLUSTER_CERT_ABI}) external`],
     deployer
   );
-  const tx = await gateway.executeHXMsgMinimalCluster(
-    toMinimalHXMsg(hxmsg),
+  const tx = await gateway.executeHXMsgMinimalCompactBatchCluster(
+    [toMinimalHXMsg(hxmsg)],
     avalancheDeployment.targetContract,
-    getExecutionData(hxmsg).callData,
-    clusterCertificateTuple(cluster)
+    [compactBusinessCallTuple(getExecutionData(hxmsg).compactCall)],
+    tee.batch.batchID,
+    tee.batch.batchRoot,
+    tee.batch.proofs,
+    clusterCertificateTuple(tee.cluster)
   );
   const receipt = await tx.wait();
   return {
@@ -382,7 +393,7 @@ async function main() {
   const tee = await attest(proof.hxmsg, proof.receiptProof, proof.syncCommitteeUpdate);
   console.log(`SEPOLIA->AVAX TEE quorum=${tee.cluster.reached}/${tee.cluster.threshold} block=${tee.verificationResult.blockNumber}`);
 
-  const target = await executeOnAvalanche(proof.hxmsg, tee.cluster, avalancheDeployment);
+  const target = await executeOnAvalanche(proof.hxmsg, tee, avalancheDeployment);
   console.log(`SEPOLIA->AVAX PASS targetTx=${target.txHash} gas=${target.gasUsed}`);
 
   const result = {

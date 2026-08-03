@@ -1,9 +1,11 @@
 # Crosschain h-xmsg Trusted Transport Prototype
 
-本项目是一个面向异构区块链消息互通的可信跨链原型。当前支持两条主线：
+本项目是一个面向异构区块链消息互通的可信跨链原型。当前接入 Ethereum、Hyperledger Fabric 和 Avalanche，支持三组链对的六个有向方向：
 
 - Fabric -> EVM：参考 Fabric Cacti Weaver 的 Fabric View 思路，用 h-FSV view 证明 Fabric 链上跨链事件真实存在。
 - EVM -> Fabric：参考 Mercury 的 TEE 轻客户端思路，由 TEE 维护有限 EVM header window，并用 receipt MPT proof 证明 EVM 交易和事件真实存在。
+- Avalanche -> EVM/Fabric：验证真实 Avalanche Warp message、5 validator 权重签名和 P-Chain validator set，再由 Avalanche TEE 子网签发批次证书。
+- EVM/Fabric -> Avalanche：分别复用 EVM light-client proof 与 Fabric h-FSV，目标 Avalanche C-Chain 通过部署时绑定为 `ChainType.AVALANCHE` 的 gateway 执行。
 
 项目的核心不是简单转发消息，而是让目标链只接受经过 TEE quorum 证明的 `h-xmsg`。普通跨链消息和需要 RESPONSE 的跨链消息共用同一套构造、验证和投递路径，差异只由 `h-xmsg.feedback` 与 `h-xmsg.atomicity` 策略字段决定。
 
@@ -18,13 +20,14 @@
 | h-xmsg 通用消息结构 | 已实现，`shared/hxmsg/` |
 | Fabric -> EVM | 已实现，h-FSV view + TEE quorum + EVM gateway |
 | EVM -> Fabric | 已实现，receipt MPT proof + TEE header window + Fabric chaincode；本地默认使用模拟 committee header，Sepolia 模式支持真实 Ethereum sync committee / finalized header 验证 |
+| Avalanche 双向互通 | 已实现真实本地 5 validator AvalancheGo、Warp 权重证明以及 EVM/Fabric 双向业务执行 |
 | 多 TEE quorum | 已实现 5 个模拟 TEE 节点，默认 3/5 quorum；TEE 证书使用 Raft commit 后的 ECDSA quorum 签名集合 |
 | Raft 风格复制 | 已实现 leader election、heartbeat、AppendEntries、commitIndex |
 | 普通消息与 RESPONSE 消息统一入口 | 已实现，策略字段驱动分支 |
 | 目标链业务执行 | 已实现，EVM 和 Fabric 目标侧按业务类别执行真实动作 |
 | 资产转账和退款 | 已实现实验闭环：Fabric escrow 锁定扣款、EVM ERC20 发放、Fabric challenge timeout 自动退款、EVM token escrow 自动退款 |
 | 挑战响应 | 已实现基础闭环，支持 Completed / Challenged / Compensated |
-| EVM gas 优化 | 已实现 `HXMsgMinimal` 目标链提交，完整 h-xmsg 由 TEE digest 绑定 |
+| Gas 优化 | 六个方向统一使用 compact delivery；EVM-compatible 目标链支持 TEE batch certificate 和 compact batch execution，完整 h-xmsg 由 TEE digest 绑定 |
 | 自洽伪造攻击测试 | 已实现，覆盖 Fabric -> EVM 和 EVM -> Fabric 两个方向 |
 | 测试结果落盘 | 已实现，输出到 `runtime/` |
 
@@ -176,8 +179,9 @@ EVM 侧智能合约。
 
 | 文件 | 作用 |
 |---|---|
-| `EvmSourceContract.sol` | EVM 源链请求合约；统一入口 `submitHXMsgRequest(..., policy)`；维护请求状态机和挑战响应 |
+| `EvmSourceContract.sol` | EVM 源链请求合约；普通单向消息只发出可由 receipt proof 验证的事实事件，需要反馈/原子性的消息使用紧凑生命周期状态机 |
 | `submitTokenEscrowHXMsgRequest` | `EvmSourceContract` 中的资产请求入口；真实锁定 ERC20，超时补偿时自动退款 |
+| `executeAssetBatch` | `TargetContract` 的 Mercury-style 资产批量入口；一次网关调用执行多笔真实 mint 或 reserve transfer，不写重复通用业务记录 |
 | `HXMsgGateway.sol` | EVM 目标链网关；验证 `HXMsgMinimal`、TEE quorum、目标绑定、防重放和过期时间 |
 | `HXMsgLib.sol` | 链上 h-xmsg 压缩结构、delivery digest、response digest、atomicity hash |
 | `TEERegistry.sol` | EVM 侧可信 TEE 地址注册表；验证 `ECDSA_QUORUM_V1` 证书中的 signer bitmap、注册状态和每个 TEE 的 ECDSA 签名 |
@@ -323,6 +327,7 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 | `evm-receipt-mpt-proof-and-header-window.md` | EVM receipt MPT proof 与 header window |
 | `mercury-tee-upgrade.md` | Mercury 风格 TEE 升级说明 |
 | `mercury-batch-signing-optimization.md` | 批量签名优化方案 |
+| `mercury-style-asset-batch-implementation.md` | Mercury-style 真实资产批量转账实现、安全边界和 gas 对比 |
 | `raft-tee-cluster-implementation.md` | Raft TEE 集群实现说明 |
 | `gas-optimization-analysis.md` | gas 开销分析 |
 | `gas-optimization-stage3-implementation.md` | gas 优化第三阶段实现说明 |
@@ -393,7 +398,7 @@ TEE 模拟服务和链适配器。实际部署到 TEE 服务器时，主要迁�
 
 1. 应用调用 `EvmSourceContract.submitHXMsgRequest(..., policy)`。
 2. 普通消息传入空策略：`feedback.required = false`、`atomicity.required = false`。
-3. `EvmSourceContract` 生成 `requestID`，记录请求状态为 `Pending`，并发出 `CrossChainCallRequested` 事件。
+3. `EvmSourceContract` 生成 `requestID` 并发出 `CrossChainCallRequested` 事实事件。普通单向消息不重复写入请求状态；需要 response/challenge/compensation 的消息才记录紧凑 `Pending` 生命周期。
 4. 事件中包含目标 Fabric chainID/domain、chaincode target、函数选择器、payload hash、feedback 字段和 `atomicityHash`。
 5. 测试脚本获取该交易 receipt、区块 header 和 log。
 6. `shared/evm/receipt-proof.js` 构造 receipt MPT proof。
@@ -450,7 +455,18 @@ atomicity.mode = COMMIT_OR_COMPENSATE
 npm install
 ```
 
-### 2. 启动 EVM 和 TEE
+### 2. 按链对启动实验环境
+
+本地资源有限时，不需要同时启动三条链。以下命令会停掉第三条链和无关 TEE 子网，只保留两条实验链及各自的 5 节点证明子网；Fabric 数据卷不会被删除：
+
+```bash
+npm run pair:up -- evm-fabric
+npm run pair:up -- evm-avalanche
+npm run pair:up -- fabric-avalanche
+npm run pair:down
+```
+
+仍可使用旧的全量 EVM/TEE 启动命令：
 
 ```bash
 npm run evm:up
@@ -485,6 +501,19 @@ EVM -> Fabric：
 npm run hxmsg:test:evm-fabric
 ```
 
+Fabric -> Avalanche 与 Avalanche -> Fabric：
+
+```bash
+HXMSG_TEE_BATCH_SIZE=8 npm run hxmsg:test:fabric-avalanche
+AVALANCHE_CASE_TOTAL=8 npm run hxmsg:test:avalanche-fabric
+```
+
+Ethereum <-> Avalanche 双向批处理：
+
+```bash
+HXMSG_TEE_BATCH_SIZE=8 npm run local:test:evm-avalanche-no-response
+```
+
 `run-evm-fabric-tests.js` 使用同一套主流程覆盖本地和 Sepolia：
 
 | 模式 | header/finality 来源 | 源链发交易 |
@@ -507,15 +536,28 @@ npm run hxmsg:test:evm-fabric
 
 Sepolia 模式下，脚本会等待目标源链交易进入 finalized execution block，再使用真实 sync committee 数据验证 finalized header，并用该 header 或其 parentHash 链覆盖目标交易区块的 receipt MPT proof 验证。这里的并发只影响实验调度，不代表 TEE 对交易进行批量签名。
 
-Mercury-style TEE 批量签名当前用于 Fabric -> EVM 和 EVM -> Fabric 两个方向：
+Mercury-style TEE 批量签名当前覆盖六个有向方向。每个源链 adapter 仍逐条验证源链事实，批处理只聚合验证通过后的 delivery leaf：
 
 | 参数 | 默认值 | 作用 |
 |---|---:|---|
 | `HXMSG_TEE_BATCH_SIZE` | 8 | 每次提交给 TEE quorum 的 h-xmsg 数量 |
 
-该路径中，每个 TEE 节点仍会逐条验证源链事实证明。验证通过后，TEE 对这一批 h-xmsg 的 Merkle root、batchID、batchSize 和目标链 ID 形成一个 batch signing digest，并通过 5 节点 TEE quorum 形成一组 ECDSA quorum 签名。EVM 侧 `HXMsgGateway.executeHXMsgMinimalBatchCluster` 只验证一次 TEE quorum，再用每条消息的 Merkle proof 证明其属于该批次，然后逐条执行目标业务合约；Fabric 侧链码同样验证 batch digest、Merkle proof 和 ECDSA quorum 证书。
+验证通过后，TEE 对这一批 h-xmsg 的 Merkle root、batchID、batchSize 和目标链 ID 形成一个 batch signing digest，并通过 5 节点 TEE quorum 形成一组 ECDSA quorum 签名。EVM 与 Avalanche C-Chain 使用 compact batch 入口，一次验证 TEE quorum 后逐条执行真实业务；Fabric 侧链码使用同一个 batch certificate，并通过每条消息的 Merkle proof 验证批次成员关系。
 
-因此，TEE 批量签名优化的是目标链重复验证 TEE quorum 的成本。EVM -> Fabric 方向的 EVM gas 主要发生在源链业务请求提交，目标链是 Fabric，因此批签名主要降低 Fabric 目标执行侧的重复验证成本，而不会直接降低源链 EVM 请求 gas。
+因此，TEE 批量签名优化的是目标链重复验证 TEE quorum 的成本。EVM -> Fabric 与 Avalanche -> Fabric 的目标链没有 gas 指标，批签名主要降低 Fabric 重复证书验证和传输成本；它不会降低源链请求交易本身的 gas。完整实测见 `docs/all-directions-gas-optimization.md`。
+
+纯资产批次会自动进入 `TargetContract.executeAssetBatch`。其中 `asset_lock`、`mint_confirm`、`subsidy_confirm` 执行真实 mint；`token_transfer` 从目标链 `CrossChainAssetService` 的预置流动性储备向接收账户调用真实 ERC20 `transfer`，不再用 mint 近似转账。部署变量 `INITIAL_ASSET_RESERVE_UNITS` 控制实验储备，默认 `10000000000000` 个 token 基础单位。部署和储备初始化属于系统初始化成本，不计入 Mercury-style 每消息 gas。
+
+本地双向资产批量测试：
+
+```bash
+npm run pair:up -- evm-avalanche
+npm run deploy
+npm run deploy:avalanche
+npm run local:test:evm-avalanche-asset-batch
+```
+
+测试会比较 reserve 与接收账户执行前后的 ERC20 余额；只有 reserve 等额减少且接收账户等额增加才判定通过。
 
 Sepolia sync committee / finalized header 验证：
 
@@ -617,6 +659,8 @@ npm run hxmsg:test:forgery
 | `runtime/hxmsg-evm-fabric-challenge-e2e-results.json` | EVM -> Fabric RESPONSE 端到端 |
 | `runtime/hxmsg-forgery-attack-results.json` | 自洽伪造攻击测试 JSON 结果 |
 | `runtime/hxmsg-forgery-attack-summary.md` | 自洽伪造攻击测试 Markdown 汇总 |
+| `runtime/local-evm-avalanche-asset-transfer-batch-results.json` | Ethereum/Avalanche 双向真实 reserve transfer、余额断言和 gas 结果 |
+| `runtime/mercury-style-avax-evm-batch20-gas-optimized.json` | batch=20 的 Mercury-style 优化前后对比实验结果 |
 
 最近一次本地 Fabric -> EVM TEE 批签名主线测试结果：
 
@@ -625,9 +669,9 @@ npm run hxmsg:test:forgery
 | 运行模式 | `local-mock-committee` |
 | 通过率 | 8/8 PASS |
 | TEE 批大小 | `HXMSG_TEE_BATCH_SIZE=8` |
-| TEE batch quorum | 5/3 |
-| EVM batch tx gas | 3197460 |
-| 平均 gas/message | 399682 |
+| TEE batch quorum | 3/3（5 节点，门限 3） |
+| EVM batch tx gas | 3156444 |
+| 平均 gas/message | 394556 |
 | 结果文件 | `runtime/hxmsg-fabric-evm-results.json` |
 | 汇总文件 | `runtime/hxmsg-test-summary.md` |
 
@@ -638,9 +682,9 @@ npm run hxmsg:test:forgery
 | 运行模式 | `local-mock-committee` |
 | 通过率 | 8/8 PASS |
 | 并发配置 | source=1, proof=4, tee=1, fabric=2 |
-| 总耗时 | 21184 ms |
+| 总耗时 | 21841 ms |
 | TEE quorum | 3/3 |
-| EVM source tx gas | 总计 2337996，平均 292250/message |
+| EVM source tx gas | 总计 332000，平均 41500/message |
 | Fabric 目标提交压缩 | legacy avg=23.12 KiB，compact avg=10.55 KiB，减少 54.36% |
 | Fabric 状态 | 每条均为 `executed` |
 | 结果文件 | `runtime/hxmsg-evm-fabric-results.json` |

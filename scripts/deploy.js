@@ -16,11 +16,12 @@ async function main() {
   await source.waitForDeployment();
 
   const HXMsgGateway = await ethers.getContractFactory('HXMsgGateway');
-  const hxmsgGateway = await HXMsgGateway.deploy(await teeRegistry.getAddress());
+  const hxmsgGateway = await HXMsgGateway.deploy(await teeRegistry.getAddress(), 1);
   await hxmsgGateway.waitForDeployment();
 
   const Target = await ethers.getContractFactory('TargetContract');
-  const target = await Target.deploy(await hxmsgGateway.getAddress());
+  const initialAssetReserveUnits = BigInt(process.env.INITIAL_ASSET_RESERVE_UNITS || '10000000000000');
+  const target = await Target.deploy(await hxmsgGateway.getAddress(), initialAssetReserveUnits);
   await target.waitForDeployment();
 
   const deployment = {
@@ -28,6 +29,7 @@ async function main() {
     evmSourceContract: await source.getAddress(),
     targetContract: await target.getAddress(),
     settlementToken: await target.token(),
+    initialAssetReserveUnits: initialAssetReserveUnits.toString(),
     teeRegistry: await teeRegistry.getAddress(),
     hxmsgGateway: await hxmsgGateway.getAddress(),
     chainId: Number((await ethers.provider.getNetwork()).chainId),

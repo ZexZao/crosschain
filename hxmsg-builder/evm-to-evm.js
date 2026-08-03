@@ -1,6 +1,7 @@
 const { ethers } = require('ethers');
-const { encodeBusinessPayload } = require('../shared/xmsg');
+const { encodeBusinessPayload, encodeCompactBusinessCall } = require('../shared/xmsg');
 const {
+  ChainType,
   MsgType,
   FeedbackType,
   hashJson,
@@ -30,6 +31,8 @@ function buildHXMsgFromEvmReceiptToEvm({
   businessPayload,
   feedbackOverride,
   atomicity,
+  targetChainType = ChainType.EVM,
+  compactTarget = false,
 }) {
   if (!sourceDeployment) throw new Error('sourceDeployment is required');
   if (!targetDeployment) throw new Error('targetDeployment is required');
@@ -38,8 +41,11 @@ function buildHXMsgFromEvmReceiptToEvm({
 
   const sourceContract = sourceDeployment.evmSourceContract;
   const { log, parsed } = findCrossChainCallLog({ receipt, sourceContract });
-  const { normalized, payloadHex } = encodeBusinessPayload(businessPayload);
-  const callDataHash = ethers.keccak256(payloadHex);
+  const encoded = compactTarget
+    ? encodeCompactBusinessCall(businessPayload)
+    : encodeBusinessPayload(businessPayload);
+  const { normalized, payloadHex } = encoded;
+  const callDataHash = compactTarget ? encoded.compactCallHash : ethers.keccak256(payloadHex);
   if (callDataHash.toLowerCase() !== parsed.callDataHash.toLowerCase()) {
     throw new Error(`callDataHash mismatch: event=${parsed.callDataHash}, computed=${callDataHash}`);
   }
@@ -52,9 +58,10 @@ function buildHXMsgFromEvmReceiptToEvm({
     chainId: targetDeployment.chainId,
     requestID: parsed.requestID,
     targetAddress: targetDeployment.targetContract,
-    functionSelector: EVM_EXECUTE_SELECTOR,
+    functionSelector: compactTarget ? undefined : EVM_EXECUTE_SELECTOR,
     callDataHash,
     receiver: ethers.zeroPadValue(targetDeployment.targetContract, 32),
+    chainType: targetChainType,
   });
   if (parsed.targetChainID !== targetPart.target.chainID) throw new Error('event targetChainID mismatch');
   if (parsed.targetDomainID !== targetPart.target.domainID) throw new Error('event targetDomainID mismatch');
@@ -102,7 +109,7 @@ function buildHXMsgFromEvmReceiptToEvm({
     feedback,
     atomicity,
     callData: payloadHex,
-    compactCall: null,
+    compactCall: compactTarget ? encoded.compact : null,
     callDataDecoded: normalized,
     txId: receipt.hash,
     srcHeight: sourcePart.srcHeight,

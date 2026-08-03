@@ -76,9 +76,11 @@ contract TargetContract {
     mapping(bytes32 => uint256) public assetAmountByRequest;
     mapping(bytes32 => address) public assetRecipientByRequest;
 
-    constructor(address gateway_) {
+    event AssetBatchExecuted(bytes32 indexed batchExecutionHash, uint256 size);
+
+    constructor(address gateway_, uint256 initialAssetReserveUnits) {
         gateway = gateway_;
-        assetService = new CrossChainAssetService(address(this));
+        assetService = new CrossChainAssetService(address(this), initialAssetReserveUnits);
         receivableService = new ReceivableRegistryService(address(this));
         logisticsService = new LogisticsTrackerService(address(this));
         consentService = new ConsentRegistryService(address(this));
@@ -108,6 +110,39 @@ contract TargetContract {
         executionCount += 1;
         _applyCompactBusinessAction(requestID, compact);
         emit MessageExecuted(requestID, msg.sender, payloadHash, executionCount);
+        return true;
+    }
+
+    /// @notice 资产专用批量路径。Gateway 已逐条完成 h-xmsg、callDataHash、过期时间和防重放校验。
+    /// @dev 只保留真实 token 状态变化与事件，不写通用 CompactBusinessRecord 和辅助索引。
+    function executeAssetBatch(bytes32[] calldata requestIDs, CompactCall[] calldata calls) external returns (bool) {
+        require(msg.sender == gateway, "only gateway");
+        require(requestIDs.length > 0 && requestIDs.length == calls.length, "bad asset batch");
+        bytes32 rollingHash;
+        for (uint256 i = 0; i < calls.length; i += 1) {
+            CompactCall calldata compact = calls[i];
+            require(_isAssetOp(compact.opCode), "non-asset op");
+            require(compact.actorAddress != address(0), "asset recipient must be evm address");
+            require(compact.amount > 0, "bad asset amount");
+            if (compact.opCode == 9) {
+                assetService.transferSettlementCompact(
+                    requestIDs[i],
+                    compact.recordIdHash,
+                    compact.actorAddress,
+                    uint256(compact.amount)
+                );
+            } else {
+                assetService.mintSettlementBatchItem(
+                    requestIDs[i],
+                    compact.recordIdHash,
+                    compact.actorAddress,
+                    uint256(compact.amount)
+                );
+            }
+            rollingHash = keccak256(abi.encode(rollingHash, requestIDs[i], hashCompactCall(compact)));
+        }
+        executionCount += calls.length;
+        emit AssetBatchExecuted(rollingHash, calls.length);
         return true;
     }
 
@@ -203,7 +238,7 @@ contract TargetContract {
         internal
         returns (address service, bytes32 status)
     {
-        if (compact.opCode == 1 || compact.opCode == 2 || compact.opCode == 8 || compact.opCode == 9) {
+        if (compact.opCode == 1 || compact.opCode == 2 || compact.opCode == 8) {
             require(compact.actorAddress != address(0), "asset recipient must be evm address");
             require(compact.amount > 0, "bad asset amount");
             status = assetService.mintSettlementCompact(
@@ -215,6 +250,17 @@ contract TargetContract {
             );
             assetAmountByRequest[requestID] = uint256(compact.amount);
             assetRecipientByRequest[requestID] = compact.actorAddress;
+            return (address(assetService), status);
+        }
+        if (compact.opCode == 9) {
+            require(compact.actorAddress != address(0), "asset recipient must be evm address");
+            require(compact.amount > 0, "bad asset amount");
+            status = assetService.transferSettlementCompact(
+                requestID,
+                compact.recordIdHash,
+                compact.actorAddress,
+                uint256(compact.amount)
+            );
             return (address(assetService), status);
         }
         if (compact.opCode == 3) {
@@ -239,6 +285,10 @@ contract TargetContract {
         revert("unsupported compact op");
     }
 
+    function _isAssetOp(uint16 opCode) internal pure returns (bool) {
+        return opCode == 1 || opCode == 2 || opCode == 8 || opCode == 9;
+    }
+
     function _dispatchBusinessService(
         bytes32 requestID,
         bytes32 opKey,
@@ -250,7 +300,6 @@ contract TargetContract {
         if (
             opKey == keccak256(bytes("asset_lock")) ||
             opKey == keccak256(bytes("mint_confirm")) ||
-            opKey == keccak256(bytes("token_transfer")) ||
             opKey == keccak256(bytes("subsidy_confirm"))
         ) {
             (bool ok, address recipient) = _parseAddress(actor);
@@ -259,6 +308,17 @@ contract TargetContract {
             status = assetService.mintSettlement(requestID, recordId, recipient, units, metadataHash);
             assetAmountByRequest[requestID] = units;
             assetRecipientByRequest[requestID] = recipient;
+            return (address(assetService), status);
+        }
+        if (opKey == keccak256(bytes("token_transfer"))) {
+            (bool ok, address recipient) = _parseAddress(actor);
+            require(ok, "asset recipient must be evm address");
+            status = assetService.transferSettlementCompact(
+                requestID,
+                keccak256(bytes(recordId)),
+                recipient,
+                _parseAmount4(amount)
+            );
             return (address(assetService), status);
         }
         if (opKey == keccak256(bytes("receivable_attest"))) {
