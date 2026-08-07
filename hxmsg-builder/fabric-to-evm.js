@@ -68,13 +68,19 @@ function buildHXMsgFromFabricEvent({
 
   const feedbackRequired = Boolean(normalized.requireAck || rawPayload.requireAck);
   const atomicity = rawPayload.atomicity || null;
-  const feedback = {
+  // 链上 XCALL 事件中的显式 feedback 是源链事实，builder 不得用业务 requireAck 重写其类型。
+  const feedback = rawPayload.feedback ? {
+    required: Boolean(rawPayload.feedback.required),
+    expectedMsgType: Number(rawPayload.feedback.expectedMsgType || 0),
+    timeout: Number(rawPayload.feedback.timeout || 0),
+    callbackRefHash: rawPayload.feedback.callbackRefHash || ethers.ZeroHash,
+  } : {
     required: atomicity?.required ? true : feedbackRequired,
     expectedMsgType: atomicity?.required ? FeedbackType.RESPONSE : (feedbackRequired ? FeedbackType.ACK : FeedbackType.NONE),
-    timeout: atomicity?.required
-      ? Number(rawPayload.feedback?.timeout || rawPayload.feedbackTimeout || rawPayload.expireAt)
-      : (feedbackRequired ? Number(rawPayload.feedback?.timeout || rawPayload.feedbackTimeout || rawPayload.ackTimeout || rawPayload.expireAt) : 0),
-    callbackRefHash: rawPayload.feedback?.callbackRefHash || rawPayload.callbackRefHash || ethers.ZeroHash,
+    timeout: atomicity?.required || feedbackRequired
+      ? Number(rawPayload.feedbackTimeout || rawPayload.ackTimeout || rawPayload.expireAt)
+      : 0,
+    callbackRefHash: rawPayload.callbackRefHash || ethers.ZeroHash,
   };
   assertFabricPolicyBinding({ rawPayload, feedback, atomicity });
 
@@ -84,6 +90,7 @@ function buildHXMsgFromFabricEvent({
       requestID,
       msgType: MsgType.CONTRACT_CALL,
       nonce: Number(rawPayload.nonce || nonce || 0),
+      nonceScope: sourcePart.nonceScope,
       createdAt: Number(rawPayload.createdAt || createdAt || Math.floor(Date.now() / 1000)),
       expireAt: Number(rawPayload.expireAt),
     },

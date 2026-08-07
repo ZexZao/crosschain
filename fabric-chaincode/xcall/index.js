@@ -6,6 +6,8 @@ const { ethers } = require('ethers');
 const ABI = ethers.AbiCoder.defaultAbiCoder();
 const TEE_CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes('HXMSG_TEE_CLUSTER_LOCAL_V1'));
 const BATCH_DOMAIN = ethers.id('HXMSG_BATCH_V1');
+const LIFECYCLE_CHECKPOINT_DOMAIN = ethers.id('HXMSG_LIFECYCLE_CHECKPOINT_V1');
+const TERMINAL_STATUS_CODE = Object.freeze({ Completed: 3, Compensated: 4, Failed: 5, Cancelled: 6 });
 
 function parseJson(value, fieldName) {
   try {
@@ -198,6 +200,27 @@ function computeAtomicityHash(atomicity = {}) {
   );
 }
 
+function validateResponsePolicy(feedback, atomicity) {
+  if (feedback.required) {
+    if (Number(feedback.expectedMsgType) !== 2) throw new Error('feedback requires RESPONSE message type');
+    if (Number(feedback.timeout) <= 0) throw new Error('feedback.timeout is required');
+  } else if (Number(feedback.expectedMsgType) !== 0 || Number(feedback.timeout) !== 0
+      || String(feedback.callbackRefHash).toLowerCase() !== ethers.ZeroHash) {
+    throw new Error('one-way h-xmsg contains unexpected feedback fields');
+  }
+  if (atomicity.required) {
+    if (!feedback.required) throw new Error('atomicity requires RESPONSE feedback');
+    if (Number(atomicity.mode) !== 1) throw new Error('bad atomicity mode');
+    if (Number(atomicity.challengeWindow) <= 0) throw new Error('atomicity.challengeWindow is required');
+  } else if (Number(atomicity.mode) !== 0 || Number(atomicity.commitmentType) !== 0
+      || String(atomicity.commitmentRefHash).toLowerCase() !== ethers.ZeroHash
+      || String(atomicity.successActionHash).toLowerCase() !== ethers.ZeroHash
+      || String(atomicity.failureActionHash).toLowerCase() !== ethers.ZeroHash
+      || Number(atomicity.challengeWindow) !== 0) {
+    throw new Error('non-atomic h-xmsg contains unexpected atomicity fields');
+  }
+}
+
 function computeResponseDigest(response) {
   return ethers.keccak256(
     ABI.encode(
@@ -254,6 +277,24 @@ async function refundAssetEscrowRecord(ctx, requestID) {
   escrow.updatedAt = new Date().toISOString();
   await ctx.stub.putState(`assetEscrow:${requestID}`, Buffer.from(JSON.stringify(escrow)));
   ctx.stub.setEvent('ASSET_ESCROW_REFUNDED', Buffer.from(JSON.stringify({
+    requestID,
+    owner: escrow.owner,
+    assetType: escrow.assetType,
+    amountUnits: escrow.amountUnits
+  })));
+  return escrow;
+}
+
+async function settleAssetEscrowRecord(ctx, requestID) {
+  const data = await ctx.stub.getState(`assetEscrow:${requestID}`);
+  if (!data || data.length === 0) throw new Error(`asset escrow not found: ${requestID}`);
+  const escrow = JSON.parse(data.toString());
+  if (escrow.status !== 'Locked') throw new Error(`escrow is not locked: ${escrow.status}`);
+  escrow.status = 'Settled';
+  escrow.settlementTxID = ctx.stub.getTxID();
+  escrow.updatedAt = new Date().toISOString();
+  await ctx.stub.putState(`assetEscrow:${requestID}`, Buffer.from(JSON.stringify(escrow)));
+  ctx.stub.setEvent('ASSET_ESCROW_SETTLED', Buffer.from(JSON.stringify({
     requestID,
     owner: escrow.owner,
     assetType: escrow.assetType,
@@ -446,7 +487,9 @@ function computeHXMsgDeliveryDigest(hxmsg) {
     feedback.expectedMsgType,
     feedback.timeout,
     feedback.callbackRefHash,
-    hxmsg.header.deliveryExpireAt
+    hxmsg.header.deliveryExpireAt,
+    computeReplayScopeFromHXMsg(hxmsg),
+    hxmsg.header.nonce
   ];
   const chainHash = ethers.keccak256(
     ABI.encode(
@@ -466,10 +509,13 @@ function computeHXMsgDeliveryDigest(hxmsg) {
       [minimal[10], minimal[11], minimal[12], minimal[13], minimal[14]]
     )
   );
+  const replayHash = ethers.keccak256(
+    ABI.encode(['bytes32', 'uint64'], [minimal[15], minimal[16]])
+  );
   return ethers.keccak256(
     ABI.encode(
-      ['bytes32', 'bytes32', 'bytes32'],
-      [chainHash, actionHash, feedbackHash]
+      ['bytes32', 'bytes32', 'bytes32', 'bytes32'],
+      [chainHash, actionHash, feedbackHash, replayHash]
     )
   );
 }
@@ -490,9 +536,11 @@ function normalizeMinimalDelivery(value) {
     value.expectedFeedbackMsgType,
     value.feedbackTimeout,
     value.callbackRefHash,
-    value.expireAt
+    value.expireAt,
+    value.replayScope,
+    value.sourceNonce
   ];
-  if (!Array.isArray(input) || input.length !== 15) throw new Error('bad compact h-xmsg delivery');
+  if (!Array.isArray(input) || input.length !== 17) throw new Error('bad compact h-xmsg delivery');
   return {
     requestID: input[0],
     hmsgDigest: input[1],
@@ -509,6 +557,8 @@ function normalizeMinimalDelivery(value) {
     feedbackTimeout: Number(input[12] || 0),
     callbackRefHash: input[13] || ethers.ZeroHash,
     expireAt: Number(input[14] || 0),
+    replayScope: input[15] || ethers.ZeroHash,
+    sourceNonce: Number(input[16] || 0),
     sourceChainType: Number(value && !Array.isArray(value) && value.sourceChainType !== undefined ? value.sourceChainType : 1)
   };
 }
@@ -560,7 +610,47 @@ function computeHXMsgDeliveryDigestFromMinimal(minimal) {
       ]
     )
   );
-  return ethers.keccak256(ABI.encode(['bytes32', 'bytes32', 'bytes32'], [chainHash, actionHash, feedbackHash]));
+  const replayHash = ethers.keccak256(
+    ABI.encode(['bytes32', 'uint64'], [minimal.replayScope, minimal.sourceNonce])
+  );
+  return ethers.keccak256(
+    ABI.encode(['bytes32', 'bytes32', 'bytes32', 'bytes32'], [chainHash, actionHash, feedbackHash, replayHash])
+  );
+}
+
+function computeReplayScopeFromHXMsg(hxmsg) {
+  return ethers.keccak256(
+    ABI.encode(
+      ['uint8', 'bytes32', 'bytes32', 'bytes32'],
+      [hxmsg.source.chainType, hxmsg.source.chainID, hxmsg.source.domainID, hxmsg.header.nonceScope]
+    )
+  );
+}
+
+function replayBitmapKey(replayScope, sourceNonce) {
+  if (!replayScope || String(replayScope).toLowerCase() === ethers.ZeroHash) throw new Error('bad replay scope');
+  const nonce = BigInt(sourceNonce);
+  if (nonce <= 0n) throw new Error('bad source nonce');
+  const lane = nonce & 15n;
+  const ordinal = nonce >> 4n;
+  return {
+    key: `hxmsg-replay:${String(replayScope).toLowerCase()}:${lane}:${ordinal >> 8n}`,
+    bit: ordinal & 255n
+  };
+}
+
+async function assertReplayAvailable(ctx, replayScope, sourceNonce) {
+  const { key, bit } = replayBitmapKey(replayScope, sourceNonce);
+  const data = await ctx.stub.getState(key);
+  const bitmap = data && data.length > 0 ? BigInt(data.toString()) : 0n;
+  if ((bitmap & (1n << bit)) !== 0n) throw new Error('replay source nonce');
+}
+
+async function markReplayConsumed(ctx, replayScope, sourceNonce) {
+  const { key, bit } = replayBitmapKey(replayScope, sourceNonce);
+  const data = await ctx.stub.getState(key);
+  const bitmap = data && data.length > 0 ? BigInt(data.toString()) : 0n;
+  await ctx.stub.putState(key, Buffer.from(String(bitmap | (1n << bit))));
 }
 
 function computeBatchLeafFromMinimal(minimal) {
@@ -590,7 +680,9 @@ function toMinimalHXMsg(hxmsg, hmsgDigest) {
     feedback.expectedMsgType,
     feedback.timeout,
     feedback.callbackRefHash,
-    hxmsg.header.deliveryExpireAt
+    hxmsg.header.deliveryExpireAt,
+    computeReplayScopeFromHXMsg(hxmsg),
+    hxmsg.header.nonce
   ];
 }
 
@@ -1087,16 +1179,74 @@ function getTxTime(ctx) {
   return Number(ts.seconds.low || ts.seconds || Math.floor(Date.now() / 1000));
 }
 
-async function getCommitment(ctx, requestID) {
-  const data = await ctx.stub.getState(`commitment:${requestID}`);
+async function getResponseLifecycle(ctx, requestID) {
+  const data = await ctx.stub.getState(`responseLifecycle:${requestID}`);
   if (!data || data.length === 0) {
-    throw new Error(`commitment not found: ${requestID}`);
+    throw new Error(`response lifecycle not found: ${requestID}`);
   }
   return JSON.parse(data.toString());
 }
 
-async function putCommitment(ctx, record) {
-  await ctx.stub.putState(`commitment:${record.requestID}`, Buffer.from(JSON.stringify(record)));
+async function putResponseLifecycle(ctx, record) {
+  await ctx.stub.putState(`responseLifecycle:${record.requestID}`, Buffer.from(JSON.stringify(record)));
+}
+
+function currentIdentityID(ctx) {
+  return ethers.keccak256(ethers.toUtf8Bytes(ctx.clientIdentity.getID()));
+}
+
+async function assertAuthorizedWatcher(ctx) {
+  const identityID = currentIdentityID(ctx);
+  const authorized = await ctx.stub.getState(`watcher:${identityID}`);
+  if (!authorized || authorized.toString() !== '1') throw new Error('unauthorized watcher');
+}
+
+async function lifecycleCheckpointContext(ctx) {
+  const channelID = ctx.stub.getChannelID();
+  const chainHash = bytes32FromText(`fabric-${channelID}`);
+  const contractHash = bytes32FromText(`fabric-${channelID}:xcall`);
+  const epochData = await ctx.stub.getState('lifecycleCheckpoint:epoch');
+  const rootData = await ctx.stub.getState('lifecycleCheckpoint:root');
+  return {
+    chainID: BigInt(chainHash),
+    lifecycleContract: ethers.getAddress(`0x${strip0x(contractHash).slice(-40)}`),
+    epoch: epochData?.length ? Number(epochData.toString()) : 0,
+    root: rootData?.length ? rootData.toString() : ethers.ZeroHash
+  };
+}
+
+async function fabricTerminalRecord(ctx, requestID) {
+  const record = await getResponseLifecycle(ctx, requestID);
+  const status = TERMINAL_STATUS_CODE[record.status];
+  if (!status) throw new Error(`request not terminal: ${requestID}`);
+  const escrowData = await ctx.stub.getState(`assetEscrow:${requestID}`);
+  const escrow = escrowData?.length ? JSON.parse(escrowData.toString()) : null;
+  const refunded = escrow?.status === 'Refunded';
+  const settled = escrow?.status === 'Settled';
+  if (Number(record.commitmentType) === 3 && !refunded && !settled) throw new Error(`escrow not terminal: ${requestID}`);
+  return {
+    requestID,
+    status,
+    commitmentType: Number(record.commitmentType || 0),
+    targetExecutionHash: record.targetExecutionHash,
+    failureActionHash: record.failureActionHash || ethers.ZeroHash,
+    responseDigest: record.responseDigest || ethers.ZeroHash,
+    escrowRefunded: refunded,
+    escrowSettled: settled
+  };
+}
+
+function terminalStateRoot(records) {
+  let root = ethers.ZeroHash;
+  for (const record of records) {
+    const leaf = ethers.keccak256(ABI.encode(
+      ['bytes32', 'uint8', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'bool', 'bool'],
+      [record.requestID, record.status, record.commitmentType, record.targetExecutionHash,
+        record.failureActionHash, record.responseDigest, record.escrowRefunded, record.escrowSettled]
+    ));
+    root = ethers.keccak256(ABI.encode(['bytes32', 'bytes32'], [root, leaf]));
+  }
+  return root;
 }
 
 class XCallContract extends Contract {
@@ -1143,6 +1293,8 @@ class XCallContract extends Contract {
       callbackRefHash: payload.callbackRefHash || ethers.ZeroHash
     });
     const atomicity = normalizeAtomicity(payload.atomicity);
+    validateResponsePolicy(feedback, atomicity);
+    if (feedback.required && Number(feedback.timeout) <= createdAt) throw new Error('feedback timeout expired');
     const feedbackHash = computeFeedbackHash(feedback);
     const atomicityHash = computeAtomicityHash(atomicity);
 
@@ -1187,17 +1339,11 @@ class XCallContract extends Contract {
       txId,
       requestID,
       nonce,
-      status: 'pending',
+      status: feedback.required ? 'awaiting_response' : 'submitted',
       updatedAt: new Date().toISOString()
     })));
-    if (atomicity.required) {
-      if (!feedback.required || Number(feedback.expectedMsgType) !== 2) {
-        throw new Error('atomic h-xmsg requires RESPONSE feedback');
-      }
-      if (!atomicity.challengeWindow) {
-        throw new Error('atomicity.challengeWindow is required');
-      }
-      const commitment = {
+    if (feedback.required) {
+      const lifecycle = {
         requestID,
         owner: ctx.clientIdentity.getID(),
         sourceTxID: txId,
@@ -1210,11 +1356,12 @@ class XCallContract extends Contract {
         feedbackTimeout: feedback.timeout || expireAt,
         challengeWindow: atomicity.challengeWindow,
         challengeDeadline: 0,
+        atomicityRequired: atomicity.required,
         status: 'Pending',
         createdAt,
         updatedAt: new Date().toISOString()
       };
-      await putCommitment(ctx, commitment);
+      await putResponseLifecycle(ctx, lifecycle);
     }
     ctx.stub.setEvent('XCALL', Buffer.from(JSON.stringify(eventPayload)));
 
@@ -1279,6 +1426,11 @@ class XCallContract extends Contract {
     const expireAt = Number(payload.expireAt || (createdAt + 3600));
     const feedback = normalizeFeedback(payload.feedback);
     const atomicity = normalizeAtomicity(payload.atomicity);
+    validateResponsePolicy(feedback, atomicity);
+    if (feedback.required && Number(feedback.timeout) <= createdAt) throw new Error('feedback timeout expired');
+    if (!atomicity.required || Number(atomicity.commitmentType) !== 3) {
+      throw new Error('asset lock requires TOKEN_ESCROW atomicity');
+    }
     const feedbackHash = computeFeedbackHash(feedback);
     const atomicityHash = computeAtomicityHash(atomicity);
     const businessPayloadHash = payload.businessPayloadHash || hashJson(businessPayload);
@@ -1326,8 +1478,8 @@ class XCallContract extends Contract {
         [requestID, executionTargetChainID, targetObject, functionSelector, callDataHash, receiver]
       )
     );
-    if (atomicity.required) {
-      await putCommitment(ctx, {
+    if (feedback.required) {
+      await putResponseLifecycle(ctx, {
         requestID,
         owner: ctx.clientIdentity.getID(),
         sourceTxID: txId,
@@ -1340,6 +1492,7 @@ class XCallContract extends Contract {
         feedbackTimeout: feedback.timeout || expireAt,
         challengeWindow: atomicity.challengeWindow,
         challengeDeadline: 0,
+        atomicityRequired: atomicity.required,
         status: 'Pending',
         createdAt,
         updatedAt: new Date().toISOString()
@@ -1354,7 +1507,13 @@ class XCallContract extends Contract {
       status: 'asset_locked',
       updatedAt: new Date().toISOString()
     })));
-    ctx.stub.setEvent('ASSET_LOCKED_XCALL', Buffer.from(JSON.stringify({ requestID, txId, owner, assetType, amountUnits: unitsToString(amountUnits) })));
+    ctx.stub.setEvent('ASSET_LOCKED_XCALL', Buffer.from(JSON.stringify({
+      ...eventRecord,
+      txId,
+      owner,
+      assetType,
+      amountUnits: unitsToString(amountUnits)
+    })));
     return JSON.stringify({ ok: true, txId, requestID, nonce, escrow });
   }
 
@@ -1443,11 +1602,9 @@ class XCallContract extends Contract {
     const compactCall = executionData.compactCall;
     const businessPayload = executionData.businessPayload;
     const requestID = hxmsg.header.requestID;
-    const consumedKey = `hxmsg-consumed:${requestID}`;
-    const consumed = await ctx.stub.getState(consumedKey);
-    if (consumed && consumed.length > 0) {
-      throw new Error('replay requestID');
-    }
+    const replayScope = computeReplayScopeFromHXMsg(hxmsg);
+    const sourceNonce = Number(hxmsg.header.nonce);
+    await assertReplayAvailable(ctx, replayScope, sourceNonce);
 
     const now = Number(ctx.stub.getTxTimestamp().seconds.low || ctx.stub.getTxTimestamp().seconds || Math.floor(Date.now() / 1000));
     if (Number(hxmsg.header.deliveryExpireAt) < now) throw new Error('h-xmsg expired');
@@ -1526,7 +1683,7 @@ class XCallContract extends Contract {
       updatedAt: new Date().toISOString()
     };
 
-    await ctx.stub.putState(consumedKey, Buffer.from('1'));
+    await markReplayConsumed(ctx, replayScope, sourceNonce);
     await ctx.stub.putState(`crosschainExec:${requestID}`, Buffer.from(JSON.stringify(record)));
     await ctx.stub.putState(`inbound:${requestID}`, Buffer.from(JSON.stringify(record)));
     ctx.stub.setEvent('HXMSG_EXECUTED', Buffer.from(JSON.stringify(record)));
@@ -1541,11 +1698,7 @@ class XCallContract extends Contract {
     const certEnvelope = parseJson(certJson, 'certJson');
     const auditRecord = {};
     const requestID = minimal.requestID;
-    const consumedKey = `hxmsg-consumed:${requestID}`;
-    const consumed = await ctx.stub.getState(consumedKey);
-    if (consumed && consumed.length > 0) {
-      throw new Error('replay requestID');
-    }
+    await assertReplayAvailable(ctx, minimal.replayScope, minimal.sourceNonce);
 
     const now = Number(ctx.stub.getTxTimestamp().seconds.low || ctx.stub.getTxTimestamp().seconds || Math.floor(Date.now() / 1000));
     if (Number(minimal.expireAt) < now) throw new Error('h-xmsg expired');
@@ -1609,12 +1762,118 @@ class XCallContract extends Contract {
       updatedAt: new Date().toISOString()
     };
 
-    await ctx.stub.putState(consumedKey, Buffer.from('1'));
+    await markReplayConsumed(ctx, minimal.replayScope, minimal.sourceNonce);
     await ctx.stub.putState(`crosschainExec:${requestID}`, Buffer.from(JSON.stringify(record)));
     await ctx.stub.putState(`inbound:${requestID}`, Buffer.from(JSON.stringify(record)));
     ctx.stub.setEvent('HXMSG_EXECUTED', Buffer.from(JSON.stringify(record)));
 
     return JSON.stringify({ ok: true, requestID, status: 'executed', compressed: true, validTEECount: certResult.validTEECount });
+  }
+
+  async ExecuteHXMsgCompactBatch(ctx, deliveriesJson, compactCallsJson, businessPayloadsJson, certsJson) {
+    const deliveries = parseJson(deliveriesJson, 'deliveriesJson');
+    const compactCalls = parseJson(compactCallsJson, 'compactCallsJson');
+    const businessPayloads = parseJson(businessPayloadsJson, 'businessPayloadsJson');
+    const certEnvelopes = parseJson(certsJson, 'certsJson');
+    if (!Array.isArray(deliveries) || deliveries.length === 0) throw new Error('empty compact batch');
+    if (!Array.isArray(compactCalls) || compactCalls.length !== deliveries.length) throw new Error('bad compact call count');
+    if (!Array.isArray(businessPayloads) || businessPayloads.length !== deliveries.length) throw new Error('bad business payload count');
+    if (!Array.isArray(certEnvelopes) || certEnvelopes.length !== deliveries.length) throw new Error('bad certificate count');
+
+    const expectedChainID = bytes32FromText(`fabric-${ctx.stub.getChannelID()}`);
+    const expectedTargetObject = bytes32FromText('xcall');
+    const now = getTxTime(ctx);
+    const prepared = [];
+    let batchSigningDigest = null;
+
+    for (let i = 0; i < deliveries.length; i += 1) {
+      const minimal = normalizeMinimalDelivery(deliveries[i]);
+      const compactCall = compactCalls[i];
+      const parsedPayload = businessPayloads[i];
+      const certEnvelope = certEnvelopes[i];
+      await assertReplayAvailable(ctx, minimal.replayScope, minimal.sourceNonce);
+      if (Number(minimal.expireAt) < now) throw new Error(`h-xmsg expired at batch index ${i}`);
+      if (Number(minimal.targetChainType) !== 2) throw new Error(`target is not Fabric at batch index ${i}`);
+      if (Number(minimal.actionType) !== 5) throw new Error(`action is not chaincode invoke at batch index ${i}`);
+      if (String(minimal.targetChainID).toLowerCase() !== expectedChainID.toLowerCase()) {
+        throw new Error(`Fabric target chainID mismatch at batch index ${i}`);
+      }
+      if (String(minimal.targetObject).toLowerCase() !== expectedTargetObject.toLowerCase()) {
+        throw new Error(`Fabric target object mismatch at batch index ${i}`);
+      }
+      if (String(minimal.callDataHash).toLowerCase() !== hashCompactBusinessCall(compactCall).toLowerCase()) {
+        throw new Error(`compact callDataHash mismatch at batch index ${i}`);
+      }
+      assertCompactPayloadMatchesBusiness(compactCall, parsedPayload);
+      const targetExecutionHash = computeTargetExecutionHashFromMinimal(minimal);
+      if (String(minimal.targetExecutionHash).toLowerCase() !== targetExecutionHash.toLowerCase()) {
+        throw new Error(`targetExecutionHash mismatch at batch index ${i}`);
+      }
+
+      const signingDigest = expectedMinimalSigningDigest(minimal, certEnvelope);
+      if (batchSigningDigest && String(signingDigest).toLowerCase() !== String(batchSigningDigest).toLowerCase()) {
+        throw new Error('mixed TEE batch certificates');
+      }
+      batchSigningDigest = signingDigest;
+      prepared.push({ minimal, compactCall, parsedPayload, targetExecutionHash });
+    }
+
+    // 所有消息均已通过各自的 Merkle inclusion proof，因此同一批次的 TEE quorum 签名只验证一次。
+    const certResult = await verifyTEEClusterCertificate(ctx, batchSigningDigest, certEnvelopes[0]);
+    const records = [];
+    for (const item of prepared) {
+      const { minimal, parsedPayload, targetExecutionHash } = item;
+      const businessRecord = await applyBusinessAction(ctx, {
+        requestID: minimal.requestID,
+        hmsgDigest: minimal.hmsgDigest,
+        callDataHash: minimal.callDataHash,
+        parsedPayload,
+        sourceChainType: minimal.sourceChainType || 1
+      });
+      const record = {
+        requestID: minimal.requestID,
+        txId: ctx.stub.getTxID(),
+        callerMSP: ctx.clientIdentity.getMSPID(),
+        hmsgDigest: minimal.hmsgDigest,
+        validTEECount: certResult.validTEECount,
+        teeThreshold: certResult.threshold,
+        teeSigners: certResult.signerIndexes,
+        sourceChainType: minimal.sourceChainType || 1,
+        sourceTxID: '',
+        srcHeight: 0,
+        callDataHash: minimal.callDataHash,
+        businessPayloadHash: hashJson(parsedPayload),
+        targetExecutionHash,
+        op: parsedPayload.op,
+        recordId: parsedPayload.recordId,
+        actor: parsedPayload.actor,
+        amount: parsedPayload.amount,
+        metadata: parsedPayload.metadata,
+        requireAck: Boolean(parsedPayload.requireAck),
+        businessKey: businessRecord.businessKey,
+        businessStatus: businessRecord.status,
+        status: 'executed',
+        compressed: true,
+        batch: true,
+        updatedAt: new Date().toISOString()
+      };
+      await markReplayConsumed(ctx, minimal.replayScope, minimal.sourceNonce);
+      await ctx.stub.putState(`crosschainExec:${minimal.requestID}`, Buffer.from(JSON.stringify(record)));
+      await ctx.stub.putState(`inbound:${minimal.requestID}`, Buffer.from(JSON.stringify(record)));
+      records.push(record);
+    }
+    ctx.stub.setEvent('HXMSG_BATCH_EXECUTED', Buffer.from(JSON.stringify({
+      txId: ctx.stub.getTxID(),
+      batchSize: records.length,
+      requestIDs: records.map((record) => record.requestID)
+    })));
+    return JSON.stringify({
+      ok: true,
+      status: 'executed',
+      batchSize: records.length,
+      requestIDs: records.map((record) => record.requestID),
+      validTEECount: certResult.validTEECount
+    });
   }
 
   async GetInboundStatus(ctx, requestID) {
@@ -1632,17 +1891,35 @@ class XCallContract extends Contract {
     return data && data.length > 0 ? data.toString() : '';
   }
 
-  async QueryCommitment(ctx, requestID) {
-    const data = await ctx.stub.getState(`commitment:${requestID}`);
+  async QueryResponseLifecycle(ctx, requestID) {
+    const data = await ctx.stub.getState(`responseLifecycle:${requestID}`);
     return data && data.length > 0 ? data.toString() : '';
   }
 
-  async BindCommitmentHXMsg(ctx, hxmsgJson, certJson) {
+  async InitializeWatcherAuthorization(ctx) {
+    const existing = await ctx.stub.getState('watcher:admin');
+    const identityID = currentIdentityID(ctx);
+    if (existing?.length && existing.toString() !== identityID) throw new Error('watcher authorization already initialized');
+    await ctx.stub.putState('watcher:admin', Buffer.from(identityID));
+    await ctx.stub.putState(`watcher:${identityID}`, Buffer.from('1'));
+    return JSON.stringify({ ok: true, watcherID: identityID });
+  }
+
+  async SetWatcherAuthorization(ctx, watcherID, authorized) {
+    const admin = await ctx.stub.getState('watcher:admin');
+    if (!admin?.length || admin.toString() !== currentIdentityID(ctx)) throw new Error('not watcher admin');
+    if (!/^0x[0-9a-fA-F]{64}$/.test(watcherID)) throw new Error('bad watcherID');
+    if (String(authorized) === 'true') await ctx.stub.putState(`watcher:${watcherID}`, Buffer.from('1'));
+    else await ctx.stub.deleteState(`watcher:${watcherID}`);
+    return JSON.stringify({ ok: true, watcherID, authorized: String(authorized) === 'true' });
+  }
+
+  async BindResponseLifecycleHXMsg(ctx, hxmsgJson, certJson) {
     const hxmsg = parseJson(hxmsgJson, 'hxmsgJson');
     const certEnvelope = parseJson(certJson, 'certJson');
     const auditRecord = getAuditRecord(hxmsg);
     const requestID = hxmsg.header.requestID;
-    const record = await getCommitment(ctx, requestID);
+    const record = await getResponseLifecycle(ctx, requestID);
     if (!['Pending', 'Challenged'].includes(record.status)) {
       throw new Error(`bad state: ${record.status}`);
     }
@@ -1667,8 +1944,8 @@ class XCallContract extends Contract {
     record.teeThreshold = certResult.threshold;
     record.boundAt = getTxTime(ctx);
     record.updatedAt = new Date(record.boundAt * 1000).toISOString();
-    await putCommitment(ctx, record);
-    ctx.stub.setEvent('COMMITMENT_HXMSG_BOUND', Buffer.from(JSON.stringify({
+    await putResponseLifecycle(ctx, record);
+    ctx.stub.setEvent('RESPONSE_LIFECYCLE_HXMSG_BOUND', Buffer.from(JSON.stringify({
       requestID,
       hmsgDigest: record.hmsgDigest,
       validTEECount: certResult.validTEECount
@@ -1682,9 +1959,13 @@ class XCallContract extends Contract {
   }
 
   async StartChallenge(ctx, requestID) {
-    const record = await getCommitment(ctx, requestID);
+    await assertAuthorizedWatcher(ctx);
+    const record = await getResponseLifecycle(ctx, requestID);
     if (record.status !== 'Pending') {
       throw new Error(`bad state: ${record.status}`);
+    }
+    if (!record.atomicityRequired || Number(record.challengeWindow) <= 0) {
+      throw new Error('response-only request cannot be challenged');
     }
     const now = getTxTime(ctx);
     if (now <= Number(record.feedbackTimeout)) {
@@ -1693,7 +1974,7 @@ class XCallContract extends Contract {
     record.status = 'Challenged';
     record.challengeDeadline = now + Number(record.challengeWindow);
     record.updatedAt = new Date(now * 1000).toISOString();
-    await putCommitment(ctx, record);
+    await putResponseLifecycle(ctx, record);
     ctx.stub.setEvent('CHALLENGE_STARTED', Buffer.from(JSON.stringify({
       requestID,
       challengeDeadline: record.challengeDeadline
@@ -1702,7 +1983,7 @@ class XCallContract extends Contract {
   }
 
   async CompleteWithResponse(ctx, requestID, responseJson, certJson) {
-    const record = await getCommitment(ctx, requestID);
+    const record = await getResponseLifecycle(ctx, requestID);
     if (!['Pending', 'Challenged'].includes(record.status)) {
       throw new Error(`bad state: ${record.status}`);
     }
@@ -1730,6 +2011,12 @@ class XCallContract extends Contract {
       throw new Error('response replay');
     }
     const certResult = await verifyTEEClusterCertificate(ctx, responseDigest, certEnvelope);
+    let settlementResult = null;
+    if (Number(record.commitmentType) === 3) {
+      settlementResult = await settleAssetEscrowRecord(ctx, requestID);
+      record.settlementHandler = 'asset-escrow-settlement';
+      record.settlementResultHash = ethers.keccak256(ethers.toUtf8Bytes(stableStringify(settlementResult)));
+    }
     record.status = 'Completed';
     record.responseDigest = responseDigest;
     record.validTEECount = certResult.validTEECount;
@@ -1737,17 +2024,25 @@ class XCallContract extends Contract {
     record.completedAt = getTxTime(ctx);
     record.updatedAt = new Date(record.completedAt * 1000).toISOString();
     await ctx.stub.putState(consumedKey, Buffer.from('1'));
-    await putCommitment(ctx, record);
+    await putResponseLifecycle(ctx, record);
     ctx.stub.setEvent('RESPONSE_COMPLETED', Buffer.from(JSON.stringify({
       requestID,
       responseDigest,
       validTEECount: certResult.validTEECount
     })));
-    return JSON.stringify({ ok: true, requestID, status: record.status, responseDigest });
+    return JSON.stringify({
+      ok: true,
+      requestID,
+      status: record.status,
+      responseDigest,
+      settlementHandler: record.settlementHandler || null,
+      settlementResultHash: record.settlementResultHash || ethers.ZeroHash
+    });
   }
 
   async CompensateAfterChallenge(ctx, requestID, failureDataJson) {
-    const record = await getCommitment(ctx, requestID);
+    await assertAuthorizedWatcher(ctx);
+    const record = await getResponseLifecycle(ctx, requestID);
     if (record.status !== 'Challenged') {
       throw new Error(`bad state: ${record.status}`);
     }
@@ -1769,7 +2064,7 @@ class XCallContract extends Contract {
       : ethers.ZeroHash;
     record.compensatedAt = now;
     record.updatedAt = new Date(now * 1000).toISOString();
-    await putCommitment(ctx, record);
+    await putResponseLifecycle(ctx, record);
     ctx.stub.setEvent('REQUEST_COMPENSATED', Buffer.from(JSON.stringify({
       requestID,
       commitmentType: record.commitmentType,
@@ -1783,6 +2078,58 @@ class XCallContract extends Contract {
       compensationHandler: record.compensationHandler,
       compensationResultHash: record.compensationResultHash
     });
+  }
+
+  async PreviewLifecycleCheckpoint(ctx, requestIDsJson) {
+    const requestIDs = parseJson(requestIDsJson, 'requestIDsJson');
+    if (!Array.isArray(requestIDs) || requestIDs.length < 1 || requestIDs.length > 256) throw new Error('bad checkpoint size');
+    const records = [];
+    for (let index = 0; index < requestIDs.length; index += 1) {
+      if (index > 0 && String(requestIDs[index]).toLowerCase() <= String(requestIDs[index - 1]).toLowerCase()) {
+        throw new Error('requestIDs not sorted');
+      }
+      records.push(await fabricTerminalRecord(ctx, requestIDs[index]));
+    }
+    const terminalRoot = terminalStateRoot(records);
+    const context = await lifecycleCheckpointContext(ctx);
+    const epoch = context.epoch + 1;
+    const signingDigest = ethers.keccak256(ABI.encode(
+      ['bytes32', 'uint256', 'address', 'uint64', 'bytes32', 'bytes32', 'uint256'],
+      [LIFECYCLE_CHECKPOINT_DOMAIN, context.chainID, context.lifecycleContract, epoch, context.root, terminalRoot, requestIDs.length]
+    ));
+    return JSON.stringify({
+      chainID: context.chainID.toString(), lifecycleContract: context.lifecycleContract, epoch,
+      previousCheckpointRoot: context.root, terminalStateRoot: terminalRoot,
+      requestCount: requestIDs.length, signingDigest, records
+    });
+  }
+
+  async UpdateLifecycleCheckpoint(ctx, requestIDsJson, terminalRoot, certJson) {
+    await assertAuthorizedWatcher(ctx);
+    const preview = JSON.parse(await this.PreviewLifecycleCheckpoint(ctx, requestIDsJson));
+    if (String(preview.terminalStateRoot).toLowerCase() !== String(terminalRoot).toLowerCase()) {
+      throw new Error('bad terminal state root');
+    }
+    await verifyTEEClusterCertificate(ctx, preview.signingDigest, parseJson(certJson, 'certJson'));
+    const requestIDs = parseJson(requestIDsJson, 'requestIDsJson');
+    for (const requestID of requestIDs) {
+      const record = await getResponseLifecycle(ctx, requestID);
+      if (record.responseDigest && record.responseDigest !== ethers.ZeroHash) {
+        await ctx.stub.deleteState(`response-consumed:${record.responseDigest}`);
+      }
+      await ctx.stub.deleteState(`assetEscrow:${requestID}`);
+      await ctx.stub.deleteState(`responseLifecycle:${requestID}`);
+    }
+    const checkpointRoot = ethers.keccak256(ABI.encode(
+      ['bytes32', 'uint64', 'bytes32', 'uint256'],
+      [preview.previousCheckpointRoot, preview.epoch, preview.terminalStateRoot, requestIDs.length]
+    ));
+    await ctx.stub.putState('lifecycleCheckpoint:epoch', Buffer.from(String(preview.epoch)));
+    await ctx.stub.putState('lifecycleCheckpoint:root', Buffer.from(checkpointRoot));
+    const result = { ...preview, checkpointRoot };
+    await ctx.stub.putState(`lifecycleCheckpoint:${preview.epoch}`, Buffer.from(JSON.stringify(result)));
+    ctx.stub.setEvent('LIFECYCLE_CHECKPOINTED', Buffer.from(JSON.stringify(result)));
+    return JSON.stringify({ ok: true, ...result });
   }
 
   async GetAckStatus(ctx, originRequestID) {

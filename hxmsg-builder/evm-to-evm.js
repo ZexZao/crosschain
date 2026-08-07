@@ -93,6 +93,7 @@ function buildHXMsgFromEvmReceiptToEvm({
       requestID: parsed.requestID,
       msgType: MsgType.CONTRACT_CALL,
       nonce: parsed.nonce,
+      nonceScope: sourcePart.nonceScope,
       createdAt: sourcePart.createdAt,
       expireAt: parsed.expireAt,
     },

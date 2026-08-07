@@ -30,7 +30,7 @@ contract HXMsgGateway {
 
     TEERegistry public immutable teeRegistry;
     uint8 public immutable localChainType;
-    mapping(bytes32 => bool) public processed;
+    mapping(bytes32 => mapping(uint256 => uint256)) private replayBitmap;
     bytes32 public constant BATCH_DOMAIN = keccak256("HXMSG_BATCH_V1");
 
     struct CompactCall {
@@ -48,11 +48,14 @@ contract HXMsgGateway {
         bytes32 hmsgDigest;
         bytes32 callDataHash;
         uint64 expireAt;
+        bytes32 replayScope;
+        uint64 sourceNonce;
     }
 
     event HXMsgAccepted(bytes32 indexed requestID, bytes32 indexed clusterID, address indexed target);
     event HXMsgBatchAccepted(bytes32 indexed batchID, bytes32 indexed batchRoot, uint256 size);
     event HXMsgRejected(bytes32 indexed requestID, string reason);
+    event ReplayMarked(bytes32 indexed replayScope, uint64 indexed sourceNonce, bytes32 indexed requestID);
 
     constructor(address registry, uint8 chainType) {
         require(chainType == 1 || chainType == 3, "unsupported local chain type");
@@ -71,6 +74,20 @@ contract HXMsgGateway {
         _verifyClusterCert(deliveryDigest, cert);
 
         _executeTarget(hxmsg, target, callData);
+        emit HXMsgAccepted(hxmsg.requestID, cert.clusterID, target);
+    }
+
+    /// @notice 单条紧凑消息入口。使用强类型 CompactCall，避免把静态 tuple 错误封装为 bytes。
+    function executeHXMsgMinimalCompactCluster(
+        HXMsgLib.HXMsgMinimal calldata hxmsg,
+        address target,
+        CompactCall calldata call,
+        HXMsgLib.ClusterCertificate calldata cert
+    ) external {
+        bytes32 deliveryDigest = hxmsg.hashDelivery();
+        _validateMinimalCompact(hxmsg, target, call);
+        _verifyClusterCert(deliveryDigest, cert);
+        _executeCompactTarget(hxmsg, target, call);
         emit HXMsgAccepted(hxmsg.requestID, cert.clusterID, target);
     }
 
@@ -259,7 +276,7 @@ contract HXMsgGateway {
     }
 
     function _validateMinimal(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, bytes calldata callData) internal view {
-        require(!processed[hxmsg.requestID], "already processed");
+        _requireNotProcessed(hxmsg.replayScope, hxmsg.sourceNonce);
         require(hxmsg.expireAt >= block.timestamp, "expired");
         require(hxmsg.targetChainType == localChainType, "wrong target chain type");
         require(hxmsg.targetChainID == bytes32(uint256(block.chainid)), "wrong target chain");
@@ -297,7 +314,7 @@ contract HXMsgGateway {
         internal
         view
     {
-        require(!processed[hxmsg.requestID], "already processed");
+        _requireNotProcessed(hxmsg.replayScope, hxmsg.sourceNonce);
         require(hxmsg.expireAt >= block.timestamp, "expired");
         require(hxmsg.targetChainType == localChainType, "wrong target chain type");
         require(hxmsg.targetChainID == bytes32(uint256(block.chainid)), "wrong target chain");
@@ -354,7 +371,7 @@ contract HXMsgGateway {
         address target,
         CompactCall calldata call
     ) internal view {
-        require(!processed[delivery.requestID], "already processed");
+        _requireNotProcessed(delivery.replayScope, delivery.sourceNonce);
         require(delivery.expireAt >= block.timestamp, "expired");
         require(hashCompactCall(call) == delivery.callDataHash, "bad compact call hash");
         require(target != address(0), "bad target");
@@ -390,7 +407,8 @@ contract HXMsgGateway {
             )
         );
         bytes32 feedbackHash = keccak256(abi.encode(false, uint8(0), uint64(0), bytes32(0), delivery.expireAt));
-        return keccak256(abi.encode(chainHash, actionHash, feedbackHash));
+        bytes32 replayHash = keccak256(abi.encode(delivery.replayScope, delivery.sourceNonce));
+        return keccak256(abi.encode(chainHash, actionHash, feedbackHash, replayHash));
     }
 
     function _verifyClusterCert(
@@ -412,7 +430,7 @@ contract HXMsgGateway {
     }
 
     function _executeTarget(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, bytes calldata callData) internal {
-        processed[hxmsg.requestID] = true;
+        _markProcessed(hxmsg.replayScope, hxmsg.sourceNonce, hxmsg.requestID);
         (bool ok, bytes memory ret) = target.call(
             abi.encodeWithSelector(hxmsg.functionSelector, hxmsg.requestID, callData)
         );
@@ -429,7 +447,7 @@ contract HXMsgGateway {
     function _executeCompactTarget(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, CompactCall calldata call)
         internal
     {
-        processed[hxmsg.requestID] = true;
+        _markProcessed(hxmsg.replayScope, hxmsg.sourceNonce, hxmsg.requestID);
         (bool ok, bytes memory ret) = target.call(
             abi.encodeWithSelector(hxmsg.functionSelector, hxmsg.requestID, call)
         );
@@ -448,7 +466,7 @@ contract HXMsgGateway {
         address target,
         CompactCall calldata call
     ) internal {
-        processed[delivery.requestID] = true;
+        _markProcessed(delivery.replayScope, delivery.sourceNonce, delivery.requestID);
         (bool ok, bytes memory ret) = target.call(
             abi.encodeWithSelector(TargetContractExecuteCompactSelector.executeCompact.selector, delivery.requestID, call)
         );
@@ -477,7 +495,7 @@ contract HXMsgGateway {
     ) internal {
         bytes32[] memory requestIDs = new bytes32[](hxmsgs.length);
         for (uint256 i = 0; i < hxmsgs.length; i += 1) {
-            processed[hxmsgs[i].requestID] = true;
+            _markProcessed(hxmsgs[i].replayScope, hxmsgs[i].sourceNonce, hxmsgs[i].requestID);
             requestIDs[i] = hxmsgs[i].requestID;
         }
         (bool ok, bytes memory ret) = target.call(
@@ -500,7 +518,7 @@ contract HXMsgGateway {
     ) internal {
         bytes32[] memory requestIDs = new bytes32[](deliveries.length);
         for (uint256 i = 0; i < deliveries.length; i += 1) {
-            processed[deliveries[i].requestID] = true;
+            _markProcessed(deliveries[i].replayScope, deliveries[i].sourceNonce, deliveries[i].requestID);
             requestIDs[i] = deliveries[i].requestID;
         }
         (bool ok, bytes memory ret) = target.call(
@@ -567,6 +585,31 @@ contract HXMsgGateway {
 
     function _hashPair(bytes32 left, bytes32 right) internal pure returns (bytes32) {
         return left <= right ? keccak256(abi.encode(left, right)) : keccak256(abi.encode(right, left));
+    }
+
+    function isProcessed(bytes32 replayScope, uint64 sourceNonce) external view returns (bool) {
+        (uint256 wordIndex, uint256 mask) = _replayPosition(sourceNonce);
+        return replayBitmap[replayScope][wordIndex] & mask != 0;
+    }
+
+    function _requireNotProcessed(bytes32 replayScope, uint64 sourceNonce) internal view {
+        require(replayScope != bytes32(0), "bad replay scope");
+        require(sourceNonce > 0, "bad source nonce");
+        (uint256 wordIndex, uint256 mask) = _replayPosition(sourceNonce);
+        require(replayBitmap[replayScope][wordIndex] & mask == 0, "already processed");
+    }
+
+    function _markProcessed(bytes32 replayScope, uint64 sourceNonce, bytes32 requestID) internal {
+        (uint256 wordIndex, uint256 mask) = _replayPosition(sourceNonce);
+        replayBitmap[replayScope][wordIndex] |= mask;
+        emit ReplayMarked(replayScope, sourceNonce, requestID);
+    }
+
+    function _replayPosition(uint64 sourceNonce) internal pure returns (uint256 wordIndex, uint256 mask) {
+        uint256 lane = uint256(sourceNonce) & 15;
+        uint256 ordinal = uint256(sourceNonce) >> 4;
+        wordIndex = (lane << 60) | (ordinal >> 8);
+        mask = uint256(1) << (ordinal & 255);
     }
 
 }

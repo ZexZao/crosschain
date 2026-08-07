@@ -4,6 +4,8 @@ const {
   VerificationMethod,
   hashJson,
   computeTargetExecutionHash,
+  computeFeedbackHash,
+  computeAtomicityHash,
 } = require('../../shared/hxmsg');
 const {
   decodeHXMsgWarpPayload,
@@ -80,15 +82,32 @@ async function verifySourceFact({ hxmsg, helperData }) {
   if (sourceProof.sourceContract && weightedProof.sourceAddress.toLowerCase() !== String(sourceProof.sourceContract).toLowerCase()) {
     throw new Error('Avalanche source contract mismatch');
   }
+  const provenSourceContract = sourceProof.sourceContract || weightedProof.sourceAddress;
+  const expectedNonceScope = ethers.zeroPadValue(ethers.getAddress(provenSourceContract), 32);
+  if (!sameHex(hxmsg.header.nonceScope, expectedNonceScope)) {
+    throw new Error('Avalanche nonceScope is not bound to the Warp-proven source contract');
+  }
 
   const warpPayload = decodeHXMsgWarpPayload(weightedProof.payload);
+  if (!sameHex(warpPayload.requestID, hxmsg.header.requestID)) throw new Error('Avalanche requestID mismatch');
+  if (Number(warpPayload.nonce) !== Number(hxmsg.header.nonce)) throw new Error('Avalanche nonce mismatch');
+  if (Number(warpPayload.expireAt) !== Number(hxmsg.header.expireAt)) throw new Error('Avalanche expireAt mismatch');
   if (!sameHex(warpPayload.targetChainID, hxmsg.target.chainID)) throw new Error('Avalanche targetChainID mismatch');
   if (!sameHex(warpPayload.targetDomainID, hxmsg.target.domainID)) throw new Error('Avalanche targetDomainID mismatch');
   if (!sameHex(warpPayload.targetObject, hxmsg.targetAction.targetObject)) throw new Error('Avalanche targetObject mismatch');
   if (!sameHex(warpPayload.functionSelector, hxmsg.targetAction.functionSelector)) throw new Error('Avalanche targetAction mismatch');
   if (!sameHex(warpPayload.callDataHash, hxmsg.targetAction.callDataHash)) throw new Error('Avalanche callDataHash mismatch');
+  if (!sameHex(ethers.keccak256(warpPayload.callData), warpPayload.callDataHash)) {
+    throw new Error('Avalanche Warp callData hash mismatch');
+  }
   if (!sameHex(warpPayload.businessPayloadHash, hxmsg.payloadBinding.businessPayloadHash)) throw new Error('Avalanche businessPayloadHash mismatch');
   if (!sameHex(warpPayload.receiver, hxmsg.targetAction.receiver)) throw new Error('Avalanche receiver mismatch');
+  if (!sameHex(computeFeedbackHash(warpPayload.feedback), computeFeedbackHash(hxmsg.feedback))) {
+    throw new Error('Avalanche feedback policy mismatch');
+  }
+  if (!sameHex(computeAtomicityHash(warpPayload.atomicity), computeAtomicityHash(hxmsg.atomicity))) {
+    throw new Error('Avalanche atomicity policy mismatch');
+  }
   if (Number(warpPayload.expireAt || hxmsg.header.deliveryExpireAt) < Math.floor(Date.now() / 1000)) {
     throw new Error('Avalanche payloadBinding expired');
   }
@@ -106,6 +125,9 @@ async function verifySourceFact({ hxmsg, helperData }) {
   });
   if (!sameHex(policyHash, hxmsg.verification?.policyRef?.policyHash)) {
     throw new Error('Avalanche validator policy hash mismatch');
+  }
+  if (!sameHex(policyHash, warpPayload.validatorPolicyHash)) {
+    throw new Error('Avalanche Warp validator policy binding mismatch');
   }
 
   const sourceRecord = {

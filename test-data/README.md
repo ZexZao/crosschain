@@ -6,7 +6,7 @@
 
 - `fabric-real-cases.json`
   - 8 组真实 Fabric 模式测试用例
-  - 由 `scripts/run-hxmsg-forward-tests.js` 驱动，用于验证 Fabric -> EVM 主线消息、h-FSV 验证、TEE quorum 和目标链真实业务执行
+  - 作为历史业务样本保留；当前实验由 automation scanner/Relayer 驱动，不再由直接提交脚本读取
 
 ## 真实 Fabric 模式用例
 
@@ -33,5 +33,5 @@
 运行完整 Fabric -> EVM 主线测试：
 
 ```bash
-npm run hxmsg:test:forward
+npm run automation:test:fabric-evm
 ```

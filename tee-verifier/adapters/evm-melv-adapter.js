@@ -28,13 +28,25 @@ const {
 const {
   verifySyncCommitteeHeaderUpdate,
 } = require('../../shared/evm/sync-committee-light-client');
+const { readDotEnvValue } = require('../../shared/env');
 
 function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
 }
 
+function rememberActiveEvmState(chainState) {
+  if (!chainState.evmChains || typeof chainState.evmChains !== 'object') {
+    chainState.evmChains = {};
+  }
+  if (chainState.evm?.chainID) {
+    chainState.evmChains[chainState.evm.chainID] = chainState.evm;
+  }
+  return chainState.evmChains;
+}
+
 function resetEvmHeaderWindow(chainState, { chainID }) {
-  chainState.evm = {
+  const evmChains = rememberActiveEvmState(chainState);
+  const state = {
     chainID,
     tipHeight: 0,
     tipHash: null,
@@ -42,16 +54,24 @@ function resetEvmHeaderWindow(chainState, { chainID }) {
     finalizedHash: null,
     headers: [],
   };
-  return chainState.evm;
+  chainState.evm = state;
+  if (chainID) evmChains[chainID] = state;
+  return state;
 }
 
 function ensureEvmChainContext(chainState, { expectedChainID, incomingHeader }) {
+  const evmChains = rememberActiveEvmState(chainState);
   if (!chainState.evm) resetEvmHeaderWindow(chainState, { chainID: expectedChainID });
   if (expectedChainID && chainState.evm.chainID && chainState.evm.chainID !== expectedChainID) {
-    return resetEvmHeaderWindow(chainState, { chainID: expectedChainID });
+    if (evmChains[expectedChainID]) {
+      chainState.evm = evmChains[expectedChainID];
+    } else {
+      return resetEvmHeaderWindow(chainState, { chainID: expectedChainID });
+    }
   }
   if (expectedChainID && !chainState.evm.chainID) {
     chainState.evm.chainID = expectedChainID;
+    evmChains[expectedChainID] = chainState.evm;
   }
   const incomingNumber = Number(incomingHeader?.number ?? 0);
   const finalizedHeight = Number(chainState.evm.finalizedHeight || 0);
@@ -159,12 +179,20 @@ function rememberCommitteeHeader(chainState, committeeUpdate, { expectedChainID 
 
 async function rememberSyncCommitteeHeader(chainState, syncCommitteeUpdate, { expectedChainID, targetBlockNumber, targetBlockHash } = {}) {
   const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
-  const trustedBlockRoot = chainState.evm?.syncCommittee?.trustedBlockRoot
+  const currentSyncState = chainState.evm?.syncCommittee || null;
+  // The simulation updates .env atomically after a verified run. Read the
+  // bootstrap root at verification time so long-running TEE containers do not
+  // retain a stale process.env value. Once local state exists, only that
+  // verified root may advance the light client.
+  const configuredBootstrapRoot = readDotEnvValue('SEPOLIA_TRUSTED_BLOCK_ROOT')
     || process.env.SEPOLIA_TRUSTED_BLOCK_ROOT;
+  const trustedBlockRoot = currentSyncState?.trustedBlockRoot || configuredBootstrapRoot;
   if (!trustedBlockRoot && process.env.SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT !== 'true') {
     throw new Error('TEE sync committee trusted block root is not initialized');
   }
-  if (trustedBlockRoot && !sameHex(syncCommitteeUpdate.trustedBlockRoot, trustedBlockRoot)) {
+  const anchoredToTrustedRoot = trustedBlockRoot
+    && sameHex(syncCommitteeUpdate.trustedBlockRoot, trustedBlockRoot);
+  if (trustedBlockRoot && !anchoredToTrustedRoot) {
     throw new Error('sync committee trusted block root mismatch');
   }
   const verified = await verifySyncCommitteeHeaderUpdate(syncCommitteeUpdate, {
@@ -172,6 +200,10 @@ async function rememberSyncCommitteeHeader(chainState, syncCommitteeUpdate, { ex
     targetBlockNumber,
     targetBlockHash,
   });
+  if (currentSyncState?.chainID === expectedChainID
+      && Number(verified.finalizedHeight) < Number(currentSyncState.finalizedHeight || 0)) {
+    throw new Error('sync committee update would roll back finalized height');
+  }
   ensureEvmChainContext(chainState, { expectedChainID, incomingHeader: verified.header });
   const header = rememberHeader(chainState, verified.header, { windowSize, skipContinuity: true });
   header.committeeCertified = true;
@@ -221,8 +253,7 @@ async function maintainHeaderWindow({
   expectedChainID,
 }) {
   const windowSize = Number(process.env.MELV_HEADER_WINDOW_SIZE || 128);
-  const state = chainState.evm || { tipHeight: 0, tipHash: null, headers: [] };
-  chainState.evm = state;
+  const state = ensureEvmChainContext(chainState, { expectedChainID, incomingHeader: null });
 
   let stored = null;
   if (committeeHeaderUpdate && !syncCommitteeUpdate) {
@@ -313,11 +344,16 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
   if (!policy.trustedSourceContracts.includes(String(ref.sourceContract).toLowerCase())) {
     throw new Error('untrusted EVM source contract');
   }
+  const expectedNonceScope = ethers.zeroPadValue(ethers.getAddress(ref.sourceContract), 32);
+  if (!sameHex(hxmsg.header.nonceScope, expectedNonceScope)) {
+    throw new Error('EVM nonceScope is not bound to the proven source contract');
+  }
 
   const proofEnvelope = helperData.evmReceiptProof;
   if (!proofEnvelope?.receipt || !proofEnvelope?.receiptProof) {
     throw new Error('EVM receipt MPT proof is required');
   }
+  const syncCommitteeUpdate = helperData.syncCommitteeUpdate || proofEnvelope.syncCommitteeUpdate;
   const provider = new ethers.JsonRpcProvider(helperData.evmRpc || process.env.EVM_RPC || 'http://evm-node:8545');
 
   const storedHeader = await maintainHeaderWindow({
@@ -326,7 +362,7 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     targetBlockNumber: ref.blockNumber,
     targetBlockHash: ref.blockHash,
     committeeHeaderUpdate: helperData.committeeHeaderUpdate || proofEnvelope.committeeHeaderUpdate,
-    syncCommitteeUpdate: helperData.syncCommitteeUpdate || proofEnvelope.syncCommitteeUpdate,
+    syncCommitteeUpdate,
     expectedChainID: `eip155:${Number(BigInt(hxmsg.source.chainID))}`,
   });
   if (proofEnvelope.blockHeader) {
@@ -350,8 +386,9 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     expectedReceipt: receipt,
   });
 
-  const latestBlock = await provider.getBlockNumber();
-  const confirmations = Math.max(0, Number(latestBlock) - Number(ref.blockNumber) + 1);
+  const confirmations = syncCommitteeUpdate
+    ? Math.max(0, Number(chainState.evm.finalizedHeight || ref.blockNumber) - Number(ref.blockNumber) + 1)
+    : Math.max(0, Number(await provider.getBlockNumber()) - Number(ref.blockNumber) + 1);
   if (confirmations < Number(hxmsg.verification.requiredConfirmations || policy.requiredConfirmations)) {
     throw new Error(`EVM confirmations insufficient: got=${confirmations}`);
   }

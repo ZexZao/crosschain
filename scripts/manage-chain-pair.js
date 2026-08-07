@@ -10,7 +10,7 @@ const validPairs = new Set(['evm-fabric', 'evm-avalanche', 'fabric-avalanche']);
 const ethereumTEE = ['tee-verifier', 'tee-verifier-2', 'tee-verifier-3', 'tee-verifier-4', 'tee-verifier-5'];
 const fabricTEE = ['tee-fabric-1', 'tee-fabric-2', 'tee-fabric-3', 'tee-fabric-4', 'tee-fabric-5'];
 const avalancheTEE = ['tee-avalanche-1', 'tee-avalanche-2', 'tee-avalanche-3', 'tee-avalanche-4', 'tee-avalanche-5'];
-const allMainServices = ['evm-node', ...ethereumTEE, ...fabricTEE, ...avalancheTEE];
+const allMainServices = ['automation', 'avalanche-rpc-proxy', 'evm-node', ...ethereumTEE, ...fabricTEE, ...avalancheTEE];
 const fabricServices = [
   'fabric-ca.org1.example.com',
   'orderer.example.com',
@@ -60,10 +60,12 @@ function stopAll() {
 
 function startPair() {
   stopAll();
+  process.env.AUTOMATION_ENABLED_CHAINS = pair.split('-').map((name) => name === 'evm' ? 'ethereum' : name).join(',');
   const selectedMain = [];
   if (pair.includes('evm')) selectedMain.push('evm-node', ...ethereumTEE);
   if (pair.includes('fabric')) selectedMain.push(...fabricTEE);
-  if (pair.includes('avalanche')) selectedMain.push(...avalancheTEE);
+  if (pair.includes('avalanche')) selectedMain.push('avalanche-rpc-proxy', ...avalancheTEE);
+  selectedMain.push('automation');
   compose(['up', '-d', ...selectedMain]);
   if (pair.includes('fabric')) fabricCompose(['up', '-d', ...fabricServices]);
   if (pair.includes('avalanche')) avalanche('start');

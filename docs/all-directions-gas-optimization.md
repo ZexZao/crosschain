@@ -22,7 +22,7 @@
 
 | 方向 | 用例 | 结果 | 源链 gas/message | 目标链 batch gas | 目标 gas/message |
 |---|---:|---:|---:|---:|---:|
-| Fabric -> Ethereum | 8 | 8/8 | N/A | 3,156,444 | 394,556 |
+| Fabric -> Ethereum | 8 | 8/8 | N/A | 3,861,604 | 482,701 |
 | Ethereum -> Fabric | 8 | 8/8 | 41,500 | N/A | N/A |
 | Fabric -> Avalanche | 8 | 8/8 | N/A | 2,975,245 | 371,906 |
 | Avalanche -> Fabric | 8 | 8/8 | 114,075 | N/A | N/A |
@@ -30,6 +30,8 @@
 | Avalanche -> Ethereum | 8 | 8/8 | 115,801 | 3,269,184 | 408,648 |
 
 Fabric 不采用 gas 计费，因此 Fabric 目标方向记录执行时间、TEE quorum 和业务状态变化，不伪造 gas 数值。普通 Ethereum 源请求不再为事件中已有的事实字段重复支付持久化写入成本；需要反馈或原子性的请求仍保留完整状态机所需数据。
+
+2026-08-03 的后续审计发现，旧 EVM compact opCode 3-7 只返回状态哈希。该路径现已改为写入五个领域服务的真实状态，因此 Fabric -> Ethereum 的最新可发表口径由 `394,556` 上调为 `482,701 gas/message`。表中其余以 EVM-compatible 链为目标的混合业务结果是在该修复前采集的历史值，必须重跑后才能作为最终论文数据；纯资产批量结果不受该问题影响。
 
 ## 与优化前对比
 
@@ -53,7 +55,7 @@ Ethereum/Avalanche 旧单消息目标执行约为 725,000 到 848,000 gas/messag
 - feedback timeout、challenge window/deadline；
 - commitment type 和生命周期状态。
 
-挑战状态机 `6/6` 回归通过，包括真实 ERC-20 escrow 锁定与退款、quorum 不足拒绝和补偿后迟到响应拒绝。
+挑战状态机 `7/7` 回归通过，包括真实 ERC-20 escrow 锁定与退款、成功 RESPONSE 后永久锁仓结算、quorum 不足拒绝和补偿后迟到响应拒绝。
 
 ## 两两启动
 

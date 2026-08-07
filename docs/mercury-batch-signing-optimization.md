@@ -235,15 +235,14 @@ batch 固定签名成本 + 每条消息的 Merkle proof 成本 + 每条消息目
 | 模块 | 作用 |
 |---|---|
 | `shared/hxmsg/batch.js` | leaf、Merkle root、batch digest 计算 |
-| `tee-verifier/core/batch-consensus.js` | batch append/commit 流程 |
-| `tee-verifier/core/batch-certification.js` | batch 签名生成 |
-| `contracts/HXMsgBatchLib.sol` | Solidity leaf 和 batch digest 计算 |
+| `tee-verifier/server.js` | 当前 batch append/commit、验证与 certification 流程 |
+| `shared/tee/quorum-certificate.js` | 当前 quorum 签名集合生成 |
+| `contracts/HXMsgLib.sol` | Solidity leaf、batch digest 和证书结构 |
 | `contracts/HXMsgGateway.sol` | 新增 EVM batch 执行入口 |
 | `fabric-chaincode/xcall/index.js` | 新增 Fabric batch 执行入口 |
-| `scripts/run-hxmsg-batch-forward-tests.js` | Fabric -> EVM batch 测试 |
-| `scripts/run-evm-fabric-batch-tests.js` | EVM -> Fabric batch 测试 |
+| `scripts/run-automation-ethereum-fabric-batch-experiments.js` | 经 Relayer/Watcher 的双向 batch 测试 |
 
-现有单条路径保留，用于：
+Automation 单条路径保留，用于：
 
 1. 低频消息。
 2. 延迟敏感消息。

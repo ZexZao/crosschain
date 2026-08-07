@@ -15,10 +15,14 @@ const {
   CommitmentType,
   FeedbackType,
   getExecutionData,
+  buildDeliveryMessage,
 } = require('../shared/hxmsg');
+const { buildReceiptProof } = require('../shared/evm/receipt-proof');
+const { buildCommitteeHeaderUpdate } = require('../shared/evm/header-committee');
 const { buildHXMsgFromFabricEvent, TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
+const { buildEvmExecutionProofRef, buildExecutedResponse } = require('../hxmsg-builder/response');
 const { writeJSON } = require('../shared/utils');
-const { registerEVMTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
+const { registerEVMTEEs, registerFabricTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
 const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
@@ -95,16 +99,54 @@ async function relayToEvm(hxmsg, teeUrl, deployment) {
   await registerEVMTEEs({ registry, certificate: cluster, teeURLs: TEE_URLS });
   const gateway = new ethers.Contract(
     deployment.hxmsgGateway,
-    [`function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,${CLUSTER_CERT_ABI}) external`],
+    [`function executeHXMsgMinimalCompactCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,bytes32,uint64),address,(uint16 opCode,bytes32 recordIdHash,bytes32 actorHash,address actorAddress,int256 amount,bytes32 metadataHash,bool requireAck),${CLUSTER_CERT_ABI}) external`],
     signer
   );
-  const receipt = await (await gateway.executeHXMsgMinimalCluster(
+  const receipt = await (await gateway.executeHXMsgMinimalCompactCluster(
     toMinimalHXMsg(hxmsg),
     deployment.targetContract,
-    getExecutionData(hxmsg).callData,
+    getExecutionData(hxmsg).compactCall,
     clusterCertificateTuple(cluster)
   )).wait();
   return { teeCluster: cluster, receipt, verificationResult: teeResp.data.verificationResult };
+}
+
+async function completeFabricResponse({ contract, provider, hxmsg, relay, teeUrl, deployment }) {
+  await registerFabricTEEs({ contract, certificate: relay.teeCluster, teeURLs: TEE_URLS });
+  await contract.submitTransaction(
+    'BindResponseLifecycleHXMsg', JSON.stringify(hxmsg), JSON.stringify(relay.teeCluster)
+  );
+  const evmReceipt = await provider.getTransactionReceipt(relay.receipt.hash);
+  const evmProof = await buildReceiptProof({
+    provider, blockNumber: evmReceipt.blockNumber, txHash: evmReceipt.hash,
+  });
+  const response = buildExecutedResponse({
+    originRequestID: hxmsg.header.requestID,
+    originHmsgDigest: hxmsg.hmsgDigest,
+    targetExecutionHash: (hxmsg.deliveryMessage || buildDeliveryMessage(hxmsg)).targetExecutionHash,
+    targetProofRefHash: buildEvmExecutionProofRef(evmReceipt),
+    responsePayload: { txHash: evmReceipt.hash, status: 'executed' },
+  });
+  const responseAttest = await axios.post(`${teeUrl}/attest-response`, {
+    response,
+    helperData: {
+      originHxmsg: hxmsg,
+      evmExecutionReceipt: evmProof,
+      committeeHeaderUpdate: buildCommitteeHeaderUpdate({
+        header: evmProof.blockHeader,
+        chainID: `eip155:${deployment.chainId}`,
+      }),
+      evmChainID: `eip155:${deployment.chainId}`,
+    },
+  }, { timeout: 30000, proxy: false });
+  const voucher = responseAttest.data.teeClusterCertification;
+  await registerFabricTEEs({ contract, certificate: voucher, teeURLs: TEE_URLS });
+  await contract.submitTransaction(
+    'CompleteWithResponse', hxmsg.header.requestID, JSON.stringify(response), JSON.stringify(voucher)
+  );
+  return JSON.parse((await contract.evaluateTransaction(
+    'QueryResponseLifecycle', hxmsg.header.requestID
+  )).toString());
 }
 
 async function main() {
@@ -133,6 +175,7 @@ async function main() {
     cases: [],
   };
   try {
+    await contract.submitTransaction('InitializeWatcherAuthorization');
     const owner = 'fabric.asset.ownerA';
     const assetType = 'XCST';
     await contract.submitTransaction('InitAssetBalance', owner, assetType, '1000.0000');
@@ -147,7 +190,7 @@ async function main() {
       amount,
       assetType,
       reason: 'real_crosschain_transfer',
-      requireAck: false,
+      requireAck: true,
     };
     const { normalized, compactCallHash } = encodeCompactBusinessCall(businessPayload);
     const payload = {
@@ -160,6 +203,21 @@ async function main() {
       businessPayloadHash: hashJson(normalized),
       receiver: addressToBytes32(receiver),
       expireAt: Math.floor(Date.now() / 1000) + 3600,
+      feedback: {
+        required: true,
+        expectedMsgType: FeedbackType.RESPONSE,
+        timeout: Math.floor(Date.now() / 1000) + 3600,
+        callbackRefHash: ethers.ZeroHash,
+      },
+      atomicity: {
+        required: true,
+        mode: AtomicityMode.COMMIT_OR_COMPENSATE,
+        commitmentType: CommitmentType.TOKEN_ESCROW,
+        commitmentRefHash: ethers.keccak256(ethers.toUtf8Bytes('fabric-transfer-escrow')),
+        successActionHash: ethers.keccak256(ethers.toUtf8Bytes('fabric-transfer-success')),
+        failureActionHash: ethers.keccak256(ethers.toUtf8Bytes('fabric-transfer-refund')),
+        challengeWindow: 60,
+      },
     };
 
     const lockTx = contract.createTransaction('LockAssetXCall');
@@ -181,6 +239,12 @@ async function main() {
     });
     const tokenBefore = await token.balanceOf(receiver);
     const relay = await relayToEvm(hxmsg, teeUrl, deployment);
+    const settledLifecycle = await completeFabricResponse({
+      contract, provider, hxmsg, relay, teeUrl, deployment,
+    });
+    const settledEscrow = JSON.parse((await contract.evaluateTransaction(
+      'QueryAssetEscrow', lockResp.requestID
+    )).toString());
     const tokenAfter = await token.balanceOf(receiver);
     const minted = await target.assetAmountByRequest(hxmsg.header.requestID);
     const recipient = await target.assetRecipientByRequest(hxmsg.header.requestID);
@@ -190,7 +254,9 @@ async function main() {
       && escrow.status === 'Locked'
       && tokenAfter - tokenBefore === expectedUnits
       && minted === expectedUnits
-      && recipient.toLowerCase() === receiver.toLowerCase();
+      && recipient.toLowerCase() === receiver.toLowerCase()
+      && settledLifecycle.status === 'Completed'
+      && settledEscrow.status === 'Settled';
 
     result.cases.push({
       caseId: 'ASSET-001',
@@ -199,7 +265,8 @@ async function main() {
       requestID: hxmsg.header.requestID,
       fabricOwnerBalanceBefore: before.balanceUnits,
       fabricOwnerBalanceAfterLock: afterLock.balanceUnits,
-      fabricEscrow: escrow,
+      fabricEscrow: settledEscrow,
+      responseLifecycle: settledLifecycle,
       evmReceiver: receiver,
       evmTokenBefore: tokenBefore.toString(),
       evmTokenAfter: tokenAfter.toString(),
@@ -255,7 +322,7 @@ async function main() {
     const refundResp = JSON.parse((await contract.submitTransaction('CompensateAfterChallenge', refundLock.requestID, failureData)).toString());
     const afterRefund = await queryBalance(contract, owner, assetType);
     const refundEscrow = JSON.parse((await contract.evaluateTransaction('QueryAssetEscrow', refundLock.requestID)).toString());
-    const commitment = JSON.parse((await contract.evaluateTransaction('QueryCommitment', refundLock.requestID)).toString());
+    const commitment = JSON.parse((await contract.evaluateTransaction('QueryResponseLifecycle', refundLock.requestID)).toString());
     const refundUnits = amountUnits(refundAmount);
     const refundPass = BigInt(afterRefund.balanceUnits) - BigInt(beforeRefund.balanceUnits) === refundUnits
       && refundResp.status === 'Compensated'

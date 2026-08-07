@@ -12,6 +12,7 @@ const {
   decodeJsonRef,
   hashBytes,
   hashJson,
+  bytes32FromText,
   buildFabricHFsvPolicy,
   buildDefaultFabricHFsvPolicy,
   computeAtomicityHash,
@@ -299,6 +300,10 @@ function validateHXMsgEnvelope({ hxmsg, ref, policy }) {
   if (ref.channelID !== policy.channelID || ref.chaincodeName !== policy.chaincodeName) {
     throw new Error('sourceRef does not match h-FSV policy channel/chaincode');
   }
+  const expectedNonceScope = bytes32FromText(`fabric:${ref.channelID}:${ref.chaincodeName}`);
+  if (!sameHex(hxmsg.header.nonceScope, expectedNonceScope)) {
+    throw new Error('Fabric nonceScope is not bound to the endorsed channel and chaincode');
+  }
 }
 
 function validatePayloadBinding({ hxmsg, ref, hfsv, auditRecord = {} }) {
@@ -313,7 +318,7 @@ function validatePayloadBinding({ hxmsg, ref, hfsv, auditRecord = {} }) {
   if (Number(record.expireAt) !== Number(hxmsg.header.deliveryExpireAt)) throw new Error('Fabric state expireAt mismatch');
   if (record.status !== 'COMMITTED') throw new Error(`Fabric state status is not COMMITTED: ${record.status}`);
   if (hfsv.payloadHash.toLowerCase() !== hxmsg.payloadBinding.sourcePayloadHash.toLowerCase()) {
-    throw new Error('sourcePayloadHash mismatch');
+    throw new Error(`sourcePayloadHash mismatch: view=${hfsv.payloadHash}, hxmsg=${hxmsg.payloadBinding.sourcePayloadHash}`);
   }
   if (String(record.callDataHash).toLowerCase() !== hxmsg.targetAction.callDataHash.toLowerCase()) {
     throw new Error('callDataHash mismatch');

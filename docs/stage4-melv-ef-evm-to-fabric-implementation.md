@@ -24,8 +24,8 @@ TEE 独立验证源链交易和事件存在性
 | 5 TEE 集群 / Raft | 已实现 5 个 TEE 节点，支持 leader election、heartbeat、日志复制、commitIndex，阈值默认 3/5 |
 | Fabric h-xmsg 入站入口 | 已实现 `ExecuteHXMsg` |
 | Fabric TEE registry | 已实现 `RegisterTrustedTEE` / `QueryTrustedTEE` |
-| EVM -> Fabric 测试 | 已实现 `npm run hxmsg:test:evm-fabric` |
-| Fabric -> EVM 回归 | 已通过 `npm run hxmsg:test:forward` |
+| EVM -> Fabric 测试 | 已迁移到 `npm run automation:test:evm-fabric` |
+| Fabric -> EVM 回归 | 已迁移到 `npm run automation:test:fabric-evm` |
 
 ## 3. 主要修改文件
 
@@ -41,8 +41,7 @@ TEE 独立验证源链交易和事件存在性
 | `tee-verifier/core/certification.js` | Fabric 目标链签名 `hmsgDigest`，EVM 目标链签名 `deliveryDigest` |
 | `fabric-chaincode/xcall/index.js` | 新增 h-xmsg 入站执行、TEE 签名阈值验证、执行记录 |
 | `scripts/request-evm-fabric-call.js` | 调用统一 EVM `submitHXMsgRequest(..., policy)`，普通消息和 RESPONSE 消息仅策略字段不同 |
-| `scripts/run-evm-fabric-tests.js` | EVM -> Fabric 自动化测试 |
-| `scripts/run-evm-fabric-tests.js` | 当前 EVM -> Fabric 主线测试入口，直接完成 `/attest` + `ExecuteHXMsg` |
+| `scripts/run-automation-evm-fabric-e2e.js` | 当前 EVM -> Fabric 主线测试入口；只发源链交易并等待 automation workflow |
 | `docker-compose.yml` | 增加 5 个 TEE 节点 |
 | `shared/hxmsg/evm-melv-policy.js` | 新增 EVM finality policy 构造 |
 
@@ -201,7 +200,7 @@ TEE 从单节点升级为 5 节点集群后，Fabric -> EVM 也改为经过 Raft
 EVM -> Fabric：
 
 ```text
-npm run hxmsg:test:evm-fabric
+npm run automation:test:evm-fabric
 FINAL 1/1 passed, 0 failed
 ```
 
@@ -224,7 +223,7 @@ Fabric inbound status: executed
 Fabric -> EVM 回归：
 
 ```text
-npm run hxmsg:test:forward
+npm run automation:test:fabric-evm
 FINAL 8/8 passed, 0 failed
 ```
 

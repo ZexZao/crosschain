@@ -392,6 +392,7 @@ async function main() {
       owner: escrow.owner,
       amount: escrow.amount.toString(),
       refunded: escrow.refunded,
+      settled: escrow.settled,
     };
     test.gas = {
       submitTokenEscrowHXMsgRequest: gasOf(submitReceipt),
@@ -404,7 +405,49 @@ async function main() {
       && lockedInSource === beforeSource + amount
       && finalOwner === beforeOwner
       && finalSource === beforeSource
-      && escrow.refunded;
+      && escrow.refunded
+      && !escrow.settled;
+    cases.push(test);
+  }
+
+  {
+    const startedMs = nowMs();
+    const test = { caseId: 'CR-EVM-007', name: 'TOKEN_ESCROW RESPONSE -> permanent source lock settlement', pass: false };
+    const req = await submitTokenEscrowAtomic(source, token, deployer, { amount: 765400n });
+    const ownerAfterLock = await token.balanceOf(deployer.address);
+    const sourceAfterLock = await token.balanceOf(await source.getAddress());
+    const response = buildResponse(req.requestID, req.record);
+    const cert = await clusterCertFor(teeIdentities, response.digest, threshold);
+    const completeReceipt = await (await source.completeWithResponse(req.requestID, responseTuple(response), cert)).wait();
+    const ownerAfterSettlement = await token.balanceOf(deployer.address);
+    const sourceAfterSettlement = await token.balanceOf(await source.getAddress());
+    const escrow = await source.tokenEscrows(req.requestID);
+    const record = await source.requests(req.requestID);
+    test.status = Number(record.status);
+    test.escrow = {
+      token: escrow.token,
+      owner: escrow.owner,
+      amount: escrow.amount.toString(),
+      refunded: escrow.refunded,
+      settled: escrow.settled,
+    };
+    test.balances = {
+      ownerAfterLock: ownerAfterLock.toString(),
+      sourceAfterLock: sourceAfterLock.toString(),
+      ownerAfterSettlement: ownerAfterSettlement.toString(),
+      sourceAfterSettlement: sourceAfterSettlement.toString(),
+    };
+    test.durationMs = nowMs() - startedMs;
+    test.gas = {
+      submitTokenEscrowHXMsgRequest: req.submitGas,
+      completeWithResponse: gasOf(completeReceipt),
+      total: req.submitGas + gasOf(completeReceipt),
+    };
+    test.pass = test.status === 3
+      && escrow.settled
+      && !escrow.refunded
+      && ownerAfterSettlement === ownerAfterLock
+      && sourceAfterSettlement === sourceAfterLock;
     cases.push(test);
   }
 

@@ -265,22 +265,57 @@ contract TargetContract {
         }
         if (compact.opCode == 3) {
             require(compact.amount > 0, "zero amount");
-            return (address(receivableService), keccak256(bytes("RECEIVABLE_ATTESTED")));
+            status = receivableService.attestReceivableCompact(
+                requestID,
+                compact.recordIdHash,
+                compact.actorHash,
+                uint256(compact.amount),
+                compact.metadataHash
+            );
+            return (address(receivableService), status);
         }
         if (compact.opCode == 4) {
-            return (address(logisticsService), keccak256(bytes("LOGISTICS_SYNCED")));
+            status = logisticsService.syncLogisticsCompact(
+                requestID,
+                compact.recordIdHash,
+                compact.actorHash,
+                compact.amount,
+                compact.metadataHash
+            );
+            return (address(logisticsService), status);
         }
         if (compact.opCode == 5) {
             require(compact.amount > 0, "zero duration");
-            return (address(consentService), keccak256(bytes("CONSENT_GRANTED")));
+            status = consentService.grantConsentCompact(
+                requestID,
+                compact.recordIdHash,
+                compact.actorHash,
+                uint256(compact.amount),
+                compact.metadataHash
+            );
+            return (address(consentService), status);
         }
         if (compact.opCode == 6) {
             require(compact.amount >= 0, "bad oracle amount");
-            return (address(oracleService), keccak256(bytes("ORACLE_UPDATED")));
+            status = oracleService.updateFeedCompact(
+                requestID,
+                compact.recordIdHash,
+                compact.actorHash,
+                uint256(compact.amount),
+                compact.metadataHash
+            );
+            return (address(oracleService), status);
         }
         if (compact.opCode == 7) {
             require(compact.amount > 0, "zero threshold");
-            return (address(approvalService), keccak256(bytes("APPROVAL_COMMITTED")));
+            status = approvalService.commitApprovalCompact(
+                requestID,
+                compact.recordIdHash,
+                compact.actorHash,
+                uint256(compact.amount),
+                compact.metadataHash
+            );
+            return (address(approvalService), status);
         }
         revert("unsupported compact op");
     }

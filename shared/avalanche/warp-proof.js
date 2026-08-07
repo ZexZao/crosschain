@@ -94,10 +94,11 @@ function parseAddressedCall(addressedCallBytes) {
 
 function decodeHXMsgWarpPayload(payloadHex) {
   const [decoded] = ethers.AbiCoder.defaultAbiCoder().decode(
-    ['tuple(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bytes32 policyHash,bytes callData)'],
+    ['tuple(bytes32 requestID,bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,tuple(bool required,uint8 mode,uint8 commitmentType,bytes32 commitmentRefHash,bytes32 successActionHash,bytes32 failureActionHash,uint64 challengeWindow) atomicity,bytes32 validatorPolicyHash,bytes callData)'],
     payloadHex
   );
   return {
+    requestID: decoded.requestID,
     targetChainID: decoded.targetChainID,
     targetDomainID: decoded.targetDomainID,
     targetObject: decoded.targetObject,
@@ -107,7 +108,24 @@ function decodeHXMsgWarpPayload(payloadHex) {
     receiver: decoded.receiver,
     nonce: Number(decoded.nonce),
     expireAt: Number(decoded.expireAt),
-    policyHash: decoded.policyHash,
+    feedback: {
+      required: decoded.feedbackRequired,
+      expectedMsgType: Number(decoded.expectedFeedbackMsgType),
+      timeout: Number(decoded.feedbackTimeout),
+      callbackRefHash: decoded.callbackRefHash,
+    },
+    atomicity: {
+      required: decoded.atomicity.required,
+      mode: Number(decoded.atomicity.mode),
+      commitmentType: Number(decoded.atomicity.commitmentType),
+      commitmentRefHash: decoded.atomicity.commitmentRefHash,
+      successActionHash: decoded.atomicity.successActionHash,
+      failureActionHash: decoded.atomicity.failureActionHash,
+      challengeWindow: Number(decoded.atomicity.challengeWindow),
+    },
+    validatorPolicyHash: decoded.validatorPolicyHash,
+    // 兼容只读取验证者策略哈希的调用方；不再表示响应/原子性策略。
+    policyHash: decoded.validatorPolicyHash,
     callData: decoded.callData,
   };
 }

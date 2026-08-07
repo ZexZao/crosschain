@@ -75,6 +75,16 @@ function computeTargetExecutionHash({ requestID, targetChainID, targetObject, fu
   );
 }
 
+function computeReplayScope(hxmsg) {
+  hxmsg = toCanonicalHXMsg(hxmsg);
+  return ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['uint8', 'bytes32', 'bytes32', 'bytes32'],
+      [hxmsg.source.chainType, hxmsg.source.chainID, hxmsg.source.domainID, hxmsg.header.nonceScope]
+    )
+  );
+}
+
 function computeHXMsgDigest(hxmsg) {
   hxmsg = toCanonicalHXMsg(hxmsg);
   const headerHash = ethers.keccak256(
@@ -182,6 +192,8 @@ function toMinimalHXMsg(hxmsg) {
     feedback.timeout,
     feedback.callbackRefHash,
     hxmsg.header.deliveryExpireAt,
+    computeReplayScope(hxmsg),
+    hxmsg.header.nonce,
   ];
 }
 
@@ -221,10 +233,16 @@ function computeHXMsgDeliveryDigest(hxmsg) {
       [minimal[10], minimal[11], minimal[12], minimal[13], minimal[14]]
     )
   );
+  const replayHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'uint64'],
+      [minimal[15], minimal[16]]
+    )
+  );
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'bytes32'],
-      [chainHash, actionHash, feedbackHash]
+      ['bytes32', 'bytes32', 'bytes32', 'bytes32'],
+      [chainHash, actionHash, feedbackHash, replayHash]
     )
   );
 }
@@ -287,6 +305,7 @@ module.exports = {
   computeFeedbackHash,
   computeAtomicityHash,
   computeTargetExecutionHash,
+  computeReplayScope,
   computeHXMsgDigest,
   computeHXMsgDeliveryDigest,
   computeResponseDigest,

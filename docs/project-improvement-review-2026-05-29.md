@@ -273,22 +273,16 @@ Mercury 提到 TEE 可以对一批交易签名以降低成本。当前项目仍�
 5. batch signing 优化前后差异。
 6. 本地 Docker 与真实 TEE 服务器的差异。
 
-## 5. 当前不建议删除但可标记为后续整理的目录
+## 5. 后续目录整理结果
 
-以下目录当前不是主路径，但可以作为后续工程化入口保留：
-
-| 目录 | 当前状态 | 建议 |
-|---|---|---|
-| `relayer/` | 当前为空 | 后续放常驻 watcher/router/responder |
-| `proof-builder/` | 当前为空 | 后续放独立 proof 构造模块 |
-| `source-chain/` | 当前为空 | 后续如保留示例源链再使用，否则可删除 |
+旧根目录 `relayer/`、`proof-builder/`、`source-chain/` 已删除。当前常驻 Relayer/Watcher 位于 `automation/`，源链扫描和证明构造位于 `automation/shared/adapters/<chain>/`，不再保留空占位目录。
 
 ## 6. 建议改进顺序
 
 1. 固定 TEE cluster threshold，不允许 relayer 传入安全阈值。
 2. 设计并实现 TEE attestation identity 注册。
 3. 设计正式 Header Committee epoch / rotation。
-4. 为 relayer / watcher / responder 建立常驻进程。
+4. 将单进程 Automation JSON store 迁移到支持多实例事务和租约 fencing 的数据库。
 5. 增加多组织 Fabric 实验。
 6. 实现 compensation executor / escrow 合约。
 7. 增加 batch signing。

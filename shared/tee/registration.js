@@ -76,15 +76,47 @@ async function registerEVMTEEs({ registry, certificate, certificates, teeURLs = 
   let gasUsed = 0n;
   const participantAddresses = uniqueParticipantAddresses(certificates || [certificate]);
   const addresses = Array.from(new Set([...byAddress.keys(), ...participantAddresses]));
+  const managedRunner = registry.runner;
+  const signer = managedRunner?.signer || managedRunner;
+  if (!signer?.provider) throw new Error('EVM TEE registry signer with provider is required');
+  const signerAddress = await signer.getAddress();
+  const readNonce = async () => Math.max(
+    await signer.provider.getTransactionCount(signerAddress, 'latest'),
+    await signer.provider.getTransactionCount(signerAddress, 'pending')
+  );
+  let nextNonce = await readNonce();
+  const writer = registry.connect(signer);
   for (const address of addresses) {
     if (await registry.isActiveTEE(address)) continue;
     const identity = byAddress.get(address);
     if (!identity) throw new Error(`TEE identity not found for ${address}`);
-    const tx = await registry.registerTEE(evmRegistrationTuple(identity));
-    const receipt = await tx.wait();
-    registered += 1;
-    gasUsed += receipt.gasUsed || 0n;
+    let completed = false;
+    for (let attempt = 1; attempt <= 3 && !completed; attempt += 1) {
+      try {
+        const tx = await writer.registerTEE(evmRegistrationTuple(identity), { nonce: nextNonce });
+        nextNonce += 1;
+        const receipt = await tx.wait();
+        registered += 1;
+        gasUsed += receipt.gasUsed || 0n;
+        completed = true;
+      } catch (error) {
+        if (await registry.isActiveTEE(address)) {
+          completed = true;
+          nextNonce = await readNonce();
+          break;
+        }
+        const code = String(error.code || '');
+        const message = String(error.info?.error?.message || error.message || '').toLowerCase();
+        const nonceError = code === 'NONCE_EXPIRED'
+          || message.includes('nonce too low')
+          || message.includes('nonce has already been used')
+          || message.includes('replacement transaction underpriced');
+        if (!nonceError || attempt === 3) throw error;
+        nextNonce = await readNonce();
+      }
+    }
   }
+  if (typeof managedRunner?.reset === 'function') managedRunner.reset();
   return { registered, gasUsed };
 }
 

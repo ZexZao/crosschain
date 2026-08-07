@@ -66,7 +66,8 @@ decimals = 4
 
 | 分类 | op | 服务合约 | 真实动作 |
 |---|---|---|---|
-| 资产结算 | `asset_lock`, `mint_confirm`, `token_transfer`, `subsidy_confirm` | `CrossChainAssetService` | 给目标 EVM 地址真实 mint `CrossChainToken` |
+| 资产结算 | `asset_lock`, `mint_confirm`, `subsidy_confirm` | `CrossChainAssetService` | 给目标 EVM 地址真实 mint `CrossChainToken` |
+| 储备转账 | `token_transfer` | `CrossChainAssetService` | 从目标链预置储备真实调用 ERC20 `transfer` |
 | 应收账款 | `receivable_attest` | `ReceivableRegistryService` | 登记应收账款、金额、供应商和证明哈希 |
 | 物流状态 | `logistics_sync` | `LogisticsTrackerService` | 更新 waybill 读数和检查方 |
 | 授权许可 | `medical_consent` | `ConsentRegistryService` | 创建带到期时间的 consent grant |
@@ -74,6 +75,18 @@ decimals = 4
 | 多方审批 | `approval_commit` | `ApprovalWorkflowService` | 登记审批人、阈值和通过结果 |
 
 资产类 op 不再接受非 EVM 地址作为接收方；测试脚本会在构造 payload 时填入可验证的目标地址。因此“转账/发放”不是状态文字变化，而是 ERC20 balance 的真实变化。
+
+compact 路径不会只写 `CompactBusinessRecord`。应收账款、物流、授权、Oracle 和审批分别调用对应服务的 compact 方法，并写入：
+
+```text
+compactReceivables[requestID]
+compactWaybills[requestID]
+compactConsents[requestID]
+compactLatestRound[feedIdHash]
+compactDecisions[requestID]
+```
+
+这些记录保存 h-xmsg 已绑定的 `recordIdHash / actorHash / amount / metadataHash`，既避免恢复链下明文，也形成可由其他合约消费的领域状态。
 
 可查询：
 
@@ -173,8 +186,9 @@ tokenEscrows:{requestID}
 2. 用户调用 `submitTokenEscrowHXMsgRequest`。
 3. EVM 源合约真实 `transferFrom(user, sourceContract, amount)`。
 4. 若目标链 RESPONSE 按时返回，请求可进入 `Completed`。
-5. 若 feedback timeout 后进入 challenge，且 challenge window 结束仍无 RESPONSE，则 `compensateAfterChallenge` 自动识别 `TOKEN_ESCROW`。
-6. 源合约真实 `transfer(user, amount)` 退回 token，并把 escrow 标记为 `refunded`。
+5. `TOKEN_ESCROW` 同时标记为 `settled`，资产继续锁在源链合约中作为目标链资产支撑，并永久退出退款路径。
+6. 若 feedback timeout 后进入 challenge，且 challenge window 结束仍无 RESPONSE，则 `compensateAfterChallenge` 自动识别 `TOKEN_ESCROW`。
+7. 源合约真实 `transfer(user, amount)` 退回 token，并把 escrow 标记为 `refunded`。
 
 ## 7. 测试变化
 
@@ -223,6 +237,7 @@ EVM challenge-response 状态机测试新增：
 
 ```text
 CR-EVM-006 TOKEN_ESCROW timeout -> ERC20 refund
+CR-EVM-007 TOKEN_ESCROW RESPONSE -> permanent source lock settlement
 ```
 
 该用例证明 EVM 源合约真实锁定 ERC20，并在 challenge timeout 后自动退回。
@@ -236,11 +251,11 @@ runtime/real-asset-transfer-refund-summary.md
 
 ## 8. 当前边界
 
-当前实现已经让测试用例中的业务动作在目标链形成真实动作，并让资产类实验具备真实锁定、发放和自动退款。但仍有以下边界：
+当前实现已经让 full/compact 测试用例中的业务动作在目标链形成领域状态，并让资产类实验具备真实锁定、发放、成功结算和自动退款。但仍有以下边界：
 
 - 尚未实现可插拔 handler registry，当前分发逻辑按 `op` 和 `commitmentType` 内置处理。
-- 尚未实现成功 RESPONSE 后的 escrow release / burn / settlement 扩展策略。
-- 当前补偿闭环重点覆盖 `TOKEN_ESCROW`，即真实资产退款；授权撤销、oracle 回滚等补偿服务尚未扩展。
+- 成功 RESPONSE 当前采用 lock-and-mint 的永久锁仓结算；生产环境仍需设计独立 vault、储备审计和治理迁移规则。
+- 当前补偿闭环只对具有真实 escrow 的 `TOKEN_ESCROW` 执行退款；授权撤销、Oracle 回滚等业务必须先定义前状态和可逆资源，不能用通用状态翻转冒充补偿。
 
 后续如果要让补偿也具备通用业务执行能力，应增加：
 

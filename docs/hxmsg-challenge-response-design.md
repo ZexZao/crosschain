@@ -10,14 +10,14 @@
 
 1. `shared/hxmsg` 已增加 `atomicity` 规范化与摘要计算，`atomicity` 参与 `hmsgDigest`。
 2. `shared/hxmsg` 已增加 `ResponseProof` 摘要计算。
-3. `contracts/EvmSourceContract.sol` 已实现统一源链入口 `submitHXMsgRequest(..., policy)`，普通消息和需要 RESPONSE 的消息只通过 `feedback / atomicity` 策略字段区分，并保留 `startChallenge / completeWithResponse / compensateAfterChallenge` 状态收束接口。
-4. `fabric-chaincode/xcall/index.js` 已实现 `commitment:{requestID}`、`StartChallenge / CompleteWithResponse / CompensateAfterChallenge / QueryCommitment`。
+3. `contracts/ResponseLifecycleBase.sol` 为 EVM 和 Avalanche 源合约共享 `startChallenge / completeWithResponse / compensateAfterChallenge`；普通消息、response-only 和原子消息只通过策略字段区分。
+4. `fabric-chaincode/xcall/index.js` 已实现 `responseLifecycle:{requestID}`、`BindResponseLifecycleHXMsg / StartChallenge / CompleteWithResponse / CompensateAfterChallenge / QueryResponseLifecycle`。
 5. `tee-verifier/server.js` 已增加 `/attest-response`，对 `ResponseProof` 进行 TEE quorum certification。
 6. `scripts/run-challenge-response-tests.js` 已覆盖 EVM 侧核心状态机路径，结果保存到 `runtime/hxmsg-challenge-response-results.json`。
-7. `scripts/run-fabric-evm-challenge-e2e.js` 已覆盖 Fabric -> EVM 完整闭环：Fabric h-FSV view -> TEE quorum -> EVM target execution -> EVM receipt proof -> TEE RESPONSE quorum -> Fabric commitment Completed，结果保存到 `runtime/hxmsg-fabric-evm-challenge-e2e-results.json`。
+7. `scripts/run-fabric-evm-challenge-e2e.js` 已覆盖 Fabric -> EVM response-only 完整闭环：Fabric h-FSV view -> TEE quorum -> EVM target execution -> EVM receipt proof -> TEE RESPONSE quorum -> Fabric response lifecycle Completed，结果保存到 `runtime/hxmsg-fabric-evm-challenge-e2e-results.json`。
 8. `scripts/run-evm-fabric-challenge-e2e.js` 已覆盖 EVM -> Fabric 完整闭环：EVM receipt MPT proof -> TEE quorum -> Fabric ExecuteHXMsg -> Fabric execution record -> TEE RESPONSE quorum -> EVM source Completed，结果保存到 `runtime/hxmsg-evm-fabric-challenge-e2e-results.json`。
 
-Fabric 源端 atomic commitment 还会通过 `BindCommitmentHXMsg` 绑定 TEE quorum 证明过的完整 `hmsgDigest`。因此 Fabric -> EVM 的 RESPONSE 完成条件不只检查 `requestID / targetExecutionHash / responseDigest`，还要求 `response.originHmsgDigest` 与源端已绑定的 `hmsgDigest` 一致。
+Fabric 源端 response lifecycle 会通过 `BindResponseLifecycleHXMsg` 绑定 TEE quorum 证明过的完整 `hmsgDigest`。因此 Fabric -> EVM 的 RESPONSE 完成条件不只检查 `requestID / targetExecutionHash / responseDigest`，还要求 `response.originHmsgDigest` 与源端已绑定的 `hmsgDigest` 一致。response-only 消息也使用同一路径，但不能发起 challenge 或补偿。
 
 当前仍未实现常驻 watcher / responder。状态机由链上合约/链码最终检查 deadline，测试脚本或后续 watcher 负责触发调用。
 
@@ -277,6 +277,8 @@ TEE 不应签发“目标链未执行”作为事实证明。未执行通常难�
 3. challengeWindow 内允许任意角色补交 RESPONSE。
 4. RESPONSE 验证通过后，源链进入 Completed。
 5. challengeWindow 结束仍无有效 RESPONSE，源链进入 Compensated。
+
+对 `TOKEN_ESCROW`，`Completed` 与 `Compensated` 都必须对应真实资源动作：有效 RESPONSE 使 escrow 进入不可退款的 `Settled`，作为目标链资产的源链锁仓支撑；超时补偿使 escrow 进入 `Refunded` 并真实恢复用户余额。没有可逆资源或前状态的业务不得仅修改 commitment 状态来声称已经补偿。
 ```
 
 源链不应信任提交者身份，而应只验证 RESPONSE：

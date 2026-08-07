@@ -2,6 +2,7 @@ const { ethers } = require('ethers');
 const {
   computeTargetExecutionHash,
   computeHXMsgDigest,
+  computeReplayScope,
   normalizeFeedback,
 } = require('./hash');
 const { toCanonicalHXMsg } = require('./canonical');
@@ -28,6 +29,8 @@ function buildDeliveryMessage(hxmsgOrEnvelope, executionData = {}) {
     targetExecutionHash,
     feedback,
     deliveryExpireAt: hxmsg.header.deliveryExpireAt,
+    replayScope: computeReplayScope(hxmsg),
+    sourceNonce: hxmsg.header.nonce,
   };
 }
 
@@ -49,6 +52,8 @@ function toMinimalHXMsgV2(hxmsgOrEnvelope) {
     delivery.feedback.timeout,
     delivery.feedback.callbackRefHash,
     delivery.deliveryExpireAt,
+    delivery.replayScope,
+    delivery.sourceNonce,
   ];
 }
 
@@ -74,10 +79,16 @@ function computeDeliveryDigest(deliveryOrHxmsg) {
       [minimal[10], minimal[11], minimal[12], minimal[13], minimal[14]]
     )
   );
+  const replayHash = ethers.keccak256(
+    ethers.AbiCoder.defaultAbiCoder().encode(
+      ['bytes32', 'uint64'],
+      [minimal[15], minimal[16]]
+    )
+  );
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'bytes32'],
-      [chainHash, actionHash, feedbackHash]
+      ['bytes32', 'bytes32', 'bytes32', 'bytes32'],
+      [chainHash, actionHash, feedbackHash, replayHash]
     )
   );
 }

@@ -6,6 +6,52 @@ x-tee-base: &tee-base
   command: sh -c "node tee-verifier/server.js"
 
 services:
+  automation:
+    image: node:20
+    working_dir: /app
+    volumes:
+      - ./:/app
+    ports:
+      - "9200:9200"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: sh -c "node automation/server.js"
+    environment:
+      AUTOMATION_PORT: 9200
+      AUTOMATION_STORE_FILE: /app/runtime/automation-tasks.json
+      AUTOMATION_ROLE: ${AUTOMATION_ROLE:-all}
+      AUTOMATION_ENABLED_CHAINS: ${AUTOMATION_ENABLED_CHAINS:-}
+      SEPOLIA_RPC_URL: ${SEPOLIA_RPC_URL:-}
+      SEPOLIA_PRIVATE_KEY: ${SEPOLIA_PRIVATE_KEY:-}
+      DEPLOYER_PRIVATE_KEY: ${DEPLOYER_PRIVATE_KEY:-}
+      SEPOLIA_BEACON_API_URL: ${SEPOLIA_BEACON_API_URL:-}
+      SEPOLIA_LIGHT_CLIENT_BEACON_API_URL: ${SEPOLIA_LIGHT_CLIENT_BEACON_API_URL:-}
+      SEPOLIA_TRUSTED_BLOCK_ROOT: ${SEPOLIA_TRUSTED_BLOCK_ROOT:-}
+      SEPOLIA_MAX_ANCESTOR_HEADERS: ${SEPOLIA_MAX_ANCESTOR_HEADERS:-512}
+      SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT: ${SEPOLIA_ALLOW_DYNAMIC_TRUSTED_ROOT:-false}
+      SEPOLIA_UPDATE_ENV_TRUSTED_ROOT: ${SEPOLIA_UPDATE_ENV_TRUSTED_ROOT:-true}
+      SEPOLIA_DEPLOYMENT_FILE: ${SEPOLIA_DEPLOYMENT_FILE:-runtime/deployment.sepolia.json}
+      LOCAL_EVM_PRIVATE_KEY: ${LOCAL_EVM_PRIVATE_KEY:-}
+      AVALANCHE_PRIVATE_KEY: ${AVALANCHE_PRIVATE_KEY:-}
+      EVM_RPC: http://evm-node:8545
+      AVALANCHE_RPC_URL: http://avalanche-rpc-proxy:9650/node/9650/ext/bc/C/rpc
+      AVALANCHE_PCHAIN_RPC_URL: http://avalanche-rpc-proxy:9650/node/9650/ext/P
+      AVALANCHE_NODE_ENDPOINTS: http://avalanche-rpc-proxy:9650/node/9650,http://avalanche-rpc-proxy:9650/node/9656,http://avalanche-rpc-proxy:9650/node/9652,http://avalanche-rpc-proxy:9650/node/9654,http://avalanche-rpc-proxy:9650/node/9658
+      FABRIC_DOCKER_HOST: host.docker.internal
+      FABRIC_AS_LOCALHOST: "false"
+      TEE_ETHEREUM_SUBNET_URLS: http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
+      TEE_FABRIC_SUBNET_URLS: http://tee-fabric-1:9000,http://tee-fabric-2:9000,http://tee-fabric-3:9000,http://tee-fabric-4:9000,http://tee-fabric-5:9000
+      TEE_AVALANCHE_SUBNET_URLS: http://tee-avalanche-1:9000,http://tee-avalanche-2:9000,http://tee-avalanche-3:9000,http://tee-avalanche-4:9000,http://tee-avalanche-5:9000
+
+  avalanche-rpc-proxy:
+    image: node:20
+    working_dir: /app
+    volumes:
+      - ./:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: sh -c "node automation/avalanche-rpc-proxy.js"
+
   evm-node:
     image: node:20
     working_dir: /app

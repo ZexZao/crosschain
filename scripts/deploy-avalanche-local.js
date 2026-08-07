@@ -41,6 +41,7 @@ async function main() {
   const warpSource = await deployContract({
     wallet,
     name: 'AvalancheWarpSourceContract',
+    args: [await teeRegistry.getAddress()],
   });
   const gateway = await deployContract({
     wallet,

@@ -5,21 +5,24 @@ const { writeJSON, ensureRuntime } = require('../shared/utils');
 
 async function main() {
   ensureRuntime();
-  const [deployer] = await ethers.getSigners();
+  const [defaultDeployer] = await ethers.getSigners();
+  const deployer = process.env.LOCAL_EVM_PRIVATE_KEY
+    ? new ethers.Wallet(process.env.LOCAL_EVM_PRIVATE_KEY, ethers.provider)
+    : defaultDeployer;
 
-  const TEERegistry = await ethers.getContractFactory('TEERegistry');
+  const TEERegistry = await ethers.getContractFactory('TEERegistry', deployer);
   const teeRegistry = await TEERegistry.deploy();
   await teeRegistry.waitForDeployment();
 
-  const Source = await ethers.getContractFactory('EvmSourceContract');
+  const Source = await ethers.getContractFactory('EvmSourceContract', deployer);
   const source = await Source.deploy(await teeRegistry.getAddress());
   await source.waitForDeployment();
 
-  const HXMsgGateway = await ethers.getContractFactory('HXMsgGateway');
+  const HXMsgGateway = await ethers.getContractFactory('HXMsgGateway', deployer);
   const hxmsgGateway = await HXMsgGateway.deploy(await teeRegistry.getAddress(), 1);
   await hxmsgGateway.waitForDeployment();
 
-  const Target = await ethers.getContractFactory('TargetContract');
+  const Target = await ethers.getContractFactory('TargetContract', deployer);
   const initialAssetReserveUnits = BigInt(process.env.INITIAL_ASSET_RESERVE_UNITS || '10000000000000');
   const target = await Target.deploy(await hxmsgGateway.getAddress(), initialAssetReserveUnits);
   await target.waitForDeployment();
@@ -35,7 +38,7 @@ async function main() {
     chainId: Number((await ethers.provider.getNetwork()).chainId),
   };
 
-  writeJSON('deployment.json', deployment);
+  writeJSON(process.env.DEPLOYMENT_OUTPUT_FILE || 'deployment.json', deployment);
   fs.writeFileSync(path.join(__dirname, '..', 'runtime', 'DEPLOYED'), 'ok');
   console.log(JSON.stringify(deployment, null, 2));
 }

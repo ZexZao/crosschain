@@ -157,10 +157,27 @@ contract ReceivableRegistryService is RoutedService {
         uint64 attestedAt;
     }
 
+    struct CompactReceivable {
+        bytes32 requestID;
+        bytes32 receivableIdHash;
+        bytes32 supplierHash;
+        uint256 amountUnits;
+        bytes32 metadataHash;
+        bool attested;
+        uint64 attestedAt;
+    }
+
     mapping(bytes32 => Receivable) public receivables;
+    mapping(bytes32 => CompactReceivable) public compactReceivables;
     mapping(bytes32 => bytes32) public recordKeyToRequestID;
 
     event ReceivableAttested(bytes32 indexed requestID, bytes32 indexed recordKey, string supplier, uint256 amountUnits);
+    event CompactReceivableAttested(
+        bytes32 indexed requestID,
+        bytes32 indexed receivableIdHash,
+        bytes32 indexed supplierHash,
+        uint256 amountUnits
+    );
 
     constructor(address router_) RoutedService(router_) {}
 
@@ -188,6 +205,31 @@ contract ReceivableRegistryService is RoutedService {
         emit ReceivableAttested(requestID, recordKey, supplier, amountUnits);
         return keccak256(bytes("RECEIVABLE_ATTESTED"));
     }
+
+    /// @notice 使用 h-xmsg 已绑定的哈希字段登记真实的紧凑应收账款状态。
+    function attestReceivableCompact(
+        bytes32 requestID,
+        bytes32 receivableIdHash,
+        bytes32 supplierHash,
+        uint256 amountUnits,
+        bytes32 metadataHash
+    ) external onlyRouter returns (bytes32) {
+        require(receivableIdHash != bytes32(0), "bad receivable id");
+        require(supplierHash != bytes32(0), "bad supplier");
+        require(amountUnits > 0, "zero amount");
+        compactReceivables[requestID] = CompactReceivable({
+            requestID: requestID,
+            receivableIdHash: receivableIdHash,
+            supplierHash: supplierHash,
+            amountUnits: amountUnits,
+            metadataHash: metadataHash,
+            attested: true,
+            attestedAt: uint64(block.timestamp)
+        });
+        recordKeyToRequestID[receivableIdHash] = requestID;
+        emit CompactReceivableAttested(requestID, receivableIdHash, supplierHash, amountUnits);
+        return keccak256(bytes("RECEIVABLE_ATTESTED"));
+    }
 }
 
 /// @notice 物流状态同步服务。
@@ -202,10 +244,26 @@ contract LogisticsTrackerService is RoutedService {
         uint64 updatedAt;
     }
 
+    struct CompactWaybillState {
+        bytes32 requestID;
+        bytes32 waybillIdHash;
+        bytes32 inspectorHash;
+        int256 readingUnits;
+        bytes32 metadataHash;
+        uint64 updatedAt;
+    }
+
     mapping(bytes32 => WaybillState) public waybills;
+    mapping(bytes32 => CompactWaybillState) public compactWaybills;
     mapping(bytes32 => bytes32) public recordKeyToRequestID;
 
     event LogisticsSynced(bytes32 indexed requestID, bytes32 indexed recordKey, string inspector, int256 readingUnits);
+    event CompactLogisticsSynced(
+        bytes32 indexed requestID,
+        bytes32 indexed waybillIdHash,
+        bytes32 indexed inspectorHash,
+        int256 readingUnits
+    );
 
     constructor(address router_) RoutedService(router_) {}
 
@@ -231,6 +289,29 @@ contract LogisticsTrackerService is RoutedService {
         emit LogisticsSynced(requestID, recordKey, inspector, readingUnits);
         return keccak256(bytes("LOGISTICS_SYNCED"));
     }
+
+    /// @notice 将紧凑物流读数写入领域账本，而不是只返回状态码。
+    function syncLogisticsCompact(
+        bytes32 requestID,
+        bytes32 waybillIdHash,
+        bytes32 inspectorHash,
+        int256 readingUnits,
+        bytes32 metadataHash
+    ) external onlyRouter returns (bytes32) {
+        require(waybillIdHash != bytes32(0), "bad waybill id");
+        require(inspectorHash != bytes32(0), "bad inspector");
+        compactWaybills[requestID] = CompactWaybillState({
+            requestID: requestID,
+            waybillIdHash: waybillIdHash,
+            inspectorHash: inspectorHash,
+            readingUnits: readingUnits,
+            metadataHash: metadataHash,
+            updatedAt: uint64(block.timestamp)
+        });
+        recordKeyToRequestID[waybillIdHash] = requestID;
+        emit CompactLogisticsSynced(requestID, waybillIdHash, inspectorHash, readingUnits);
+        return keccak256(bytes("LOGISTICS_SYNCED"));
+    }
 }
 
 /// @notice 授权许可类跨链消息的授权服务。
@@ -248,10 +329,28 @@ contract ConsentRegistryService is RoutedService {
         bool active;
     }
 
+    struct CompactConsentGrant {
+        bytes32 requestID;
+        bytes32 consentIdHash;
+        bytes32 granteeHash;
+        uint256 durationDays;
+        bytes32 scopeHash;
+        uint64 grantedAt;
+        uint64 expiresAt;
+        bool active;
+    }
+
     mapping(bytes32 => ConsentGrant) public consents;
+    mapping(bytes32 => CompactConsentGrant) public compactConsents;
     mapping(bytes32 => bytes32) public recordKeyToRequestID;
 
     event ConsentGranted(bytes32 indexed requestID, bytes32 indexed recordKey, string grantee, uint64 expiresAt);
+    event CompactConsentGranted(
+        bytes32 indexed requestID,
+        bytes32 indexed consentIdHash,
+        bytes32 indexed granteeHash,
+        uint64 expiresAt
+    );
 
     constructor(address router_) RoutedService(router_) {}
 
@@ -281,6 +380,35 @@ contract ConsentRegistryService is RoutedService {
         emit ConsentGranted(requestID, recordKey, grantee, expiresAt);
         return keccak256(bytes("CONSENT_GRANTED"));
     }
+
+    /// @notice 创建可查询、带失效时间的紧凑授权记录。
+    function grantConsentCompact(
+        bytes32 requestID,
+        bytes32 consentIdHash,
+        bytes32 granteeHash,
+        uint256 durationDays,
+        bytes32 scopeHash
+    ) external onlyRouter returns (bytes32) {
+        require(consentIdHash != bytes32(0), "bad consent id");
+        require(granteeHash != bytes32(0), "bad grantee");
+        require(durationDays > 0, "zero duration");
+        require(durationDays <= (type(uint64).max - block.timestamp) / 1 days, "duration overflow");
+        uint64 grantedAt = uint64(block.timestamp);
+        uint64 expiresAt = uint64(block.timestamp + durationDays * 1 days);
+        compactConsents[requestID] = CompactConsentGrant({
+            requestID: requestID,
+            consentIdHash: consentIdHash,
+            granteeHash: granteeHash,
+            durationDays: durationDays,
+            scopeHash: scopeHash,
+            grantedAt: grantedAt,
+            expiresAt: expiresAt,
+            active: true
+        });
+        recordKeyToRequestID[consentIdHash] = requestID;
+        emit CompactConsentGranted(requestID, consentIdHash, granteeHash, expiresAt);
+        return keccak256(bytes("CONSENT_GRANTED"));
+    }
 }
 
 /// @notice Oracle feed 更新服务。
@@ -295,10 +423,26 @@ contract OracleFeedService is RoutedService {
         uint64 updatedAt;
     }
 
+    struct CompactFeedRound {
+        bytes32 requestID;
+        bytes32 feedIdHash;
+        bytes32 publisherHash;
+        uint256 priceUnits;
+        bytes32 metadataHash;
+        uint64 updatedAt;
+    }
+
     mapping(bytes32 => FeedRound) public latestRound;
+    mapping(bytes32 => CompactFeedRound) public compactLatestRound;
     mapping(bytes32 => bytes32) public recordKeyToRequestID;
 
     event OracleUpdated(bytes32 indexed requestID, bytes32 indexed feedKey, string publisher, uint256 priceUnits);
+    event CompactOracleUpdated(
+        bytes32 indexed requestID,
+        bytes32 indexed feedIdHash,
+        bytes32 indexed publisherHash,
+        uint256 priceUnits
+    );
 
     constructor(address router_) RoutedService(router_) {}
 
@@ -324,6 +468,29 @@ contract OracleFeedService is RoutedService {
         emit OracleUpdated(requestID, feedKey, publisher, priceUnits);
         return keccak256(bytes("ORACLE_UPDATED"));
     }
+
+    /// @notice 更新紧凑 feed 的最新真实轮次，后续读取按 feedIdHash 获取。
+    function updateFeedCompact(
+        bytes32 requestID,
+        bytes32 feedIdHash,
+        bytes32 publisherHash,
+        uint256 priceUnits,
+        bytes32 metadataHash
+    ) external onlyRouter returns (bytes32) {
+        require(feedIdHash != bytes32(0), "bad feed id");
+        require(publisherHash != bytes32(0), "bad publisher");
+        compactLatestRound[feedIdHash] = CompactFeedRound({
+            requestID: requestID,
+            feedIdHash: feedIdHash,
+            publisherHash: publisherHash,
+            priceUnits: priceUnits,
+            metadataHash: metadataHash,
+            updatedAt: uint64(block.timestamp)
+        });
+        recordKeyToRequestID[feedIdHash] = requestID;
+        emit CompactOracleUpdated(requestID, feedIdHash, publisherHash, priceUnits);
+        return keccak256(bytes("ORACLE_UPDATED"));
+    }
 }
 
 /// @notice 多方审批工作流服务。
@@ -340,10 +507,27 @@ contract ApprovalWorkflowService is RoutedService {
         uint64 committedAt;
     }
 
+    struct CompactApprovalDecision {
+        bytes32 requestID;
+        bytes32 workflowIdHash;
+        bytes32 approversHash;
+        uint256 threshold;
+        bytes32 metadataHash;
+        bool passed;
+        uint64 committedAt;
+    }
+
     mapping(bytes32 => ApprovalDecision) public decisions;
+    mapping(bytes32 => CompactApprovalDecision) public compactDecisions;
     mapping(bytes32 => bytes32) public recordKeyToRequestID;
 
     event ApprovalCommitted(bytes32 indexed requestID, bytes32 indexed recordKey, string approvers, uint256 threshold);
+    event CompactApprovalCommitted(
+        bytes32 indexed requestID,
+        bytes32 indexed workflowIdHash,
+        bytes32 indexed approversHash,
+        uint256 threshold
+    );
 
     constructor(address router_) RoutedService(router_) {}
 
@@ -369,6 +553,31 @@ contract ApprovalWorkflowService is RoutedService {
         });
         recordKeyToRequestID[recordKey] = requestID;
         emit ApprovalCommitted(requestID, recordKey, approvers, threshold);
+        return keccak256(bytes("APPROVAL_COMMITTED"));
+    }
+
+    /// @notice 保存紧凑审批决定及阈值，使其成为可消费的领域状态。
+    function commitApprovalCompact(
+        bytes32 requestID,
+        bytes32 workflowIdHash,
+        bytes32 approversHash,
+        uint256 threshold,
+        bytes32 metadataHash
+    ) external onlyRouter returns (bytes32) {
+        require(workflowIdHash != bytes32(0), "bad workflow id");
+        require(approversHash != bytes32(0), "bad approvers");
+        require(threshold > 0, "zero threshold");
+        compactDecisions[requestID] = CompactApprovalDecision({
+            requestID: requestID,
+            workflowIdHash: workflowIdHash,
+            approversHash: approversHash,
+            threshold: threshold,
+            metadataHash: metadataHash,
+            passed: true,
+            committedAt: uint64(block.timestamp)
+        });
+        recordKeyToRequestID[workflowIdHash] = requestID;
+        emit CompactApprovalCommitted(requestID, workflowIdHash, approversHash, threshold);
         return keccak256(bytes("APPROVAL_COMMITTED"));
     }
 }

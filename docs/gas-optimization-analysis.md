@@ -444,7 +444,7 @@ target chain verifies batchRoot + Merkle path + callDataHash
 | `shared/hxmsg/hash.js` | 新增 `toMinimalHXMsg()` 与 `computeHXMsgDeliveryDigest()` |
 | `tee-verifier/core/certification.js` | TEE 改为签名 `deliveryDigest` |
 | `contracts/TargetContract.sol` | 改为轻量执行确认合约 |
-| `scripts/run-hxmsg-forward-tests.js` | 测试脚本改为提交 `HXMsgMinimal` 并断言 `requestID/payloadHash` |
+| 已删除的旧直接测试入口 | 当时用于验证 `HXMsgMinimal`；现已由 automation E2E 取代 |
 
 ### 阶段 4：多 TEE / threshold signature
 

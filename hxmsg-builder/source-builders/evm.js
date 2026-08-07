@@ -147,6 +147,7 @@ function buildEvmSourceFact({
     sourceContract,
   });
   return {
+    nonceScope: ethers.zeroPadValue(ethers.getAddress(sourceContract), 32),
     source: {
       chainType: ChainType.EVM,
       chainID: chainIdToBytes32(chainId),

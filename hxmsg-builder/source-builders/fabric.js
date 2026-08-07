@@ -84,6 +84,7 @@ function buildFabricSourceFact({
     chaincodeName: chaincodeId,
   });
   return {
+    nonceScope: bytes32FromText(`fabric:${channelName}:${chaincodeId}`),
     source: {
       chainType: ChainType.FABRIC,
       chainID: bytes32FromText(`fabric-${channelName}`),

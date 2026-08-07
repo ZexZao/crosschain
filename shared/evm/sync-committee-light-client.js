@@ -337,6 +337,29 @@ async function fetchLightClientUpdates({
   return updates;
 }
 
+async function fetchBeaconCheckpointPath({ beaconApiUrl, finalizedHeader, spec, maxHeaders = 64 }) {
+  const slotsPerEpoch = Number(spec.SLOTS_PER_EPOCH || 32);
+  const finalizedSlot = Number(finalizedHeader.slot);
+  const checkpointSlot = Math.floor(finalizedSlot / slotsPerEpoch) * slotsPerEpoch;
+  const finalizedRoot = hex(await beaconHeaderRoot(finalizedHeader));
+  const path = [{ root: finalizedRoot, header: finalizedHeader }];
+  let current = finalizedHeader;
+  while (Number(current.slot) > checkpointSlot) {
+    if (path.length >= maxHeaders) throw new Error('beacon checkpoint ancestor path is too long');
+    const parentRoot = current.parent_root;
+    const response = await fetchJson(beaconApiUrl, `/eth/v1/beacon/headers/${parentRoot}`);
+    const parent = response.data?.header?.message;
+    if (!parent || !sameHex(response.data.root, parentRoot)) {
+      throw new Error('beacon checkpoint parent header response mismatch');
+    }
+    const computedRoot = hex(await beaconHeaderRoot(parent));
+    if (!sameHex(computedRoot, parentRoot)) throw new Error('beacon checkpoint parent header root mismatch');
+    path.push({ root: computedRoot, header: parent });
+    current = parent;
+  }
+  return path;
+}
+
 async function fetchBeaconLightClientInputs({
   beaconApiUrl,
   executionProvider,
@@ -371,6 +394,11 @@ async function fetchBeaconLightClientInputs({
     })
     : [];
   const finalizedExecution = finalityResp.data.finalized_header.execution;
+  const beaconCheckpointHeaders = await fetchBeaconCheckpointPath({
+    beaconApiUrl,
+    finalizedHeader: finalityResp.data.finalized_header.beacon,
+    spec: specResp.data,
+  });
   const finalizedNumber = Number(finalizedExecution.block_number);
   const ancestorHeaders = [];
   if (executionProvider && targetBlockNumber !== undefined) {
@@ -407,6 +435,7 @@ async function fetchBeaconLightClientInputs({
     lightClientUpdates,
     finalityUpdate: finalityResp.data,
     finalityVersion: finalityResp.version,
+    beaconCheckpointHeaders,
     ancestorHeaders,
   };
 }
@@ -513,6 +542,29 @@ async function verifySyncCommitteeHeaderUpdate(update, {
   });
   if (!finalityAggregate.signatureOK) throw new Error('sync committee aggregate signature is invalid');
 
+  const checkpointPath = update.beaconCheckpointHeaders || [];
+  if (!checkpointPath.length) throw new Error('beacon checkpoint ancestor path is required');
+  let expectedRoot = hex(finalizedHeaderRoot);
+  let previousHeader = finalityUpdate.finalized_header.beacon;
+  for (let i = 0; i < checkpointPath.length; i += 1) {
+    const entry = checkpointPath[i];
+    const computedRoot = hex(await beaconHeaderRoot(entry.header));
+    if (!sameHex(entry.root, computedRoot) || !sameHex(entry.root, expectedRoot)) {
+      throw new Error('beacon checkpoint ancestor root mismatch');
+    }
+    if (i > 0 && !sameHex(previousHeader.parent_root, entry.root)) {
+      throw new Error('beacon checkpoint ancestor hash chain is invalid');
+    }
+    previousHeader = entry.header;
+    expectedRoot = entry.header.parent_root;
+  }
+  const slotsPerEpoch = Number(spec.SLOTS_PER_EPOCH || 32);
+  const checkpointSlot = Math.floor(Number(finalityUpdate.finalized_header.beacon.slot) / slotsPerEpoch) * slotsPerEpoch;
+  const checkpoint = checkpointPath[checkpointPath.length - 1];
+  if (Number(checkpoint.header.slot) > checkpointSlot) {
+    throw new Error('beacon checkpoint ancestor path did not reach finalized epoch boundary');
+  }
+
   const finalizedHeader = normalizeExecutionHeader(finalityUpdate.finalized_header.execution);
   const headers = (update.ancestorHeaders || []).map(normalizeExecutionHeader);
   let targetHeader = finalizedHeader;
@@ -550,7 +602,9 @@ async function verifySyncCommitteeHeaderUpdate(update, {
     participantCount,
     threshold: Math.ceil((SYNC_COMMITTEE_SIZE * minParticipationNumerator) / minParticipationDenominator),
     trustedBlockRoot: update.trustedBlockRoot,
-    nextTrustedBlockRoot: hex(finalizedHeaderRoot),
+    finalizedBeaconBlockRoot: hex(finalizedHeaderRoot),
+    nextTrustedBlockRoot: checkpoint.root,
+    nextTrustedBlockSlot: Number(checkpoint.header.slot),
     proofType: update.proofType,
   };
 }

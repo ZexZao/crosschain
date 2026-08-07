@@ -23,7 +23,7 @@ TEE deliveryDigest 签名
 | `shared/hxmsg/hash.js` | 新增 `toMinimalHXMsg()`、`computeHXMsgDeliveryDigest()` |
 | `tee-verifier/core/certification.js` | TEE 改为签名 `deliveryDigest`，同时保留 `hmsgDigest` |
 | `scripts/deploy.js` | 调整部署顺序，先部署 Gateway，再把 Gateway 地址注入 Target |
-| `scripts/run-hxmsg-forward-tests.js` | 测试脚本改为提交 `HXMsgMinimal`，并断言 `requestID/payloadHash` |
+| 已删除的旧直接测试入口 | 当时用于验证 `HXMsgMinimal`；现已由 automation E2E 取代 |
 | `README.md` | 更新第三阶段实现程度和最新 gas 测试结果 |
 | `docs/gas-optimization-analysis.md` | 补充第三阶段已实现状态和最新 gas 区间 |
 
@@ -206,7 +206,7 @@ requestIDsByActorHash
 ```text
 npm run compile: PASS
 npm run deploy: PASS
-npm run hxmsg:test:forward: 8/8 PASS
+历史直接路径结果：8/8 PASS（该命令已删除，当前使用 automation E2E）
 ```
 
 结果文件：

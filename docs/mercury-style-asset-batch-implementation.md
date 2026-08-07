@@ -38,16 +38,21 @@
 | Avalanche -> Ethereum 优化后 | 20 | 114,528 | 1,207,753 | 60,388 | 174,916 |
 | Ethereum -> Avalanche 优化后 | 8 | 40,875 | 553,376 | 69,172 | 110,047 |
 | Avalanche -> Ethereum 优化后 | 8 | 113,667 | 519,328 | 64,916 | 178,583 |
+| Ethereum -> Avalanche 空壳修复后稳态复测 | 8 | 38,737 | 520,328 | 65,041 | 103,778 |
+| Avalanche -> Ethereum 空壳修复后稳态复测 | 8 | 113,667 | 520,320 | 65,040 | 178,707 |
 
 batch=20 的目标执行平均 gas 下降 87.71%，正常路径总 gas 下降 71.09%。目标 reserve 从 `10000000000000` 减少到 `9999996600000`，接收账户从 `0` 增加到 `3400000`，金额完全一致。
 
 response-required 单条路径也改用相同 compact/batch 入口。实测 reserve 减少 `210000`，接收账户增加 `210000`，不计注册的 source、target、response complete 三段总计 `455726 gas`。
+
+2026-08-03 在补全非资产 compact 领域动作后重新执行纯 `token_transfer`。全新部署的第一轮目标平均约为 `69,315 gas/message`，同一部署上的稳态轮次回落到约 `65,041 gas/message`；差异来自首个接收账户余额由零变为非零的 ERC20 `SSTORE`，不是 TEE 注册成本。与修复前稳态结果相比，Avalanche -> Ethereum 目标仅增加 `124 gas/message`（约 `0.19%`），说明非资产领域修复没有实质增加资产快速路径成本。
 
 ## 结果文件
 
 - `runtime/mercury-style-avax-evm-batch20-gas.json`
 - `runtime/mercury-style-avax-evm-batch20-gas-optimized.json`
 - `runtime/local-evm-avalanche-asset-transfer-batch-results.json`
+- `runtime/local-evm-avalanche-asset-transfer-batch-steady-results.json`
 - `runtime/local-evm-avalanche-response-gas-results.json`
 
 ## 尚未解决

@@ -11,8 +11,6 @@ const {
   chainIdToBytes32,
   hashJson,
   toMinimalHXMsg,
-  AtomicityMode,
-  CommitmentType,
   buildDeliveryMessage,
   getExecutionData,
 } = require('../shared/hxmsg');
@@ -124,20 +122,20 @@ async function relayToEvm(hxmsg, deployment, teeUrl, stageTimings) {
   gas.registerTEE += Number(registration.gasUsed || 0n);
   const gateway = new ethers.Contract(
     deployment.hxmsgGateway,
-    [`function executeHXMsgMinimalCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64),address,bytes,${CLUSTER_CERT_ABI}) external`],
+    [`function executeHXMsgMinimalCompactCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,bytes32,uint64),address,(uint16 opCode,bytes32 recordIdHash,bytes32 actorHash,address actorAddress,int256 amount,bytes32 metadataHash,bool requireAck),${CLUSTER_CERT_ABI}) external`],
     signer
   );
   const receipt = await timed(stageTimings, 'evmTargetExecutionMs', async () => {
-    const tx = await gateway.executeHXMsgMinimalCluster(
+    const tx = await gateway.executeHXMsgMinimalCompactCluster(
       toMinimalHXMsg(hxmsg),
       deployment.targetContract,
-      getExecutionData(hxmsg).callData,
+      getExecutionData(hxmsg).compactCall,
       clusterCertificateTuple(cluster)
     );
     return tx.wait();
   });
-  gas.executeHXMsgMinimalCluster = gasOf(receipt);
-  gas.total = gas.registerTEE + gas.executeHXMsgMinimalCluster;
+  gas.executeHXMsgMinimalCompactCluster = gasOf(receipt);
+  gas.total = gas.registerTEE + gas.executeHXMsgMinimalCompactCluster;
   return { receipt, teeCluster: cluster, teeVerification: teeResp.data.verificationResult, gas };
 }
 
@@ -150,7 +148,7 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(EVM_RPC);
   const { gateway, network, contract, channel, chaincode } = await getFabric(projectRoot);
   const result = {
-    testType: 'fabric-evm-challenge-response-e2e',
+    testType: 'fabric-evm-response-e2e',
     pass: false,
     timing: { stageMs: stageTimings },
     gas: { evm: {}, fabric: { notApplicable: true, reason: 'Hyperledger Fabric transactions do not use EVM gas.' } },
@@ -165,10 +163,9 @@ async function main() {
       actor: deployment.deployer,
       amount: '1.0000',
       metadata: 'challenge-response e2e asset settlement',
-      requireAck: false,
+      requireAck: true,
     };
     const { normalized, compactCallHash } = encodeCompactBusinessCall(businessPayload);
-    const failureData = 'fabric-evm-failure';
     const now = Math.floor(Date.now() / 1000);
     const payload = {
       businessPayload,
@@ -181,15 +178,7 @@ async function main() {
       receiver: targetObject,
       expireAt: now + 3600,
       feedback: { required: true, expectedMsgType: 2, timeout: now + 3600, callbackRefHash: ethers.ZeroHash },
-      atomicity: {
-        required: true,
-        mode: AtomicityMode.COMMIT_OR_COMPENSATE,
-        commitmentType: CommitmentType.INTENT_ONLY,
-        commitmentRefHash: ethers.keccak256(ethers.toUtf8Bytes('fabric-evm-commitment')),
-        successActionHash: ethers.keccak256(ethers.toUtf8Bytes('fabric-evm-success')),
-        failureActionHash: ethers.keccak256(ethers.toUtf8Bytes(failureData)),
-        challengeWindow: 60,
-      },
+      atomicity: null,
     };
     const tx = contract.createTransaction('EmitXCall');
     const txId = tx.getTransactionId();
@@ -212,8 +201,8 @@ async function main() {
     const relay = await relayToEvm(hxmsg, deployment, teeUrl, stageTimings);
     await timed(stageTimings, 'fabricRegisterTEEMs', () =>
       registerFabricTEEs({ contract, certificate: relay.teeCluster, teeURLs: TEE_URLS }));
-    await timed(stageTimings, 'fabricBindCommitmentHXMsgMs', () =>
-      contract.submitTransaction('BindCommitmentHXMsg', JSON.stringify(hxmsg), JSON.stringify(relay.teeCluster)));
+    await timed(stageTimings, 'fabricBindResponseLifecycleHXMsgMs', () =>
+      contract.submitTransaction('BindResponseLifecycleHXMsg', JSON.stringify(hxmsg), JSON.stringify(relay.teeCluster)));
     const evmReceipt = await timed(stageTimings, 'evmGetTargetReceiptMs', () =>
       provider.getTransactionReceipt(relay.receipt.hash));
     const evmProof = await timed(stageTimings, 'buildEvmReceiptProofMs', () =>
@@ -243,9 +232,9 @@ async function main() {
       registerFabricTEEs({ contract, certificate: voucher, teeURLs: TEE_URLS }));
     await timed(stageTimings, 'fabricCompleteWithResponseMs', () =>
       contract.submitTransaction('CompleteWithResponse', hxmsg.header.requestID, JSON.stringify(response), JSON.stringify(voucher)));
-    const commitment = JSON.parse((await timed(stageTimings, 'fabricQueryCommitmentMs', () =>
-      contract.evaluateTransaction('QueryCommitment', hxmsg.header.requestID))).toString());
-    result.pass = commitment.status === 'Completed';
+    const lifecycle = JSON.parse((await timed(stageTimings, 'fabricQueryResponseLifecycleMs', () =>
+      contract.evaluateTransaction('QueryResponseLifecycle', hxmsg.header.requestID))).toString());
+    result.pass = lifecycle.status === 'Completed';
     result.gas.evm = relay.gas;
     result.gas.totalEvmGas = relay.gas.total;
     Object.assign(result, {
@@ -254,7 +243,7 @@ async function main() {
       evmTxHash: evmReceipt.hash,
       responseDigest: response.responseDigest,
       teeQuorum: `${voucher.reached}/${voucher.threshold}`,
-      commitment,
+      responseLifecycle: lifecycle,
     });
   } finally {
     gateway.disconnect();
@@ -264,13 +253,13 @@ async function main() {
   fs.writeJsonSync(path.join(RUNTIME_DIR, 'hxmsg-fabric-evm-challenge-e2e-results.json'), output, { spaces: 2 });
   fs.writeFileSync(
     path.join(RUNTIME_DIR, 'hxmsg-fabric-evm-challenge-e2e-summary.md'),
-    `# Fabric -> EVM 挑战响应闭环测试\n\n` +
+    `# Fabric -> EVM RESPONSE 闭环测试\n\n` +
       `状态：${output.pass ? 'PASS' : 'FAIL'}\n` +
       `requestID: ${output.requestID || '-'}\n` +
       `总耗时(ms): ${output.timing.totalMs}\n` +
       `EVM Gas: ${output.gas.totalEvmGas ?? 0}\n`
   );
-  console.log(`${output.pass ? 'PASS' : 'FAIL'} Fabric->EVM challenge-response requestID=${output.requestID || '-'}`);
+  console.log(`${output.pass ? 'PASS' : 'FAIL'} Fabric->EVM response lifecycle requestID=${output.requestID || '-'}`);
   process.exit(output.pass ? 0 : 1);
 }
 

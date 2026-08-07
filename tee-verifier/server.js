@@ -13,6 +13,7 @@ const {
   computeResponseDigest,
   assertEnvelopeBindings,
   buildDeliveryMessage,
+  verifyLifecycleCheckpoint,
 } = require('../shared/hxmsg');
 const { buildHXMsgBatch } = require('../shared/hxmsg/batch');
 const { verifySourceFact } = require('./adapters');
@@ -25,7 +26,7 @@ const { signCommittedDigest, buildQuorumCertificate } = require('../shared/tee/q
 loadDotEnv();
 ensureRuntime();
 const app = express();
-app.use(express.json({ limit: '10mb' }));  // Larger limit for block data
+app.use(express.json({ limit: process.env.TEE_HTTP_JSON_LIMIT || '16mb' }));
 
 // ============ Chain State ============
 
@@ -35,14 +36,26 @@ const teeSubnetProfile = process.env.TEE_SUBNET_PROFILE || 'ethereum';
 const teeStateFile = process.env.TEE_STATE_FILE || `tee-state-${teeNodeID}.json`;
 const teeChainStateFile = process.env.TEE_CHAIN_STATE_FILE || `tee-chain-state-${teeNodeID}.json`;
 const teeConsensusStateFile = process.env.TEE_CONSENSUS_STATE_FILE || `tee-consensus-${teeNodeID}.json`;
+const raftAppendMaxBytes = Number(process.env.TEE_RAFT_APPEND_MAX_BYTES || 4 * 1024 * 1024);
+const raftVerificationLeaseMs = Math.min(
+  Math.max(Number(process.env.TEE_RAFT_VERIFICATION_LEASE_MS || 120000), 10000),
+  300000
+);
 let chainState = readJSON(teeChainStateFile);
 if (!chainState) {
   chainState = {
     fabric: { tipHeight: 0, tipHash: null, headers: [] },
     evm: { tipHeight: 0, tipHash: null, headers: [] },
+    evmChains: {},
   };
-  writeJSON(teeChainStateFile, chainState);
 }
+chainState.evmChains = chainState.evmChains && typeof chainState.evmChains === 'object'
+  ? chainState.evmChains
+  : {};
+if (chainState.evm?.chainID) {
+  chainState.evmChains[chainState.evm.chainID] = chainState.evm;
+}
+writeJSON(teeChainStateFile, chainState);
 
 function saveChainState() {
   writeJSON(teeChainStateFile, chainState);
@@ -77,8 +90,11 @@ function saveConsensusState() {
 
 let lastHeartbeatAt = Date.now();
 let electionDeadlineAt = Date.now() + electionTimeoutMs();
+let verificationLeaseUntil = 0;
+let activeVerificationLeases = 0;
 const peerReplicationState = new Map();
 let currentTermBarrierInFlight = null;
+let raftReplicationInFlight = 0;
 
 // ============ TEE Identity ============
 
@@ -194,9 +210,16 @@ function raftAuthRequired() {
 }
 
 function stableStringify(value) {
+  if (value === undefined || typeof value === 'function' || typeof value === 'symbol') return undefined;
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
-  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item) ?? 'null').join(',')}]`;
+  }
+  return `{${Object.keys(value)
+    .filter((key) => stableStringify(value[key]) !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+    .join(',')}}`;
 }
 
 function raftSignaturePayload({ senderID, timestamp, method, routePath, body }) {
@@ -302,7 +325,7 @@ function isCandidateLogUpToDate(candidateLastIndex, candidateLastTerm) {
 
 function stepDown(term, leaderID = null) {
   lastHeartbeatAt = Date.now();
-  electionDeadlineAt = Date.now() + electionTimeoutMs();
+  electionDeadlineAt = Math.max(Date.now() + electionTimeoutMs(), verificationLeaseUntil);
   if (Number(term) > Number(consensusState.currentTerm || 0)) {
     consensusState.currentTerm = Number(term);
     consensusState.votedFor = null;
@@ -315,6 +338,7 @@ function stepDown(term, leaderID = null) {
 function becomeLeader() {
   consensusState.role = 'leader';
   consensusState.leaderID = teeNodeID;
+  peerReplicationState.clear();
   initializePeerReplicationState();
   saveConsensusState();
 }
@@ -329,7 +353,7 @@ function becomeCandidate() {
 }
 
 function signingDigestForHXMsg(hxmsg) {
-  return Number(hxmsg.target?.chainType) === ChainType.EVM
+  return [ChainType.EVM, ChainType.AVALANCHE].includes(Number(hxmsg.target?.chainType))
     ? computeHXMsgDeliveryDigest(hxmsg)
     : (hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg));
 }
@@ -379,10 +403,9 @@ function makeConsensusEntry({ hxmsg, helperData, proposerID }) {
   };
 }
 
-function makeDigestConsensusEntry({ requestID, digest, response, helperData, proposerID }) {
+function makeDigestConsensusEntry({ requestID, digest, response, checkpoint, helperData, proposerID, signatureDigestType = 'responseDigest' }) {
   const index = lastLogIndex() + 1;
   const term = Number(consensusState.currentTerm || 1);
-  const signatureDigestType = 'responseDigest';
   const entryDigest = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
@@ -400,12 +423,19 @@ function makeDigestConsensusEntry({ requestID, digest, response, helperData, pro
     entryDigest,
     status: 'pending',
     response,
+    checkpoint,
     helperData: helperData || {},
     createdAt: Math.floor(Date.now() / 1000),
   };
 }
 
 function makeBatchConsensusEntry({ batch, proposerID }) {
+  const reusable = consensusState.log.find((item) => (
+    Number(item.term) === Number(consensusState.currentTerm || 1)
+    && sameHex(item.requestID, batch.batchID)
+    && sameHex(item.signingDigest, batch.batchSigningDigest)
+  ));
+  if (reusable) return reusable;
   const index = lastLogIndex() + 1;
   const term = Number(consensusState.currentTerm || 1);
   const signatureDigestType = 'batchDigest';
@@ -497,8 +527,28 @@ function commitConsensusEntry(entryDigest) {
     }
   }
   saveConsensusState();
+  pruneRedundantPendingEntries();
   return entry;
 }
+
+function pruneRedundantPendingEntries() {
+  const committedKeys = new Set(consensusState.log
+    .filter((entry) => entry.status === 'committed')
+    .map((entry) => `${String(entry.requestID).toLowerCase()}:${String(entry.signingDigest).toLowerCase()}`));
+  const pendingSuffix = consensusState.log.filter((entry) => Number(entry.index) > Number(consensusState.commitIndex));
+  const entirelyRedundant = pendingSuffix.length > 0 && pendingSuffix.every((entry) => {
+    const key = `${String(entry.requestID).toLowerCase()}:${String(entry.signingDigest).toLowerCase()}`;
+    return committedKeys.has(key);
+  });
+  if (!entirelyRedundant) return 0;
+  const removed = pendingSuffix.length;
+  consensusState.log = consensusState.log.filter((entry) => Number(entry.index) <= Number(consensusState.commitIndex));
+  peerReplicationState.clear();
+  saveConsensusState();
+  return removed;
+}
+
+pruneRedundantPendingEntries();
 
 function hasCommittedEntryInCurrentTerm() {
   return consensusState.log.some((entry) => (
@@ -632,11 +682,11 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
   };
 }
 
-async function verifyHXMsgLocally({ hxmsg, helperData }) {
+async function verifyHXMsgLocally({ hxmsg, helperData, enforceExpiry = true }) {
   assertEnvelopeBindings(hxmsg);
   hxmsg.hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
   if (hxmsg.header.deliveryExpireAt === undefined) throw new Error('canonical header.deliveryExpireAt is required');
-  if (Number(hxmsg.header.deliveryExpireAt) < Math.floor(Date.now() / 1000)) {
+  if (enforceExpiry && Number(hxmsg.header.deliveryExpireAt) < Math.floor(Date.now() / 1000)) {
     throw new Error('h-xmsg expired');
   }
   assertSubnetCanVerify(hxmsg);
@@ -649,7 +699,7 @@ async function verifyHXMsgLocally({ hxmsg, helperData }) {
   return { verificationResult };
 }
 
-async function verifyBatchLocally({ batch }) {
+async function verifyBatchLocally({ batch, enforceExpiry = true }) {
   if (!batch || !Array.isArray(batch.hxmsgs) || !Array.isArray(batch.helperDataList)) {
     throw new Error('batch.hxmsgs and batch.helperDataList are required');
   }
@@ -664,6 +714,7 @@ async function verifyBatchLocally({ batch }) {
     const local = await verifyHXMsgLocally({
       hxmsg: batch.hxmsgs[i],
       helperData: batch.helperDataList[i] || {},
+      enforceExpiry,
     });
     verificationResults.push({
       index: i,
@@ -672,6 +723,19 @@ async function verifyBatchLocally({ batch }) {
     });
   }
   return { rebuilt, verificationResults };
+}
+
+function verifyCheckpointLocally(checkpointEnvelope) {
+  if (!checkpointEnvelope?.checkpoint || !Array.isArray(checkpointEnvelope.records)) {
+    throw new Error('checkpoint metadata and records are required');
+  }
+  const verified = verifyLifecycleCheckpoint(checkpointEnvelope.checkpoint, checkpointEnvelope.records);
+  return {
+    adapter: 'lifecycle-checkpoint',
+    verified: true,
+    ...verified,
+    recordCount: checkpointEnvelope.records.length,
+  };
 }
 
 async function buildCommittedSignature({ hxmsg, requestID, digest, entry }) {
@@ -764,6 +828,17 @@ function makeAppendEntriesPayload({ entries, leaderCommit }) {
   };
 }
 
+function makeCommitNotificationPayload(committedEntry) {
+  return {
+    term: consensusState.currentTerm,
+    leaderID: teeNodeID,
+    prevLogIndex: Number(committedEntry.index),
+    prevLogTerm: Number(committedEntry.term),
+    entries: [],
+    leaderCommit: Number(committedEntry.index),
+  };
+}
+
 function initializePeerReplicationState() {
   for (const peer of clusterPeerDefs()) {
     if (!peerReplicationState.has(peer.id)) {
@@ -772,12 +847,21 @@ function initializePeerReplicationState() {
   }
 }
 
-function makeAppendEntriesPayloadFromIndex({ nextIndex, leaderCommit }) {
+function makeAppendEntriesPayloadFromIndex({ nextIndex, leaderCommit, targetIndex = lastLogIndex() }) {
   const prevLogIndex = Math.max(Number(nextIndex || 1) - 1, 0);
   const prevEntry = prevLogIndex > 0 ? logEntryAt(prevLogIndex) : null;
-  const entries = consensusState.log
-    .filter((item) => Number(item.index) >= Number(nextIndex || 1))
+  const candidates = consensusState.log
+    .filter((item) => Number(item.index) >= Number(nextIndex || 1)
+      && Number(item.index) <= Number(targetIndex))
     .map((item) => ({ ...item }));
+  const entries = [];
+  let encodedBytes = 0;
+  for (const item of candidates) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(item));
+    if (entries.length > 0 && encodedBytes + itemBytes > raftAppendMaxBytes) break;
+    entries.push(item);
+    encodedBytes += itemBytes;
+  }
   return {
     term: consensusState.currentTerm,
     leaderID: teeNodeID,
@@ -791,12 +875,73 @@ function makeAppendEntriesPayloadFromIndex({ nextIndex, leaderCommit }) {
 async function sendRaftPost(peer, routePath, body) {
   const resp = await fetch(`${peer.url}${routePath}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...signRaftRequest({ routePath, body }) },
+    headers: {
+      'content-type': 'application/json',
+      connection: 'close',
+      ...signRaftRequest({ routePath, body }),
+    },
     body: JSON.stringify(body),
   });
   if (!resp.ok) throw new Error(`status ${resp.status}`);
   const data = await resp.json();
   return data;
+}
+
+async function grantVerificationLease() {
+  if (clusterPeers().length === 0) return { granted: 1, leaseUntil: Date.now() + raftVerificationLeaseMs };
+  if (consensusState.role !== 'leader') throw new Error('verification lease requires leader role');
+
+  const term = Number(consensusState.currentTerm);
+  const leaseUntil = Date.now() + raftVerificationLeaseMs;
+  const acknowledgements = [{ nodeID: teeNodeID, granted: true }];
+  await Promise.all(clusterPeerDefs().map(async (peer) => {
+    try {
+      const data = await sendRaftPost(peer, '/internal/raft/verification-lease', {
+        term,
+        leaderID: teeNodeID,
+        leaseUntil,
+      });
+      if (Number(data.term || 0) > Number(consensusState.currentTerm)) {
+        stepDown(Number(data.term), data.leaderID || null);
+      }
+      acknowledgements.push({
+        nodeID: data.nodeID || peer.id,
+        granted: Boolean(data.granted),
+        term: data.term,
+      });
+    } catch (error) {
+      acknowledgements.push({ nodeID: peer.id, granted: false, error: error.message });
+    }
+  }));
+  const granted = acknowledgements.filter((item) => item.granted).length;
+  if (consensusState.role !== 'leader' || Number(consensusState.currentTerm) !== term) {
+    throw new Error('leadership changed while granting verification lease');
+  }
+  if (granted < raftMajority()) {
+    throw new Error(`verification lease quorum not reached: ${granted}/${raftMajority()}`);
+  }
+  verificationLeaseUntil = leaseUntil;
+  return { granted, leaseUntil, acknowledgements };
+}
+
+async function acquireVerificationLease() {
+  const lease = await grantVerificationLease();
+  activeVerificationLeases += 1;
+  return lease;
+}
+
+async function releaseVerificationLease() {
+  activeVerificationLeases = Math.max(activeVerificationLeases - 1, 0);
+  if (activeVerificationLeases > 0 || consensusState.role !== 'leader') return;
+  verificationLeaseUntil = 0;
+  const body = { term: Number(consensusState.currentTerm), leaderID: teeNodeID };
+  await Promise.all(clusterPeerDefs().map(async (peer) => {
+    try {
+      await sendRaftPost(peer, '/internal/raft/verification-lease-release', body);
+    } catch (_error) {
+      // A disconnected follower retains only the bounded lease granted earlier.
+    }
+  }));
 }
 
 async function sendAppendEntries(peer, payload) {
@@ -810,12 +955,22 @@ async function sendAppendEntries(peer, payload) {
 async function replicateLogToPeer(peer, targetIndex) {
   initializePeerReplicationState();
   const progress = peerReplicationState.get(peer.id) || { nextIndex: 1, matchIndex: 0 };
+  if (Number(progress.matchIndex || 0) >= Number(targetIndex)) {
+    return {
+      nodeID: peer.id,
+      peerURL: peer.url,
+      accepted: true,
+      matchIndex: progress.matchIndex,
+      attempts: 0,
+    };
+  }
   let attempts = 0;
   while (Number(progress.matchIndex || 0) < Number(targetIndex) && attempts < Math.max(lastLogIndex() + 2, 4)) {
     attempts += 1;
     const payload = makeAppendEntriesPayloadFromIndex({
       nextIndex: Math.max(Number(progress.nextIndex || 1), 1),
       leaderCommit: consensusState.commitIndex,
+      targetIndex,
     });
     const data = await sendAppendEntries(peer, payload);
     if (Number(data.term || 0) > Number(consensusState.currentTerm)) {
@@ -831,13 +986,16 @@ async function replicateLogToPeer(peer, targetIndex) {
       progress.matchIndex = Number(data.matchIndex || payload.prevLogIndex);
       progress.nextIndex = progress.matchIndex + 1;
       peerReplicationState.set(peer.id, progress);
-      return {
-        nodeID: data.nodeID || peer.id,
-        peerURL: peer.url,
-        accepted: progress.matchIndex >= Number(targetIndex),
-        matchIndex: progress.matchIndex,
-        attempts,
-      };
+      if (progress.matchIndex >= Number(targetIndex)) {
+        return {
+          nodeID: data.nodeID || peer.id,
+          peerURL: peer.url,
+          accepted: true,
+          matchIndex: progress.matchIndex,
+          attempts,
+        };
+      }
+      continue;
     }
     const conflictIndex = Number(data.conflictIndex || data.matchIndex || 1);
     progress.nextIndex = Math.max(Math.min(Number(progress.nextIndex || 1) - 1, conflictIndex), 1);
@@ -854,40 +1012,44 @@ async function replicateLogToPeer(peer, targetIndex) {
 }
 
 async function replicateEntryToRaftQuorum(entry) {
-  appendConsensusEntry(entry);
-  const appendAcks = [{ nodeID: teeNodeID, accepted: true, entryDigest: entry.entryDigest }];
-  await Promise.all(clusterPeerDefs().map(async (peer) => {
-    try {
-      appendAcks.push(await replicateLogToPeer(peer, entry.index));
-    } catch (error) {
-      appendAcks.push({ nodeID: peer.id, peerURL: peer.url, accepted: false, error: error.message });
+  raftReplicationInFlight += 1;
+  try {
+    appendConsensusEntry(entry);
+    const appendAcks = [{ nodeID: teeNodeID, accepted: true, entryDigest: entry.entryDigest }];
+    await Promise.all(clusterPeerDefs().map(async (peer) => {
+      try {
+        appendAcks.push(await replicateLogToPeer(peer, entry.index));
+      } catch (error) {
+        const cause = error.cause;
+        const detail = [error.message, cause?.code, cause?.message].filter(Boolean).join(': ');
+        appendAcks.push({ nodeID: peer.id, peerURL: peer.url, accepted: false, error: detail });
+      }
+    }));
+    const accepted = appendAcks.filter((ack) => ack.accepted);
+    if (accepted.length < raftMajority()) {
+      return { committed: false, appendAcks };
     }
-  }));
-  const accepted = appendAcks.filter((ack) => ack.accepted);
-  if (accepted.length < raftMajority()) {
-    return { committed: false, appendAcks };
+    const committedEntry = commitConsensusEntry(entry.entryDigest);
+    const commitAcks = [{ nodeID: teeNodeID, committed: true }];
+    await Promise.all(clusterPeerDefs().map(async (peer) => {
+      const appended = appendAcks.find((ack) => ack.accepted && ack.peerURL === peer.url);
+      if (!appended) return;
+      try {
+        const data = await sendAppendEntries(peer, makeCommitNotificationPayload(committedEntry));
+        commitAcks.push({
+          nodeID: data.nodeID || peer.id,
+          committed: Boolean(data.success),
+          commitIndex: data.commitIndex,
+          error: data.success ? undefined : data.reason || 'commit rejected',
+        });
+      } catch (error) {
+        commitAcks.push({ nodeID: peer.id, committed: false, error: error.message });
+      }
+    }));
+    return { committed: true, committedEntry, appendAcks, commitAcks };
+  } finally {
+    raftReplicationInFlight = Math.max(raftReplicationInFlight - 1, 0);
   }
-  const committedEntry = commitConsensusEntry(entry.entryDigest);
-  const commitAcks = [{ nodeID: teeNodeID, committed: true }];
-  await Promise.all(clusterPeerDefs().map(async (peer) => {
-    const appended = appendAcks.find((ack) => ack.accepted && ack.peerURL === peer.url);
-    if (!appended) return;
-    try {
-      const data = await sendAppendEntries(peer, makeAppendEntriesPayload({
-        entries: [],
-        leaderCommit: committedEntry.index,
-      }));
-      commitAcks.push({
-        nodeID: data.nodeID || peer.id,
-        committed: Boolean(data.success),
-        commitIndex: data.commitIndex,
-        error: data.success ? undefined : data.reason || 'commit rejected',
-      });
-    } catch (error) {
-      commitAcks.push({ nodeID: peer.id, committed: false, error: error.message });
-    }
-  }));
-  return { committed: true, committedEntry, appendAcks, commitAcks };
 }
 
 async function ensureCurrentTermCommitBarrier() {
@@ -921,9 +1083,15 @@ async function collectCommittedCertifications({ hxmsg, committedEntry, commitAck
   const signatures = [localSignature];
   const certAcks = [{ nodeID: teeNodeID, signed: true, signature: localSignature }];
   await Promise.all(clusterPeerDefs().map(async (peer) => {
-    const committed = commitAcks.find((ack) => ack.committed && ack.nodeID === peer.id);
-    if (!committed) return;
     try {
+      let committed = commitAcks.find((ack) => ack.committed && ack.nodeID === peer.id);
+      if (!committed) {
+        const commitResult = await sendAppendEntries(peer, makeCommitNotificationPayload(committedEntry));
+        if (!commitResult.success || Number(commitResult.commitIndex || 0) < Number(committedEntry.index)) {
+          throw new Error(commitResult.reason || 'commit notification rejected');
+        }
+        committed = { nodeID: peer.id, committed: true, commitIndex: commitResult.commitIndex };
+      }
       const resp = await fetch(`${peer.url}/internal/raft/sign-committed`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...signRaftRequest({
@@ -956,17 +1124,27 @@ async function collectCommittedCertifications({ hxmsg, committedEntry, commitAck
   return { clusterCertificate, signatures: selectedSignatures, certAcks };
 }
 
-async function collectClusterDigestCertifications({ response, helperData, localResult }) {
+async function collectClusterDigestCertifications({
+  response,
+  checkpoint,
+  requestID: suppliedRequestID,
+  digest: suppliedDigest,
+  signatureDigestType = 'responseDigest',
+  helperData,
+  localResult,
+}) {
   const threshold = clusterThreshold();
   const barrierResult = await ensureCurrentTermCommitBarrier();
-  const requestID = response.originRequestID;
-  const digest = computeResponseDigest(response);
+  const requestID = suppliedRequestID || response.originRequestID;
+  const digest = suppliedDigest || computeResponseDigest(response);
   const entry = makeDigestConsensusEntry({
     requestID,
     digest,
     response,
+    checkpoint,
     helperData,
     proposerID: teeNodeID,
+    signatureDigestType,
   });
   const raftResult = await replicateEntryToRaftQuorum(entry);
   const verificationResults = [{ nodeID: teeNodeID, ...localResult.verificationResult }];
@@ -999,7 +1177,7 @@ async function collectClusterDigestCertifications({ response, helperData, localR
     commitAcks: raftResult.commitAcks || [],
   });
   return {
-    algorithm: 'mercury-raft-tee-cluster-response',
+    algorithm: `mercury-raft-tee-cluster-${signatureDigestType}`,
     proposerID: teeNodeID,
     leaderID: teeNodeID,
     term: raftResult.committedEntry.term,
@@ -1012,7 +1190,7 @@ async function collectClusterDigestCertifications({ response, helperData, localR
     quorumReached: clusterCertificate.participantCount >= threshold,
     hmsgDigest: digest,
     signingDigest: digest,
-    signatureDigestType: 'responseDigest',
+    signatureDigestType,
     ...clusterCertificate,
     signatureDetails: signatures,
     appendAcks: raftResult.appendAcks || [],
@@ -1198,6 +1376,7 @@ app.get('/raft/status', (_req, res) => {
     lastLogIndex: lastLogIndex(),
     lastLogTerm: lastLogTerm(),
     logLength: consensusState.log.length,
+    verificationLeaseUntil,
     supportedSourceChains: Array.from(supportedSourceChains),
     supportedVerificationMethods: Array.from(supportedVerificationMethods),
   });
@@ -1217,6 +1396,8 @@ app.post('/internal/raft/request-vote', (req, res) => {
     }
     let voteGranted = false;
     if (Number(term) < Number(consensusState.currentTerm)) {
+      voteGranted = false;
+    } else if (Date.now() < verificationLeaseUntil && candidateID !== consensusState.leaderID) {
       voteGranted = false;
     } else {
       if (Number(term) > Number(consensusState.currentTerm)) {
@@ -1241,6 +1422,55 @@ app.post('/internal/raft/request-vote', (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ nodeID: teeNodeID, term: consensusState.currentTerm, voteGranted: false, error: error.message });
+  }
+});
+
+app.post('/internal/raft/verification-lease', (req, res) => {
+  try {
+    const { term, leaderID, leaseUntil } = req.body;
+    if (!leaderID) throw new Error('leaderID is required');
+    if (raftAuthRequired() && req.raftSenderID !== leaderID) {
+      throw new Error('leaderID does not match authenticated sender');
+    }
+    if (Number(term) < Number(consensusState.currentTerm)) {
+      res.json({ nodeID: teeNodeID, term: consensusState.currentTerm, granted: false });
+      return;
+    }
+    const boundedLeaseUntil = Math.min(
+      Math.max(Number(leaseUntil || 0), Date.now()),
+      Date.now() + raftVerificationLeaseMs
+    );
+    verificationLeaseUntil = boundedLeaseUntil;
+    stepDown(Number(term), leaderID);
+    electionDeadlineAt = Math.max(electionDeadlineAt, verificationLeaseUntil);
+    res.json({
+      nodeID: teeNodeID,
+      term: consensusState.currentTerm,
+      leaderID,
+      granted: true,
+      leaseUntil: verificationLeaseUntil,
+    });
+  } catch (error) {
+    res.status(500).json({ nodeID: teeNodeID, term: consensusState.currentTerm, granted: false, error: error.message });
+  }
+});
+
+app.post('/internal/raft/verification-lease-release', (req, res) => {
+  try {
+    const { term, leaderID } = req.body;
+    if (!leaderID) throw new Error('leaderID is required');
+    if (raftAuthRequired() && req.raftSenderID !== leaderID) {
+      throw new Error('leaderID does not match authenticated sender');
+    }
+    const isCurrentLeader = Number(term) === Number(consensusState.currentTerm)
+      && leaderID === consensusState.leaderID;
+    if (isCurrentLeader) {
+      verificationLeaseUntil = 0;
+      electionDeadlineAt = Date.now() + electionTimeoutMs();
+    }
+    res.json({ nodeID: teeNodeID, term: consensusState.currentTerm, released: isCurrentLeader });
+  } catch (error) {
+    res.status(500).json({ nodeID: teeNodeID, term: consensusState.currentTerm, released: false, error: error.message });
   }
 });
 
@@ -1294,6 +1524,7 @@ app.post('/internal/raft/append-entries', async (req, res) => {
         localResult = await verifyHXMsgLocally({
           hxmsg: entry.hxmsg,
           helperData: entry.helperData || {},
+          enforceExpiry: Number(entry.index) > Number(leaderCommit),
         });
       } else if (entry.response) {
         const digest = computeResponseDigest(entry.response);
@@ -1302,11 +1533,18 @@ app.post('/internal/raft/append-entries', async (req, res) => {
           response: entry.response,
           helperData: entry.helperData || {},
         }) };
+      } else if (entry.checkpoint) {
+        const verified = verifyCheckpointLocally(entry.checkpoint);
+        assertEntryMatchesDigest(entry, verified.requestID, verified.signingDigest);
+        localResult = { verificationResult: verified };
       } else if (entry.batch) {
         assertEntryMatchesBatch(entry, entry.batch);
-        localResult = { verificationResult: await verifyBatchLocally({ batch: entry.batch }) };
+        localResult = { verificationResult: await verifyBatchLocally({
+          batch: entry.batch,
+          enforceExpiry: Number(entry.index) > Number(leaderCommit),
+        }) };
       } else {
-        throw new Error('raft entry missing hxmsg, response, batch, or noop');
+        throw new Error('raft entry missing hxmsg, response, checkpoint, batch, or noop');
       }
       verificationResults.push({ entryDigest: entry.entryDigest, ...localResult.verificationResult });
       appendConsensusEntry(entry);
@@ -1365,6 +1603,7 @@ app.post('/internal/raft/sign-committed', async (req, res) => {
 // ============ /attest: h-xmsg verification + Raft-backed committed signing ============
 
 app.post('/attest', async (req, res) => {
+  let leaseAcquired = false;
   try {
     if (req.body?.hxmsg) {
       const leaderRoute = await ensureRaftLeaderOrForward(req.body);
@@ -1372,6 +1611,8 @@ app.post('/attest', async (req, res) => {
         res.status(leaderRoute.status).json(leaderRoute.body);
         return;
       }
+      await acquireVerificationLease();
+      leaseAcquired = true;
       const { hxmsg, helperData } = normalizeAttestationInput(req.body);
       const localResult = await verifyHXMsgLocally({
         hxmsg,
@@ -1395,12 +1636,15 @@ app.post('/attest', async (req, res) => {
   } catch (error) {
     console.error('[attest] Error:', error.stack || error.message);
     res.status(500).json({ error: error.message });
+  } finally {
+    if (leaseAcquired) await releaseVerificationLease();
   }
 });
 
 // ============ /attest-batch: verify many h-xmsgs, commit one batch digest ============
 
 app.post('/attest-batch', async (req, res) => {
+  let leaseAcquired = false;
   try {
     const hxmsgs = req.body?.hxmsgs;
     const helperDataList = req.body?.helperDataList || [];
@@ -1413,6 +1657,8 @@ app.post('/attest-batch', async (req, res) => {
       res.status(leaderRoute.status).json(leaderRoute.body);
       return;
     }
+    await acquireVerificationLease();
+    leaseAcquired = true;
     const built = buildHXMsgBatch(hxmsgs);
     const batch = {
       batchID: built.batchID,
@@ -1426,7 +1672,14 @@ app.post('/attest-batch', async (req, res) => {
     const localResult = await verifyBatchLocally({ batch });
     const teeBatchCertification = await collectClusterBatchCertifications({ batch, localResult });
     if (!teeBatchCertification.quorumReached) {
-      throw new Error(`TEE batch quorum not reached: ${teeBatchCertification.reached}/${teeBatchCertification.threshold}`);
+      const failures = (teeBatchCertification.appendAcks || [])
+        .filter((ack) => !ack.accepted)
+        .map((ack) => `${ack.nodeID}:${ack.error || ack.reason || 'rejected'}`)
+        .join('; ');
+      throw new Error(
+        `TEE batch quorum not reached: ${teeBatchCertification.reached}/${teeBatchCertification.threshold}`
+          + (failures ? `; ${failures}` : '')
+      );
     }
     res.json({
       batchID: built.batchID,
@@ -1440,10 +1693,13 @@ app.post('/attest-batch', async (req, res) => {
   } catch (error) {
     console.error('[attest-batch] Error:', error.message);
     res.status(500).json({ error: error.message });
+  } finally {
+    if (leaseAcquired) await releaseVerificationLease();
   }
 });
 
 app.post('/attest-response', async (req, res) => {
+  let leaseAcquired = false;
   try {
     if (!req.body?.response) throw new Error('response is required');
     const leaderRoute = await ensureRaftLeaderOrForward(req.body, '/attest-response');
@@ -1451,6 +1707,8 @@ app.post('/attest-response', async (req, res) => {
       res.status(leaderRoute.status).json(leaderRoute.body);
       return;
     }
+    await acquireVerificationLease();
+    leaseAcquired = true;
     const response = req.body.response;
     const localVerification = await verifyResponseFactLocally({
       response,
@@ -1462,7 +1720,14 @@ app.post('/attest-response', async (req, res) => {
       localResult: { verificationResult: localVerification },
     });
     if (!teeClusterCertification.quorumReached) {
-      throw new Error(`TEE cluster quorum not reached: ${teeClusterCertification.reached}/${teeClusterCertification.threshold}`);
+      const failures = (teeClusterCertification.appendAcks || [])
+        .filter((ack) => !ack.accepted)
+        .map((ack) => `${ack.nodeID}:${ack.error || ack.reason || 'rejected'}`)
+        .join('; ');
+      throw new Error(
+        `TEE cluster quorum not reached: ${teeClusterCertification.reached}/${teeClusterCertification.threshold}`
+          + (failures ? `; ${failures}` : '')
+      );
     }
     res.json({
       responseDigest: computeResponseDigest(response),
@@ -1472,11 +1737,49 @@ app.post('/attest-response', async (req, res) => {
   } catch (error) {
     console.error('[attest-response] Error:', error.message);
     res.status(500).json({ error: error.message });
+  } finally {
+    if (leaseAcquired) await releaseVerificationLease();
+  }
+});
+
+app.post('/attest-checkpoint', async (req, res) => {
+  try {
+    const checkpointEnvelope = {
+      checkpoint: req.body?.checkpoint,
+      records: req.body?.records,
+    };
+    const verified = verifyCheckpointLocally(checkpointEnvelope);
+    const leaderRoute = await ensureRaftLeaderOrForward(req.body, '/attest-checkpoint');
+    if (!leaderRoute.localLeader) {
+      res.status(leaderRoute.status).json(leaderRoute.body);
+      return;
+    }
+    const teeClusterCertification = await collectClusterDigestCertifications({
+      checkpoint: checkpointEnvelope,
+      requestID: verified.requestID,
+      digest: verified.signingDigest,
+      signatureDigestType: 'lifecycleCheckpointDigest',
+      helperData: {},
+      localResult: { verificationResult: verified },
+    });
+    if (!teeClusterCertification.quorumReached) {
+      throw new Error(`TEE cluster quorum not reached: ${teeClusterCertification.reached}/${teeClusterCertification.threshold}`);
+    }
+    res.json({
+      terminalStateRoot: verified.terminalStateRoot,
+      checkpointDigest: verified.signingDigest,
+      teeClusterCertification,
+      verificationResult: verified,
+    });
+  } catch (error) {
+    console.error('[attest-checkpoint] Error:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
 async function sendHeartbeats() {
   if (consensusState.role !== 'leader') return;
+  if (raftReplicationInFlight > 0) return;
   if (!hasCommittedEntryInCurrentTerm()) {
     try {
       await ensureCurrentTermCommitBarrier();
@@ -1486,10 +1789,14 @@ async function sendHeartbeats() {
   }
   await Promise.all(clusterPeerDefs().map(async (peer) => {
     try {
-      await sendAppendEntries(peer, makeAppendEntriesPayload({
-        entries: [],
-        leaderCommit: consensusState.commitIndex,
-      }));
+      const replication = await replicateLogToPeer(peer, lastLogIndex());
+      if (!replication.accepted) {
+        throw new Error(replication.error || 'follower catch-up failed');
+      }
+      const committedEntry = logEntryAt(consensusState.commitIndex);
+      if (committedEntry && Number(replication.matchIndex || 0) >= Number(committedEntry.index)) {
+        await sendAppendEntries(peer, makeCommitNotificationPayload(committedEntry));
+      }
     } catch (error) {
       console.error(`[${teeNodeID}] heartbeat to ${peer.id} failed:`, error.message);
     }

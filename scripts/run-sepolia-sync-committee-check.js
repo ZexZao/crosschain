@@ -11,6 +11,7 @@ const {
   resolveTrustedBlockRoot,
   saveSyncCommitteeState,
   syncCommitteeStateFile,
+  updateEnvTrustedBlockRoot,
 } = require('../shared/evm/sync-committee-state');
 
 loadDotEnv();
@@ -42,7 +43,7 @@ async function main() {
     throw new Error(`SEPOLIA_TRUSTED_BLOCK_ROOT or ${syncCommitteeStateFile()} is required`);
   }
 
-  const startedAt = Date.now();
+  const startedAt = process.hrtime.bigint();
   const update = await fetchBeaconLightClientInputs({
     beaconApiUrl,
     executionProvider: provider,
@@ -56,10 +57,12 @@ async function main() {
     targetBlockNumber,
     targetBlockHash,
   });
-  const elapsedMs = Date.now() - startedAt;
-  const nextState = saveSyncCommitteeState({
+  const elapsedMs = Number((process.hrtime.bigint() - startedAt) / 1000000n);
+  const nextStateInput = {
     chainID: update.chainID,
     trustedBlockRoot: verified.nextTrustedBlockRoot,
+    trustedBlockSlot: verified.nextTrustedBlockSlot,
+    finalizedBeaconBlockRoot: verified.finalizedBeaconBlockRoot,
     finalizedHeight: verified.finalizedHeight,
     finalizedHash: verified.finalizedHash,
     beaconFinalizedSlot: verified.beaconFinalizedSlot,
@@ -67,7 +70,14 @@ async function main() {
     syncCommitteePeriod: verified.syncCommitteePeriod,
     participantCount: verified.participantCount,
     source: 'run-sepolia-sync-committee-check',
-  });
+  };
+  const persist = process.env.SEPOLIA_SYNC_COMMITTEE_PERSIST !== 'false';
+  const nextState = persist
+    ? saveSyncCommitteeState(nextStateInput)
+    : { ...nextStateInput, updatedAt: new Date().toISOString(), persisted: false };
+  const envTrustedRootUpdate = persist
+    ? updateEnvTrustedBlockRoot(nextState.trustedBlockRoot)
+    : { updated: false, reason: 'preflight-read-only' };
 
   const output = {
     testType: 'sepolia-sync-committee-light-client',
@@ -79,8 +89,12 @@ async function main() {
     targetBlockHash,
     trustedBlockRoot: update.trustedBlockRoot,
     nextTrustedBlockRoot: verified.nextTrustedBlockRoot,
+    nextTrustedBlockSlot: verified.nextTrustedBlockSlot,
+    finalizedBeaconBlockRoot: verified.finalizedBeaconBlockRoot,
     stateFile: syncCommitteeStateFile(),
+    persisted: persist,
     savedState: nextState,
+    envTrustedRootUpdate,
     proofType: update.proofType,
     finalityVersion: update.finalityVersion,
     participantCount: verified.participantCount,
@@ -107,6 +121,8 @@ async function main() {
       `**committee update 数量**：${output.committeeUpdates.length}\n` +
       `**trusted root**：${output.trustedBlockRoot}\n` +
       `**next trusted root**：${output.nextTrustedBlockRoot}\n` +
+      `**next trusted checkpoint slot**：${output.nextTrustedBlockSlot}\n` +
+      `**verified finalized head root**：${output.finalizedBeaconBlockRoot}\n` +
       `**state file**：${output.stateFile}\n` +
       `**sync committee 参与数**：${output.participantCount}/${512}\n` +
       `**阈值**：${output.threshold}\n` +

@@ -58,6 +58,8 @@ library HXMsgLib {
         uint64 feedbackTimeout;
         bytes32 callbackRefHash;
         uint64 expireAt;
+        bytes32 replayScope;
+        uint64 sourceNonce;
     }
 
     struct ClusterCertificate {
@@ -155,7 +157,8 @@ library HXMsgLib {
         bytes32 feedbackHash = keccak256(
             abi.encode(m.feedbackRequired, m.expectedFeedbackMsgType, m.feedbackTimeout, m.callbackRefHash, m.expireAt)
         );
-        return keccak256(abi.encode(chainHash, actionHash, feedbackHash));
+        bytes32 replayHash = keccak256(abi.encode(m.replayScope, m.sourceNonce));
+        return keccak256(abi.encode(chainHash, actionHash, feedbackHash, replayHash));
     }
 
     function hashDeliveryFromFull(HXMsgOnChain calldata m, bytes32 hmsgDigest) internal pure returns (bytes32) {

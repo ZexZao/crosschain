@@ -79,6 +79,25 @@ async function waitForLeader(excludedLeader = null, timeoutMs = 30000) {
   throw new Error('leader election timed out');
 }
 
+async function waitForStableLeader(timeoutMs = 30000, stablePolls = 3) {
+  const started = nowMs();
+  let consecutive = 0;
+  while (nowMs() - started < timeoutMs) {
+    const statuses = await allStatuses();
+    const reachable = statuses.filter((item) => item.ok);
+    const leaders = reachable.filter((item) => item.role === 'leader');
+    const leader = leaders[0];
+    const converged = reachable.length === Object.keys(TEE_PORTS).length
+      && leaders.length === 1
+      && reachable.every((item) => Number(item.term) === Number(leader.term))
+      && reachable.every((item) => item.nodeID === leader.nodeID || item.leaderID === leader.nodeID);
+    consecutive = converged ? consecutive + 1 : 0;
+    if (consecutive >= stablePolls) return { leader, statuses };
+    await sleep(1000);
+  }
+  throw new Error('cluster did not converge to one stable leader');
+}
+
 async function runCase(results, caseId, name, fn) {
   const started = nowMs();
   try {
@@ -178,10 +197,10 @@ async function main() {
     if (!stoppedLeaderID) throw new Error('no stopped leader from previous case');
     dockerCompose(['start', SERVICE_BY_NODE[stoppedLeaderID]]);
     const statuses = await waitForClusterSize(5, 30000);
-    await sleep(3000);
-    const finalStatuses = await allStatuses();
+    const elected = await waitForStableLeader(30000);
+    const finalStatuses = elected.statuses;
     const leaders = finalStatuses.filter((item) => item.ok && item.role === 'leader');
-    if (leaders.length < 1) throw new Error('no leader after old leader rejoined');
+    if (leaders.length !== 1) throw new Error(`expected one leader after rejoin, got ${leaders.length}`);
     return {
       restartedLeaderID: stoppedLeaderID,
       leaderIDs: leaders.map((item) => item.nodeID),
