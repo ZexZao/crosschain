@@ -1,4 +1,5 @@
 const { ethers } = require('ethers');
+const { clusterIDForSubnet, sourceChainTypeForProfile } = require('./domains');
 
 const SIMULATED_ATTESTATION_TYPE = 'SIMULATED_TDX_QUOTE_V1';
 const DEFAULT_ENCLAVE_MEASUREMENT = ethers.keccak256(
@@ -22,6 +23,8 @@ function normalizeIdentity(identity) {
     nodeID: identity.nodeID || '',
     subnetID: identity.subnetID || '',
     subnetProfile: identity.subnetProfile || '',
+    clusterID: identity.clusterID || clusterIDForSubnet(identity.subnetID || 'ethereum-proof-subnet'),
+    sourceChainType: Number(identity.sourceChainType || sourceChainTypeForProfile(identity.subnetProfile || 'ethereum')),
   };
 }
 
@@ -33,9 +36,12 @@ function simulatedQuoteHash(identity) {
   });
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
+      ['string', 'bytes32', 'bytes32', 'uint8', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
       [
         SIMULATED_ATTESTATION_TYPE,
+        normalized.clusterID,
+        ethers.id(normalized.subnetID),
+        normalized.sourceChainType,
         normalized.teeAddress,
         normalized.signerIndex,
         normalized.enclavePubKeyHash,
@@ -53,9 +59,12 @@ function attestationRegistrationDigest(identity) {
   const quoteHash = normalized.quoteHash || simulatedQuoteHash(normalized);
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
+      ['string', 'bytes32', 'bytes32', 'uint8', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
       [
         normalized.attestationType,
+        normalized.clusterID,
+        ethers.id(normalized.subnetID),
+        normalized.sourceChainType,
         normalized.teeAddress,
         normalized.signerIndex,
         normalized.enclavePubKeyHash,
@@ -74,6 +83,7 @@ function buildSimulatedAttestationIdentity({
   nodeID,
   subnetID,
   subnetProfile,
+  clusterID: configuredClusterID,
   signerIndex: configuredSignerIndex,
   chainState,
   epoch = Number(process.env.TEE_ATTESTATION_EPOCH || 1),
@@ -94,6 +104,10 @@ function buildSimulatedAttestationIdentity({
     nodeID: nodeID || '',
     subnetID: subnetID || process.env.TEE_SUBNET_ID || '',
     subnetProfile: subnetProfile || process.env.TEE_SUBNET_PROFILE || '',
+    clusterID: configuredClusterID || (process.env.TEE_CLUSTER_ID
+      ? ethers.keccak256(ethers.toUtf8Bytes(process.env.TEE_CLUSTER_ID))
+      : clusterIDForSubnet(subnetID || process.env.TEE_SUBNET_ID || 'ethereum-proof-subnet')),
+    sourceChainType: sourceChainTypeForProfile(subnetProfile || process.env.TEE_SUBNET_PROFILE || 'ethereum'),
     teeAddress: wallet.address,
     signerIndex,
     enclavePubKey,
@@ -125,6 +139,9 @@ function optionsSignerIndex(options = {}) {
 function evmRegistrationTuple(identity) {
   const normalized = normalizeIdentity(identity);
   return [
+    normalized.clusterID,
+    ethers.id(normalized.subnetID),
+    normalized.sourceChainType,
     normalized.teeAddress,
     normalized.signerIndex,
     normalized.enclavePubKeyHash,

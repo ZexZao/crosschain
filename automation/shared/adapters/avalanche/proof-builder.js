@@ -22,6 +22,10 @@ const {
   decodeHXMsgWarpPayload,
   validatorSetHash,
 } = require('../../../../shared/avalanche/warp-proof');
+const {
+  PRIMARY_NETWORK_ID,
+  normalizeRpcValidators,
+} = require('../../../../shared/avalanche/pchain-trust');
 
 const NODE_ENDPOINTS = () => String(process.env.AVALANCHE_NODE_ENDPOINTS
   || 'http://127.0.0.1:9650,http://127.0.0.1:9656,http://127.0.0.1:9652,http://127.0.0.1:9654,http://127.0.0.1:9658')
@@ -35,18 +39,17 @@ async function rpc(url, method, params) {
 
 async function getValidatorSetRef() {
   const pChain = process.env.AVALANCHE_PCHAIN_RPC_URL || 'http://127.0.0.1:9650/ext/P';
-  const validatorsResponse = await rpc(pChain, 'platform.getCurrentValidators', [{}]);
-  const heightResponse = await rpc(pChain, 'platform.getHeight', [{}]).catch(() => ({ height: 0 }));
-  const validators = validatorsResponse.validators.map((validator) => ({
-    nodeID: validator.nodeID,
-    weight: validator.weight,
-    publicKey: validator.signer.publicKey,
-  }));
+  const heightResponse = await rpc(pChain, 'platform.getHeight', {});
+  const pChainHeight = Number(heightResponse.height);
+  const validatorSetsResponse = await rpc(pChain, 'platform.getAllValidatorsAt', { height: pChainHeight });
+  const primarySet = validatorSetsResponse.validatorSets?.[PRIMARY_NETWORK_ID];
+  if (!primarySet) throw new Error(`Primary Network validator set missing at P-Chain height ${pChainHeight}`);
+  const validators = normalizeRpcValidators(primarySet.validators);
   const ref = {
     networkID: Number(process.env.AVALANCHE_NETWORK_ID || 1337),
-    pChainHeight: Number(heightResponse.height || heightResponse || 0),
+    pChainHeight,
     validatorSetHash: validatorSetHash(validators),
-    totalWeight: validators.reduce((sum, item) => sum + BigInt(item.weight), 0n).toString(),
+    totalWeight: String(primarySet.totalWeight),
     quorumNumerator: 67,
     quorumDenominator: 100,
     canonicalOrdering: 'nodeID-ascending',

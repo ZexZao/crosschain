@@ -64,7 +64,6 @@ async function buildEthereumEvidence({ profile, targetProfile, event, material }
       sourceDeployment,
       targetDeployment: targetProfile.deployment,
       targetChainType: targetProfile.chainType,
-      compactTarget: true,
       ...common,
     });
   let committeeHeaderUpdate = null;

@@ -20,7 +20,6 @@ interface TargetContractExecuteCompactSelector {
 }
 
 contract HXMsgGateway {
-    using HXMsgLib for HXMsgLib.HXMsgOnChain;
     using HXMsgLib for HXMsgLib.HXMsgMinimal;
 
     uint8 public constant ACTION_CONTRACT_CALL = 1;
@@ -50,31 +49,18 @@ contract HXMsgGateway {
         uint64 expireAt;
         bytes32 replayScope;
         uint64 sourceNonce;
+        uint8 sourceChainType;
+        bytes32 sourceChainID;
     }
 
     event HXMsgAccepted(bytes32 indexed requestID, bytes32 indexed clusterID, address indexed target);
     event HXMsgBatchAccepted(bytes32 indexed batchID, bytes32 indexed batchRoot, uint256 size);
-    event HXMsgRejected(bytes32 indexed requestID, string reason);
     event ReplayMarked(bytes32 indexed replayScope, uint64 indexed sourceNonce, bytes32 indexed requestID);
 
     constructor(address registry, uint8 chainType) {
         require(chainType == 1 || chainType == 3, "unsupported local chain type");
         teeRegistry = TEERegistry(registry);
         localChainType = chainType;
-    }
-
-    function executeHXMsgMinimalCluster(
-        HXMsgLib.HXMsgMinimal calldata hxmsg,
-        address target,
-        bytes calldata callData,
-        HXMsgLib.ClusterCertificate calldata cert
-    ) external {
-        bytes32 deliveryDigest = hxmsg.hashDelivery();
-        _validateMinimal(hxmsg, target, callData);
-        _verifyClusterCert(deliveryDigest, cert);
-
-        _executeTarget(hxmsg, target, callData);
-        emit HXMsgAccepted(hxmsg.requestID, cert.clusterID, target);
     }
 
     /// @notice 单条紧凑消息入口。使用强类型 CompactCall，避免把静态 tuple 错误封装为 bytes。
@@ -86,70 +72,9 @@ contract HXMsgGateway {
     ) external {
         bytes32 deliveryDigest = hxmsg.hashDelivery();
         _validateMinimalCompact(hxmsg, target, call);
-        _verifyClusterCert(deliveryDigest, cert);
+        _verifyClusterCert(deliveryDigest, hxmsg.sourceChainType, hxmsg.sourceChainID, cert);
         _executeCompactTarget(hxmsg, target, call);
         emit HXMsgAccepted(hxmsg.requestID, cert.clusterID, target);
-    }
-
-    function executeHXMsgMinimalBatchCluster(
-        HXMsgLib.HXMsgMinimal[] calldata hxmsgs,
-        address target,
-        bytes[] calldata callDatas,
-        bytes32 batchID,
-        bytes32 batchRoot,
-        bytes32[][] calldata merkleProofs,
-        HXMsgLib.ClusterCertificate calldata batchCert
-    ) external {
-        require(hxmsgs.length > 0, "empty batch");
-        require(hxmsgs.length == callDatas.length, "bad calldata count");
-        require(hxmsgs.length == merkleProofs.length, "bad proof count");
-
-        bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(hxmsgs.length), bytes32(uint256(block.chainid)));
-        _verifyClusterCert(batchDigest, batchCert);
-
-        for (uint256 i = 0; i < hxmsgs.length; i += 1) {
-            _validateMinimal(hxmsgs[i], target, callDatas[i]);
-            bytes32 leaf = hashBatchLeaf(hxmsgs[i]);
-            require(_verifyMerkleProof(leaf, merkleProofs[i], batchRoot), "bad batch proof");
-            _executeTarget(hxmsgs[i], target, callDatas[i]);
-            emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target);
-        }
-        emit HXMsgBatchAccepted(batchID, batchRoot, hxmsgs.length);
-    }
-
-    function executeHXMsgMinimalCompactBatchCluster(
-        HXMsgLib.HXMsgMinimal[] calldata hxmsgs,
-        address target,
-        CompactCall[] calldata calls,
-        bytes32 batchID,
-        bytes32 batchRoot,
-        bytes32[][] calldata merkleProofs,
-        HXMsgLib.ClusterCertificate calldata batchCert
-    ) external {
-        require(hxmsgs.length > 0, "empty batch");
-        require(hxmsgs.length == calls.length, "bad call count");
-        require(hxmsgs.length == merkleProofs.length, "bad proof count");
-
-        bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(hxmsgs.length), bytes32(uint256(block.chainid)));
-        _verifyClusterCert(batchDigest, batchCert);
-
-        for (uint256 i = 0; i < hxmsgs.length; i += 1) {
-            _validateMinimalCompact(hxmsgs[i], target, calls[i]);
-            bytes32 leaf = hashBatchLeaf(hxmsgs[i]);
-            require(_verifyMerkleProof(leaf, merkleProofs[i], batchRoot), "bad batch proof");
-        }
-        if (_allAssetCalls(calls)) {
-            _executeCompactAssetBatch(hxmsgs, target, calls);
-            for (uint256 i = 0; i < hxmsgs.length; i += 1) {
-                emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target);
-            }
-        } else {
-            for (uint256 i = 0; i < hxmsgs.length; i += 1) {
-                _executeCompactTarget(hxmsgs[i], target, calls[i]);
-                emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target);
-            }
-        }
-        emit HXMsgBatchAccepted(batchID, batchRoot, hxmsgs.length);
     }
 
     /// @notice Executes a compact batch after recomputing its Merkle root on-chain.
@@ -167,9 +92,11 @@ contract HXMsgGateway {
         require(_computeMinimalBatchRoot(hxmsgs) == batchRoot, "bad batch root");
 
         bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(hxmsgs.length), bytes32(uint256(block.chainid)));
-        _verifyClusterCert(batchDigest, batchCert);
+        _verifyClusterCert(batchDigest, hxmsgs[0].sourceChainType, hxmsgs[0].sourceChainID, batchCert);
 
         for (uint256 i = 0; i < hxmsgs.length; i += 1) {
+            require(hxmsgs[i].sourceChainType == hxmsgs[0].sourceChainType
+                && hxmsgs[i].sourceChainID == hxmsgs[0].sourceChainID, "mixed source subnet batch");
             _validateMinimalCompact(hxmsgs[i], target, calls[i]);
         }
         if (_allAssetCalls(calls)) {
@@ -192,41 +119,6 @@ contract HXMsgGateway {
         CompactCall[] calldata calls,
         bytes32 batchID,
         bytes32 batchRoot,
-        bytes32[][] calldata merkleProofs,
-        HXMsgLib.ClusterCertificate calldata batchCert
-    ) external {
-        require(deliveries.length > 0, "empty batch");
-        require(deliveries.length == calls.length, "bad call count");
-        require(deliveries.length == merkleProofs.length, "bad proof count");
-
-        bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(deliveries.length), bytes32(uint256(block.chainid)));
-        _verifyClusterCert(batchDigest, batchCert);
-
-        for (uint256 i = 0; i < deliveries.length; i += 1) {
-            _validateFabricEVMCompact(deliveries[i], target, calls[i]);
-            bytes32 leaf = hashFabricEVMCompactBatchLeaf(deliveries[i], target);
-            require(_verifyMerkleProof(leaf, merkleProofs[i], batchRoot), "bad batch proof");
-        }
-        if (_allAssetCalls(calls)) {
-            _executeCompactDeliveryAssetBatch(deliveries, target, calls);
-            for (uint256 i = 0; i < deliveries.length; i += 1) {
-                emit HXMsgAccepted(deliveries[i].requestID, batchCert.clusterID, target);
-            }
-        } else {
-            for (uint256 i = 0; i < deliveries.length; i += 1) {
-                _executeCompactDelivery(deliveries[i], target, calls[i]);
-                emit HXMsgAccepted(deliveries[i].requestID, batchCert.clusterID, target);
-            }
-        }
-        emit HXMsgBatchAccepted(batchID, batchRoot, deliveries.length);
-    }
-
-    function executeFabricEVMCompactBatchCluster(
-        FabricEVMCompactDelivery[] calldata deliveries,
-        address target,
-        CompactCall[] calldata calls,
-        bytes32 batchID,
-        bytes32 batchRoot,
         HXMsgLib.ClusterCertificate calldata batchCert
     ) external {
         require(deliveries.length > 0, "empty batch");
@@ -235,9 +127,11 @@ contract HXMsgGateway {
         bytes32 recomputedRoot = _computeFabricEVMCompactBatchRoot(deliveries, target);
         require(recomputedRoot == batchRoot, "bad batch root");
         bytes32 batchDigest = hashBatchSigningDigest(batchID, batchRoot, uint64(deliveries.length), bytes32(uint256(block.chainid)));
-        _verifyClusterCert(batchDigest, batchCert);
+        _verifyClusterCert(batchDigest, deliveries[0].sourceChainType, deliveries[0].sourceChainID, batchCert);
 
         for (uint256 i = 0; i < deliveries.length; i += 1) {
+            require(deliveries[i].sourceChainType == deliveries[0].sourceChainType
+                && deliveries[i].sourceChainID == deliveries[0].sourceChainID, "mixed source subnet batch");
             _validateFabricEVMCompact(deliveries[i], target, calls[i]);
         }
         if (_allAssetCalls(calls)) {
@@ -252,10 +146,6 @@ contract HXMsgGateway {
             }
         }
         emit HXMsgBatchAccepted(batchID, batchRoot, deliveries.length);
-    }
-
-    function hashBatchLeaf(HXMsgLib.HXMsgMinimal calldata hxmsg) public pure returns (bytes32) {
-        return keccak256(abi.encode(hxmsg.requestID, hxmsg.hmsgDigest, hxmsg.hashDelivery()));
     }
 
     function hashBatchSigningDigest(bytes32 batchID, bytes32 batchRoot, uint64 batchSize, bytes32 targetChainID)
@@ -275,45 +165,11 @@ contract HXMsgGateway {
         return keccak256(abi.encode(delivery.requestID, delivery.hmsgDigest, deliveryDigest));
     }
 
-    function _validateMinimal(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, bytes calldata callData) internal view {
-        _requireNotProcessed(hxmsg.replayScope, hxmsg.sourceNonce);
-        require(hxmsg.expireAt >= block.timestamp, "expired");
-        require(hxmsg.targetChainType == localChainType, "wrong target chain type");
-        require(hxmsg.targetChainID == bytes32(uint256(block.chainid)), "wrong target chain");
-        require(hxmsg.actionType == ACTION_CONTRACT_CALL, "bad action");
-        require(hxmsg.targetObject == bytes32(uint256(uint160(target))), "target mismatch");
-        require(keccak256(callData) == hxmsg.callDataHash, "bad calldata hash");
-        if (hxmsg.feedbackRequired) {
-            require(
-                hxmsg.expectedFeedbackMsgType == MSG_TYPE_RESPONSE ||
-                    hxmsg.expectedFeedbackMsgType == MSG_TYPE_ACK ||
-                    hxmsg.expectedFeedbackMsgType == MSG_TYPE_CHALLENGE,
-                "bad feedback type"
-            );
-            require(hxmsg.feedbackTimeout == 0 || hxmsg.feedbackTimeout >= block.timestamp, "feedback expired");
-        } else {
-            require(hxmsg.expectedFeedbackMsgType == 0, "unexpected feedback type");
-            require(hxmsg.feedbackTimeout == 0, "unexpected feedback timeout");
-            require(hxmsg.callbackRefHash == bytes32(0), "unexpected callback ref");
-        }
-
-        bytes32 targetExecutionHash = keccak256(
-            abi.encode(
-                hxmsg.requestID,
-                hxmsg.targetChainID,
-                hxmsg.targetObject,
-                hxmsg.functionSelector,
-                hxmsg.callDataHash,
-                hxmsg.receiver
-            )
-        );
-        require(targetExecutionHash == hxmsg.targetExecutionHash, "bad target execution hash");
-    }
-
     function _validateMinimalCompact(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, CompactCall calldata call)
         internal
         view
     {
+        require(hxmsg.sourceChainType != 0 && hxmsg.sourceChainID != bytes32(0), "missing source security domain");
         _requireNotProcessed(hxmsg.replayScope, hxmsg.sourceNonce);
         require(hxmsg.expireAt >= block.timestamp, "expired");
         require(hxmsg.targetChainType == localChainType, "wrong target chain type");
@@ -371,6 +227,7 @@ contract HXMsgGateway {
         address target,
         CompactCall calldata call
     ) internal view {
+        require(delivery.sourceChainType != 0 && delivery.sourceChainID != bytes32(0), "missing source security domain");
         _requireNotProcessed(delivery.replayScope, delivery.sourceNonce);
         require(delivery.expireAt >= block.timestamp, "expired");
         require(hashCompactCall(call) == delivery.callDataHash, "bad compact call hash");
@@ -395,7 +252,8 @@ contract HXMsgGateway {
             )
         );
         bytes32 chainHash = keccak256(
-            abi.encode(delivery.requestID, delivery.hmsgDigest, localChainType, targetChainID, ACTION_CONTRACT_CALL)
+            abi.encode(delivery.requestID, delivery.hmsgDigest, delivery.sourceChainType, delivery.sourceChainID,
+                localChainType, targetChainID, ACTION_CONTRACT_CALL)
         );
         bytes32 actionHash = keccak256(
             abi.encode(
@@ -413,10 +271,16 @@ contract HXMsgGateway {
 
     function _verifyClusterCert(
         bytes32 signingDigest,
+        uint8 sourceChainType,
+        bytes32 sourceChainID,
         HXMsgLib.ClusterCertificate calldata cert
     ) internal view {
+        require(cert.sourceChainType == sourceChainType, "wrong source TEE subnet");
+        require(cert.sourceChainID == sourceChainID, "wrong source chain certificate");
         require(teeRegistry.verifyClusterCertificate(signingDigest, TEERegistry.ClusterCertificate({
             clusterID: cert.clusterID,
+            sourceChainType: cert.sourceChainType,
+            sourceChainID: cert.sourceChainID,
             epoch: cert.epoch,
             threshold: cert.threshold,
             participantCount: cert.participantCount,
@@ -424,24 +288,10 @@ contract HXMsgGateway {
             selectedSignerHash: cert.selectedSignerHash,
             signatures: cert.signatures,
             signingDigest: cert.signingDigest,
+            subjectDigest: cert.subjectDigest,
             committedTerm: cert.committedTerm,
             committedIndex: cert.committedIndex
         })), "bad cluster cert");
-    }
-
-    function _executeTarget(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, bytes calldata callData) internal {
-        _markProcessed(hxmsg.replayScope, hxmsg.sourceNonce, hxmsg.requestID);
-        (bool ok, bytes memory ret) = target.call(
-            abi.encodeWithSelector(hxmsg.functionSelector, hxmsg.requestID, callData)
-        );
-        if (!ok) {
-            if (ret.length > 0) {
-                assembly {
-                    revert(add(ret, 32), mload(ret))
-                }
-            }
-            revert("target call failed");
-        }
     }
 
     function _executeCompactTarget(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, CompactCall calldata call)
@@ -532,14 +382,6 @@ contract HXMsgGateway {
             }
             revert("asset batch target call failed");
         }
-    }
-
-    function _verifyMerkleProof(bytes32 leaf, bytes32[] calldata proof, bytes32 expectedRoot) internal pure returns (bool) {
-        bytes32 value = leaf;
-        for (uint256 i = 0; i < proof.length; i += 1) {
-            value = _hashPair(value, proof[i]);
-        }
-        return value == expectedRoot;
     }
 
     function _computeFabricEVMCompactBatchRoot(

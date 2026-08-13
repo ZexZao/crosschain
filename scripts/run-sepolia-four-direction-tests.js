@@ -16,6 +16,7 @@ const PREFLIGHT_ONLY = process.env.SEPOLIA_FOUR_DIRECTION_PREFLIGHT_ONLY === 'tr
 const SUMMARY_FILE = path.join(RUNTIME, 'sepolia-four-direction-automation-result.json');
 const LOCAL_EVM_FUNDER_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const LOCAL_AVALANCHE_FUNDER_KEY = '0x56289e99c94b6912bfc12adc093c9b51124f0dc54ac7a766b2bc5ccf558d8027';
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const LOCAL_CHAINS = [
   {
     label: 'local Ethereum',
@@ -100,17 +101,26 @@ async function waitForAutomation() {
 async function waitForRPC(chain) {
   const provider = new ethers.JsonRpcProvider(chain.rpcURL, chain.chainID, { staticNetwork: true });
   const deadline = Date.now() + 180_000;
+  let consecutiveReadyChecks = 0;
   while (Date.now() < deadline) {
     try {
       const network = await provider.getNetwork();
-      if (Number(network.chainId) === chain.chainID) {
+      const blockNumber = await provider.getBlockNumber();
+      const latestBlock = await provider.getBlock('latest');
+      if (Number(network.chainId) === chain.chainID && latestBlock && Number(latestBlock.number) >= blockNumber) {
+        consecutiveReadyChecks += 1;
+      } else {
+        consecutiveReadyChecks = 0;
+      }
+      if (consecutiveReadyChecks >= 3) {
         console.log(`${chain.label.toUpperCase()} RPC PASS chainID=${network.chainId}`);
         return provider;
       }
     } catch (_error) {
+      consecutiveReadyChecks = 0;
       // The local nodes need a short warm-up after Docker/Avalanche CLI returns.
     }
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await sleep(2000);
   }
   throw new Error(`${chain.label} RPC did not become ready at ${chain.rpcURL}`);
 }
@@ -118,13 +128,36 @@ async function waitForRPC(chain) {
 async function createFundedDeploymentAccount(chain, provider) {
   const account = ethers.Wallet.createRandom();
   const funder = new ethers.Wallet(chain.funderKey, provider);
-  const tx = await funder.sendTransaction({
-    to: account.address,
-    value: ethers.parseEther(chain.fundingAmount),
-  });
-  await tx.wait();
-  process.env[chain.privateKeyEnv] = account.privateKey;
-  return account.address;
+  const requiredBalance = ethers.parseEther(chain.fundingAmount);
+  let lastError;
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      if (await provider.getBalance(account.address) >= requiredBalance) {
+        process.env[chain.privateKeyEnv] = account.privateKey;
+        return account.address;
+      }
+      const transaction = await funder.sendTransaction({ to: account.address, value: requiredBalance });
+      await transaction.wait();
+      process.env[chain.privateKeyEnv] = account.privateKey;
+      return account.address;
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.shortMessage || error?.message || error);
+      const transient = /ECONNRESET|ECONNREFUSED|socket|timeout|network|server response/i.test(message);
+      if (!transient || attempt === 6) break;
+      console.warn(`${chain.label} funding retry ${attempt}/6: ${message}`);
+      await sleep(attempt * 2000);
+    }
+  }
+  try {
+    if (await provider.getBalance(account.address) >= requiredBalance) {
+      process.env[chain.privateKeyEnv] = account.privateKey;
+      return account.address;
+    }
+  } catch (_error) {
+    // Preserve the original funding error below.
+  }
+  throw lastError || new Error(`${chain.label} deployment account funding failed`);
 }
 
 async function assertDeploymentIsLive(chain, provider) {

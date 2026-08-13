@@ -61,6 +61,10 @@ function stopAll() {
 function startPair() {
   stopAll();
   process.env.AUTOMATION_ENABLED_CHAINS = pair.split('-').map((name) => name === 'evm' ? 'ethereum' : name).join(',');
+  if (pair.includes('avalanche')) {
+    avalanche('start');
+    run(process.execPath, [path.join(__dirname, 'generate-avalanche-pchain-trust-anchor.js')]);
+  }
   const selectedMain = [];
   if (pair.includes('evm')) selectedMain.push('evm-node', ...ethereumTEE);
   if (pair.includes('fabric')) selectedMain.push(...fabricTEE);
@@ -68,7 +72,6 @@ function startPair() {
   selectedMain.push('automation');
   compose(['up', '-d', ...selectedMain]);
   if (pair.includes('fabric')) fabricCompose(['up', '-d', ...fabricServices]);
-  if (pair.includes('avalanche')) avalanche('start');
   console.log(`Active chain pair: ${pair}`);
 }
 

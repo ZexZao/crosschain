@@ -84,7 +84,7 @@ contract EvmSourceContract is ResponseLifecycleBase {
             targetChainID, targetDomainID, targetObject, functionSelector, callDataHash));
         bytes32 targetExecutionHash = keccak256(abi.encode(requestID, targetChainID, targetObject,
             functionSelector, callDataHash, receiver));
-        _storeResponseLifecycle(requestID, targetExecutionHash, policy);
+        _storeResponseLifecycle(requestID, targetChainID, targetExecutionHash, policy);
 
         emit CrossChainCallRequested(requestID, msg.sender, targetChainID, targetDomainID, targetObject,
             functionSelector, callDataHash, businessPayloadHash, receiver, currentNonce, expireAt,

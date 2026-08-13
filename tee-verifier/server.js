@@ -22,6 +22,7 @@ const { maintainHeaderWindow } = require('./adapters/evm-melv-adapter');
 const { verifyFabricExecutionView } = require('./adapters/fabric-hfsv-adapter');
 const { buildSimulatedAttestationIdentity } = require('../shared/tee/attestation');
 const { signCommittedDigest, buildQuorumCertificate } = require('../shared/tee/quorum-certificate');
+const { clusterIDForSubnet, sourceChainTypeForProfile, subnetSigningDigest } = require('../shared/tee/domains');
 
 loadDotEnv();
 ensureRuntime();
@@ -113,7 +114,11 @@ if (!state || (configuredKey && state.privateKey !== configuredKey)) {
   writeJSON(teeStateFile, state);
 }
 
-const CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes(process.env.TEE_CLUSTER_ID || 'HXMSG_TEE_CLUSTER_LOCAL_V1'));
+const CLUSTER_ID = process.env.TEE_CLUSTER_ID
+  ? ethers.keccak256(ethers.toUtf8Bytes(process.env.TEE_CLUSTER_ID))
+  : clusterIDForSubnet(teeSubnetID);
+const SUBNET_SOURCE_CHAIN_TYPE = sourceChainTypeForProfile(teeSubnetProfile);
+const SUBNET_EPOCH = Number(process.env.TEE_ATTESTATION_EPOCH || 1);
 
 function parseNumberSet(text) {
   return new Set(String(text || '')
@@ -164,6 +169,15 @@ function assertSubnetCanVerify(hxmsg) {
   }
   if (!supportedVerificationMethods.has(verificationMethod)) {
     throw new Error(`TEE subnet ${teeSubnetID} (${teeSubnetProfile}) cannot verify verificationMethod=${verificationMethod}`);
+  }
+}
+
+function assertSubnetSourceScope(sourceChainType, sourceChainID) {
+  if (Number(sourceChainType) !== SUBNET_SOURCE_CHAIN_TYPE) {
+    throw new Error(`TEE subnet ${teeSubnetID} is not authorized for source chainType=${sourceChainType}`);
+  }
+  if (!sourceChainID || sameHex(sourceChainID, ethers.ZeroHash)) {
+    throw new Error('sourceChainID is required for subnet-scoped certification');
   }
 }
 
@@ -222,8 +236,9 @@ function stableStringify(value) {
     .join(',')}}`;
 }
 
-function raftSignaturePayload({ senderID, timestamp, method, routePath, body }) {
+function raftSignaturePayload({ subnetID, senderID, timestamp, method, routePath, body }) {
   return [
+    subnetID,
     senderID,
     String(timestamp),
     String(method || 'POST').toUpperCase(),
@@ -237,6 +252,7 @@ function signRaftRequest({ routePath, body }) {
   if (!secret) return {};
   const timestamp = Date.now();
   const payload = raftSignaturePayload({
+    subnetID: teeSubnetID,
     senderID: teeNodeID,
     timestamp,
     method: 'POST',
@@ -245,6 +261,7 @@ function signRaftRequest({ routePath, body }) {
   });
   return {
     'x-tee-node-id': teeNodeID,
+    'x-tee-subnet-id': teeSubnetID,
     'x-tee-raft-ts': String(timestamp),
     'x-tee-raft-signature': crypto.createHmac('sha256', secret).update(payload).digest('hex'),
   };
@@ -263,15 +280,18 @@ function verifyRaftRequest(req, res, next) {
     const secret = raftSharedSecret();
     if (!secret) throw new Error('TEE_RAFT_SHARED_SECRET is required for Raft internal RPC');
     const senderID = String(req.get('x-tee-node-id') || '');
+    const subnetID = String(req.get('x-tee-subnet-id') || '');
     const timestamp = Number(req.get('x-tee-raft-ts') || 0);
     const signature = String(req.get('x-tee-raft-signature') || '');
     if (!knownRaftNodeIDs().has(senderID) || senderID === teeNodeID) {
       throw new Error('invalid Raft sender');
     }
+    if (subnetID !== teeSubnetID) throw new Error('cross-subnet Raft request rejected');
     if (!timestamp || Math.abs(Date.now() - timestamp) > 30000) {
       throw new Error('stale Raft RPC timestamp');
     }
     const payload = raftSignaturePayload({
+      subnetID,
       senderID,
       timestamp,
       method: req.method,
@@ -352,10 +372,20 @@ function becomeCandidate() {
   saveConsensusState();
 }
 
-function signingDigestForHXMsg(hxmsg) {
+function subjectDigestForHXMsg(hxmsg) {
   return [ChainType.EVM, ChainType.AVALANCHE].includes(Number(hxmsg.target?.chainType))
     ? computeHXMsgDeliveryDigest(hxmsg)
     : (hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg));
+}
+
+function scopedSigningDigest(subjectDigest, sourceChainType, sourceChainID) {
+  return subnetSigningDigest({
+    clusterID: CLUSTER_ID,
+    epoch: SUBNET_EPOCH,
+    sourceChainType,
+    sourceChainID,
+    subjectDigest,
+  });
 }
 
 function normalizeAttestationInput(body = {}) {
@@ -377,12 +407,13 @@ function makeConsensusEntry({ hxmsg, helperData, proposerID }) {
   hxmsg.hmsgDigest = hmsgDigest;
   const index = lastLogIndex() + 1;
   const term = Number(consensusState.currentTerm || 1);
-  const signingDigest = signingDigestForHXMsg(hxmsg);
+  const subjectDigest = subjectDigestForHXMsg(hxmsg);
+  const signingDigest = scopedSigningDigest(subjectDigest, hxmsg.source.chainType, hxmsg.source.chainID);
   const signatureDigestType = Number(hxmsg.target?.chainType) === ChainType.EVM ? 'deliveryDigest' : 'hmsgDigest';
   const entryDigest = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint64', 'uint64', 'bytes32', 'bytes32', 'bytes32', 'string'],
-      [term, index, hxmsg.header.requestID, hmsgDigest, signingDigest, signatureDigestType]
+      [term, index, hxmsg.header.requestID, subjectDigest, signingDigest, signatureDigestType]
     )
   );
   return {
@@ -391,9 +422,11 @@ function makeConsensusEntry({ hxmsg, helperData, proposerID }) {
     proposerID,
     requestID: hxmsg.header.requestID,
     hmsgDigest,
+    subjectDigest,
     signingDigest,
     signatureDigestType,
     sourceChainType: Number(hxmsg.source?.chainType),
+    sourceChainID: hxmsg.source?.chainID,
     targetChainType: Number(hxmsg.target?.chainType),
     entryDigest,
     status: 'pending',
@@ -403,13 +436,14 @@ function makeConsensusEntry({ hxmsg, helperData, proposerID }) {
   };
 }
 
-function makeDigestConsensusEntry({ requestID, digest, response, checkpoint, helperData, proposerID, signatureDigestType = 'responseDigest' }) {
+function makeDigestConsensusEntry({ requestID, digest, response, checkpoint, helperData, proposerID,
+  sourceChainType, sourceChainID, signatureDigestType = 'responseDigest' }) {
   const index = lastLogIndex() + 1;
   const term = Number(consensusState.currentTerm || 1);
   const entryDigest = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
-      [term, index, requestID, digest, signatureDigestType]
+      [term, index, requestID, scopedSigningDigest(digest, sourceChainType, sourceChainID), signatureDigestType]
     )
   );
   return {
@@ -418,7 +452,10 @@ function makeDigestConsensusEntry({ requestID, digest, response, checkpoint, hel
     proposerID,
     requestID,
     hmsgDigest: digest,
-    signingDigest: digest,
+    subjectDigest: digest,
+    signingDigest: scopedSigningDigest(digest, sourceChainType, sourceChainID),
+    sourceChainType: Number(sourceChainType),
+    sourceChainID,
     signatureDigestType,
     entryDigest,
     status: 'pending',
@@ -430,10 +467,13 @@ function makeDigestConsensusEntry({ requestID, digest, response, checkpoint, hel
 }
 
 function makeBatchConsensusEntry({ batch, proposerID }) {
+  const sourceChainType = Number(batch.hxmsgs[0].source.chainType);
+  const sourceChainID = batch.hxmsgs[0].source.chainID;
+  const signingDigest = scopedSigningDigest(batch.batchSigningDigest, sourceChainType, sourceChainID);
   const reusable = consensusState.log.find((item) => (
     Number(item.term) === Number(consensusState.currentTerm || 1)
     && sameHex(item.requestID, batch.batchID)
-    && sameHex(item.signingDigest, batch.batchSigningDigest)
+    && sameHex(item.signingDigest, signingDigest)
   ));
   if (reusable) return reusable;
   const index = lastLogIndex() + 1;
@@ -442,7 +482,7 @@ function makeBatchConsensusEntry({ batch, proposerID }) {
   const entryDigest = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
-      [term, index, batch.batchID, batch.batchSigningDigest, signatureDigestType]
+      [term, index, batch.batchID, signingDigest, signatureDigestType]
     )
   );
   return {
@@ -451,7 +491,10 @@ function makeBatchConsensusEntry({ batch, proposerID }) {
     proposerID,
     requestID: batch.batchID,
     hmsgDigest: batch.batchSigningDigest,
-    signingDigest: batch.batchSigningDigest,
+    subjectDigest: batch.batchSigningDigest,
+    signingDigest,
+    sourceChainType,
+    sourceChainID,
     signatureDigestType,
     entryDigest,
     status: 'pending',
@@ -560,14 +603,15 @@ function hasCommittedEntryInCurrentTerm() {
 
 function assertEntryMatchesHXMsg(entry, hxmsg) {
   const hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
-  const signingDigest = signingDigestForHXMsg(hxmsg);
+  const subjectDigest = subjectDigestForHXMsg(hxmsg);
+  const signingDigest = scopedSigningDigest(subjectDigest, hxmsg.source.chainType, hxmsg.source.chainID);
   if (entry.requestID !== hxmsg.header.requestID) throw new Error('consensus request mismatch');
   if (String(entry.hmsgDigest).toLowerCase() !== String(hmsgDigest).toLowerCase()) throw new Error('consensus hmsgDigest mismatch');
   if (String(entry.signingDigest).toLowerCase() !== String(signingDigest).toLowerCase()) throw new Error('consensus signingDigest mismatch');
   const expectedEntryDigest = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint64', 'uint64', 'bytes32', 'bytes32', 'bytes32', 'string'],
-      [Number(entry.term), Number(entry.index), entry.requestID, entry.hmsgDigest, entry.signingDigest, entry.signatureDigestType]
+      [Number(entry.term), Number(entry.index), entry.requestID, subjectDigest, entry.signingDigest, entry.signatureDigestType]
     )
   );
   if (String(entry.entryDigest).toLowerCase() !== expectedEntryDigest.toLowerCase()) {
@@ -575,18 +619,19 @@ function assertEntryMatchesHXMsg(entry, hxmsg) {
   }
 }
 
-function assertEntryMatchesDigest(entry, requestID, digest) {
+function assertEntryMatchesDigest(entry, requestID, digest, sourceChainType, sourceChainID) {
   if (entry.requestID !== requestID) throw new Error('consensus request mismatch');
   if (String(entry.hmsgDigest).toLowerCase() !== String(digest).toLowerCase()) {
     throw new Error('consensus digest mismatch');
   }
-  if (String(entry.signingDigest).toLowerCase() !== String(digest).toLowerCase()) {
+  const signingDigest = scopedSigningDigest(digest, sourceChainType, sourceChainID);
+  if (String(entry.signingDigest).toLowerCase() !== String(signingDigest).toLowerCase()) {
     throw new Error('consensus signing digest mismatch');
   }
   const expectedEntryDigest = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
-      [Number(entry.term), Number(entry.index), requestID, digest, entry.signatureDigestType]
+      [Number(entry.term), Number(entry.index), requestID, signingDigest, entry.signatureDigestType]
     )
   );
   if (String(entry.entryDigest).toLowerCase() !== expectedEntryDigest.toLowerCase()) {
@@ -601,11 +646,16 @@ function assertEntryMatchesBatch(entry, batch) {
   if (!sameHex(rebuilt.batchSigningDigest, batch.batchSigningDigest)) throw new Error('batchSigningDigest mismatch');
   if (!sameHex(entry.requestID, batch.batchID)) throw new Error('consensus batch request mismatch');
   if (!sameHex(entry.hmsgDigest, batch.batchSigningDigest)) throw new Error('consensus batch digest mismatch');
-  if (!sameHex(entry.signingDigest, batch.batchSigningDigest)) throw new Error('consensus batch signing digest mismatch');
+  const signingDigest = scopedSigningDigest(
+    batch.batchSigningDigest,
+    batch.hxmsgs[0].source.chainType,
+    batch.hxmsgs[0].source.chainID
+  );
+  if (!sameHex(entry.signingDigest, signingDigest)) throw new Error('consensus batch signing digest mismatch');
   const expectedEntryDigest = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
       ['uint64', 'uint64', 'bytes32', 'bytes32', 'string'],
-      [Number(entry.term), Number(entry.index), batch.batchID, batch.batchSigningDigest, entry.signatureDigestType]
+      [Number(entry.term), Number(entry.index), batch.batchID, signingDigest, entry.signatureDigestType]
     )
   );
   if (!sameHex(entry.entryDigest, expectedEntryDigest)) throw new Error('consensus batch entry digest mismatch');
@@ -745,8 +795,16 @@ async function buildCommittedSignature({ hxmsg, requestID, digest, entry }) {
   }
   if (hxmsg) {
     assertEntryMatchesHXMsg(committedEntry, hxmsg);
+  } else if (committedEntry.batch) {
+    assertEntryMatchesBatch(committedEntry, committedEntry.batch);
   } else {
-    assertEntryMatchesDigest(committedEntry, requestID, digest);
+    assertEntryMatchesDigest(
+      committedEntry,
+      requestID,
+      digest,
+      committedEntry.sourceChainType,
+      committedEntry.sourceChainID
+    );
   }
   const identity = await currentTEEIdentity();
   return signCommittedDigest({
@@ -1114,9 +1172,12 @@ async function collectCommittedCertifications({ hxmsg, committedEntry, commitAck
   const clusterCertificate = buildQuorumCertificate({
     signatures: selectedSignatures,
     clusterID: CLUSTER_ID,
-    epoch: Number(process.env.TEE_ATTESTATION_EPOCH || 1),
+    epoch: SUBNET_EPOCH,
     threshold: clusterThreshold(),
     signingDigest: committedEntry.signingDigest || committedEntry.hmsgDigest,
+    subjectDigest: committedEntry.subjectDigest || committedEntry.hmsgDigest,
+    sourceChainType: committedEntry.sourceChainType,
+    sourceChainID: committedEntry.sourceChainID,
     signatureDigestType: committedEntry.signatureDigestType || 'hmsgDigest',
     term: committedEntry.term,
     index: committedEntry.index,
@@ -1132,6 +1193,8 @@ async function collectClusterDigestCertifications({
   signatureDigestType = 'responseDigest',
   helperData,
   localResult,
+  sourceChainType,
+  sourceChainID,
 }) {
   const threshold = clusterThreshold();
   const barrierResult = await ensureCurrentTermCommitBarrier();
@@ -1144,6 +1207,8 @@ async function collectClusterDigestCertifications({
     checkpoint,
     helperData,
     proposerID: teeNodeID,
+    sourceChainType,
+    sourceChainID,
     signatureDigestType,
   });
   const raftResult = await replicateEntryToRaftQuorum(entry);
@@ -1528,14 +1593,16 @@ app.post('/internal/raft/append-entries', async (req, res) => {
         });
       } else if (entry.response) {
         const digest = computeResponseDigest(entry.response);
-        assertEntryMatchesDigest(entry, entry.response.originRequestID, digest);
+        assertEntryMatchesDigest(entry, entry.response.originRequestID, digest,
+          entry.sourceChainType, entry.sourceChainID);
         localResult = { verificationResult: await verifyResponseFactLocally({
           response: entry.response,
           helperData: entry.helperData || {},
         }) };
       } else if (entry.checkpoint) {
         const verified = verifyCheckpointLocally(entry.checkpoint);
-        assertEntryMatchesDigest(entry, verified.requestID, verified.signingDigest);
+        assertEntryMatchesDigest(entry, verified.requestID, verified.signingDigest,
+          entry.sourceChainType, entry.sourceChainID);
         localResult = { verificationResult: verified };
       } else if (entry.batch) {
         assertEntryMatchesBatch(entry, entry.batch);
@@ -1652,6 +1719,11 @@ app.post('/attest-batch', async (req, res) => {
     if (!Array.isArray(helperDataList) || helperDataList.length !== hxmsgs.length) {
       throw new Error('helperDataList must match hxmsgs length');
     }
+    assertSubnetSourceScope(hxmsgs[0].source?.chainType, hxmsgs[0].source?.chainID);
+    if (hxmsgs.some((item) => Number(item.source?.chainType) !== Number(hxmsgs[0].source.chainType)
+      || !sameHex(item.source?.chainID, hxmsgs[0].source.chainID))) {
+      throw new Error('TEE batch contains multiple source-chain security domains');
+    }
     const leaderRoute = await ensureRaftLeaderOrForward(req.body, '/attest-batch');
     if (!leaderRoute.localLeader) {
       res.status(leaderRoute.status).json(leaderRoute.body);
@@ -1702,6 +1774,7 @@ app.post('/attest-response', async (req, res) => {
   let leaseAcquired = false;
   try {
     if (!req.body?.response) throw new Error('response is required');
+    assertSubnetSourceScope(req.body.sourceChainType, req.body.sourceChainID);
     const leaderRoute = await ensureRaftLeaderOrForward(req.body, '/attest-response');
     if (!leaderRoute.localLeader) {
       res.status(leaderRoute.status).json(leaderRoute.body);
@@ -1718,6 +1791,8 @@ app.post('/attest-response', async (req, res) => {
       response,
       helperData: req.body.helperData || {},
       localResult: { verificationResult: localVerification },
+      sourceChainType: req.body.sourceChainType,
+      sourceChainID: req.body.sourceChainID,
     });
     if (!teeClusterCertification.quorumReached) {
       const failures = (teeClusterCertification.appendAcks || [])
@@ -1744,6 +1819,7 @@ app.post('/attest-response', async (req, res) => {
 
 app.post('/attest-checkpoint', async (req, res) => {
   try {
+    assertSubnetSourceScope(req.body?.sourceChainType, req.body?.sourceChainID);
     const checkpointEnvelope = {
       checkpoint: req.body?.checkpoint,
       records: req.body?.records,
@@ -1761,6 +1837,8 @@ app.post('/attest-checkpoint', async (req, res) => {
       signatureDigestType: 'lifecycleCheckpointDigest',
       helperData: {},
       localResult: { verificationResult: verified },
+      sourceChainType: req.body.sourceChainType,
+      sourceChainID: req.body.sourceChainID,
     });
     if (!teeClusterCertification.quorumReached) {
       throw new Error(`TEE cluster quorum not reached: ${teeClusterCertification.reached}/${teeClusterCertification.threshold}`);

@@ -19,6 +19,7 @@ abstract contract ResponseLifecycleBase {
     uint8 public constant MSG_TYPE_RESPONSE = 2;
 
     struct RequestRecord {
+        bytes32 targetChainID;
         bytes32 targetExecutionHash;
         bytes32 failureActionHash;
         uint64 feedbackTimeout;
@@ -111,11 +112,13 @@ abstract contract ResponseLifecycleBase {
 
     function _storeResponseLifecycle(
         bytes32 requestID,
+        bytes32 targetChainID,
         bytes32 targetExecutionHash,
         RequestPolicy calldata policy
     ) internal {
         if (!policy.feedbackRequired) return;
         requests[requestID] = RequestRecord({
+            targetChainID: targetChainID,
             targetExecutionHash: targetExecutionHash,
             failureActionHash: policy.atomicity.failureActionHash,
             feedbackTimeout: policy.feedbackTimeout,
@@ -159,6 +162,7 @@ abstract contract ResponseLifecycleBase {
         require(response.responseStatus == RESPONSE_STATUS_EXECUTED, "not executed");
         bytes32 responseDigest = HXMsgLib.hashResponse(response);
         require(!consumedResponses[responseDigest], "response replay");
+        require(cert.sourceChainID == record.targetChainID, "response signed by wrong source-chain subnet");
         _verifyTEECluster(responseDigest, cert);
 
         RequestStatus from = record.status;
@@ -201,6 +205,7 @@ abstract contract ResponseLifecycleBase {
         bytes32 computedRoot = _computeTerminalStateRoot(requestIDs);
         require(computedRoot == terminalStateRoot, "bad terminal root");
         uint64 nextEpoch = lifecycleCheckpointEpoch + 1;
+        require(cert.sourceChainID == bytes32(uint256(block.chainid)), "checkpoint signed for wrong chain");
         _verifyTEECluster(_checkpointSigningDigest(nextEpoch, computedRoot, requestIDs.length), cert);
 
         for (uint256 i = 0; i < requestIDs.length; i += 1) {
@@ -274,6 +279,8 @@ abstract contract ResponseLifecycleBase {
     function _verifyTEECluster(bytes32 digest, HXMsgLib.ClusterCertificate calldata cert) internal view {
         require(teeRegistry.verifyClusterCertificate(digest, TEERegistry.ClusterCertificate({
             clusterID: cert.clusterID,
+            sourceChainType: cert.sourceChainType,
+            sourceChainID: cert.sourceChainID,
             epoch: cert.epoch,
             threshold: cert.threshold,
             participantCount: cert.participantCount,
@@ -281,6 +288,7 @@ abstract contract ResponseLifecycleBase {
             selectedSignerHash: cert.selectedSignerHash,
             signatures: cert.signatures,
             signingDigest: cert.signingDigest,
+            subjectDigest: cert.subjectDigest,
             committedTerm: cert.committedTerm,
             committedIndex: cert.committedIndex
         })), "bad cluster cert");

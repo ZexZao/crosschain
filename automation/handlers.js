@@ -2,7 +2,7 @@ const { ethers } = require('ethers');
 const { registerEVMTEEs, registerFabricTEEs, clusterCertificateTuple } = require('../shared/tee/registration');
 const { connectFabric } = require('./fabric-client');
 const { postToTEELeader } = require('./tee-client');
-const { chainProfile, teeURLs } = require('./config');
+const { chainProfile, teeURLs, targetChainID } = require('./config');
 
 const RegistryArtifact = require('../artifacts/contracts/TEERegistry.sol/TEERegistry.json');
 const SourceArtifact = require('../artifacts/contracts/EvmSourceContract.sol/EvmSourceContract.json');
@@ -19,10 +19,16 @@ function sourceContractAddress(profile, payload = {}) {
 }
 
 async function handleResponse(payload) {
-  const urls = teeURLs(Number(payload.targetChainType));
+  const originHxmsg = payload.helperData?.originHxmsg;
+  const sourceChainType = Number(payload.targetChainType ?? originHxmsg?.target?.chainType);
+  const sourceChainID = originHxmsg?.target?.chainID;
+  if (!sourceChainType || !sourceChainID) throw new Error('response source-chain security domain is required');
+  const urls = teeURLs(sourceChainType);
   const attested = await postToTEELeader(urls, '/attest-response', {
     response: payload.response,
     helperData: payload.helperData || {},
+    sourceChainType,
+    sourceChainID,
   });
   const cert = attested.teeClusterCertification;
   const source = chainProfile(payload.sourceProfile);
@@ -70,6 +76,8 @@ async function handleCheckpoint(payload) {
       const attested = await postToTEELeader(teeURLs(profile.chainType), '/attest-checkpoint', {
         checkpoint,
         records: preview.records,
+        sourceChainType: profile.chainType,
+        sourceChainID: targetChainID(profile),
       });
       if (String(attested.checkpointDigest).toLowerCase() !== String(preview.signingDigest).toLowerCase()) {
         throw new Error('TEE checkpoint digest mismatch');
@@ -113,7 +121,12 @@ async function handleCheckpoint(payload) {
     terminalStateRoot: preview.terminalStateRoot,
     requestCount: requestIDs.length,
   };
-  const attested = await postToTEELeader(teeURLs(profile.chainType), '/attest-checkpoint', { checkpoint, records });
+  const attested = await postToTEELeader(teeURLs(profile.chainType), '/attest-checkpoint', {
+    checkpoint,
+    records,
+    sourceChainType: profile.chainType,
+    sourceChainID: targetChainID(profile),
+  });
   if (String(attested.checkpointDigest).toLowerCase() !== String(preview.signingDigest).toLowerCase()) {
     throw new Error('TEE checkpoint digest mismatch');
   }

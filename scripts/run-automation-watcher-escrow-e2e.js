@@ -19,7 +19,7 @@ const ROOT = path.join(__dirname, '..');
 const LOCAL_KEY = process.env.LOCAL_EVM_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const SOURCE_ABI = [
   'function submitTokenEscrowHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64)),address,uint256) external returns (bytes32)',
-  'function requests(bytes32) view returns (bytes32,bytes32,uint64,uint64,uint64,uint8,uint8,bytes32)',
+  'function requests(bytes32) view returns (bytes32,bytes32,bytes32,uint64,uint64,uint64,uint8,uint8,bytes32)',
   'function tokenEscrows(bytes32) view returns (address token,address owner,uint256 amount,bool refunded,bool settled)',
   'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];

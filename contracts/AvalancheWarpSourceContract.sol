@@ -123,7 +123,7 @@ contract AvalancheWarpSourceContract is ResponseLifecycleBase {
             businessPayloadHash, receiver, expireAt, validatorPolicyHash, feedbackHash, atomicityHash));
         bytes32 targetExecutionHash = keccak256(abi.encode(requestID, targetChainID, targetObject,
             functionSelector, callDataHash, receiver));
-        _storeResponseLifecycle(requestID, targetExecutionHash, policy);
+        _storeResponseLifecycle(requestID, targetChainID, targetExecutionHash, policy);
 
         bytes memory payload = abi.encode(WarpHXMsgRequest(requestID, targetChainID, targetDomainID, targetObject,
             functionSelector, callDataHash, businessPayloadHash, receiver, currentNonce, expireAt,

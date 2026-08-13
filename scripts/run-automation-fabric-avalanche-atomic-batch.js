@@ -34,6 +34,7 @@ process.env.AUTOMATION_CLIENT_TIMEOUT_MS ||= '60000';
 
 const ROOT = path.join(__dirname, '..');
 const COUNT = Number(process.env.AUTOMATION_ATOMIC_BATCH_SIZE || 8);
+const PEER_NAME = String(process.env.AUTOMATION_FABRIC_EVM_PEER || 'avalanche').toLowerCase();
 const AUTOMATION_URL = String(process.env.AUTOMATION_URL || 'http://127.0.0.1:9200').replace(/\/$/, '');
 const EXECUTE_COMPACT_SELECTOR = ethers.id(
   'executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))'
@@ -103,6 +104,12 @@ async function queryFabricJSON(contract, fn, ...args) {
 async function avalanchePolicyHash() {
   const { ref } = await getValidatorSetRef();
   return hashJson({ validatorSetRef: ref, canonicalOrdering: ref.canonicalOrdering });
+}
+
+function peerTeeRpc() {
+  return PEER_NAME === 'avalanche'
+    ? 'http://avalanche-rpc-proxy:9650/node/9650/ext/bc/C/rpc'
+    : 'http://evm-node:8545';
 }
 
 function atomicParts(runID, index, feedbackTimeout, challengeWindow) {
@@ -183,9 +190,9 @@ async function completeWorkflowChecks(requestIDs) {
 
 async function runFabricToAvalanche() {
   const startedAt = Date.now();
-  const runID = `fabric-avalanche-${startedAt}`;
+  const runID = `fabric-${PEER_NAME}-${startedAt}`;
   const fabricProfile = chainProfile('fabric');
-  const avalanche = chainProfile('avalanche');
+  const avalanche = chainProfile(PEER_NAME);
   const provider = new ethers.JsonRpcProvider(avalanche.rpc);
   const targetToken = new ethers.Contract(
     avalanche.deployment.settlementToken,
@@ -216,7 +223,7 @@ async function runFabricToAvalanche() {
       const encoded = encodeCompactBusinessCall(businessPayload);
       const parts = atomicParts(runID, index, feedbackTimeout, challengeWindow);
       await publishSourceMaterial(encoded.compactCallHash, {
-        targetProfile: 'avalanche',
+        targetProfile: PEER_NAME,
         businessPayload,
         feedback: parts.feedback,
         atomicity: parts.atomicity,
@@ -227,7 +234,7 @@ async function runFabricToAvalanche() {
       });
       const sourcePayload = {
         businessPayload,
-        targetChainType: 'AVALANCHE',
+        targetChainType: PEER_NAME === 'avalanche' ? 'AVALANCHE' : 'EVM',
         targetChainID: chainIdToBytes32(avalanche.deployment.chainId),
         targetObject: addressToBytes32(avalanche.deployment.targetContract),
         functionSelector: TARGET_EXECUTE_SELECTOR,
@@ -251,10 +258,10 @@ async function runFabricToAvalanche() {
     timeoutMs: 10 * 60 * 1000,
   })));
   if (awaiting.some((workflow) => workflow.relayerState !== 'WAITING_RESPONSE')) {
-    throw new Error('Fabric->Avalanche batch did not reach WAITING_RESPONSE');
+    throw new Error(`Fabric->${PEER_NAME} batch did not reach WAITING_RESPONSE`);
   }
   const targetHashes = [...new Set(awaiting.map((workflow) => workflow.targetResult?.transactionHash))];
-  if (targetHashes.length !== 1) throw new Error(`expected one Avalanche target transaction, got ${targetHashes.length}`);
+  if (targetHashes.length !== 1) throw new Error(`expected one ${PEER_NAME} target transaction, got ${targetHashes.length}`);
   const targetReceipt = await provider.getTransactionReceipt(targetHashes[0]);
   const receiptProof = await buildReceiptProof({
     provider,
@@ -285,7 +292,7 @@ async function runFabricToAvalanche() {
         evmExecutionReceipt: receiptProof,
         committeeHeaderUpdate,
         evmChainID: chainID,
-        evmRpc: 'http://avalanche-rpc-proxy:9650/node/9650/ext/bc/C/rpc',
+        evmRpc: peerTeeRpc(),
       },
     });
   }
@@ -324,7 +331,7 @@ async function runFabricToAvalanche() {
     && targetExecutionAfter - targetExecutionBefore === BigInt(COUNT)
     && transfers.length === COUNT;
   return {
-    direction: 'fabric-to-avalanche',
+    direction: `fabric-to-${PEER_NAME}`,
     count: COUNT,
     responseRequired: true,
     atomicityRequired: true,
@@ -358,17 +365,21 @@ async function runFabricToAvalanche() {
 
 async function runAvalancheToFabric() {
   const startedAt = Date.now();
-  const runID = `avalanche-fabric-${startedAt}`;
-  const avalanche = chainProfile('avalanche');
+  const runID = `${PEER_NAME}-fabric-${startedAt}`;
+  const avalanche = chainProfile(PEER_NAME);
   const fabricProfile = chainProfile('fabric');
   const provider = new ethers.JsonRpcProvider(avalanche.rpc);
   const signer = new ethers.NonceManager(new ethers.Wallet(avalanche.privateKey, provider));
+  const sourceArtifactName = PEER_NAME === 'avalanche' ? 'AvalancheWarpSourceContract' : 'EvmSourceContract';
   const sourceArtifact = fs.readJsonSync(path.join(
     ROOT,
-    'artifacts/contracts/AvalancheWarpSourceContract.sol/AvalancheWarpSourceContract.json'
+    `artifacts/contracts/${sourceArtifactName}.sol/${sourceArtifactName}.json`
   ));
   const tokenArtifact = fs.readJsonSync(path.join(ROOT, 'artifacts/contracts/CrossChainToken.sol/CrossChainToken.json'));
-  const source = new ethers.Contract(avalanche.deployment.avalancheWarpSourceContract, sourceArtifact.abi, signer);
+  const sourceAddress = PEER_NAME === 'avalanche'
+    ? avalanche.deployment.avalancheWarpSourceContract
+    : avalanche.deployment.evmSourceContract;
+  const source = new ethers.Contract(sourceAddress, sourceArtifact.abi, signer);
   const sourceOwner = await signer.getAddress();
   const recipients = Array.from({ length: COUNT }, (_, index) => `fabric.atomic.recipient.${runID}.${index}`);
   const expectedTotal = Array.from({ length: COUNT }, (_, index) => BigInt(index + 1) * 10000n)
@@ -387,22 +398,22 @@ async function runAvalancheToFabric() {
     fabric.gateway.disconnect();
   }
   const tokenFactory = new ethers.ContractFactory(tokenArtifact.abi, tokenArtifact.bytecode, signer);
-  const sourceToken = await tokenFactory.deploy('Avalanche Atomic Batch Token', 'AABT', 4, sourceOwner);
+  const sourceToken = await tokenFactory.deploy(`${PEER_NAME} Atomic Batch Token`, 'XABT', 4, sourceOwner);
   const tokenDeploymentReceipt = await sourceToken.deploymentTransaction().wait();
   await sourceToken.waitForDeployment();
   const mintReceipt = await (await sourceToken.mint(sourceOwner, expectedTotal)).wait();
   const approvalReceipt = await (await sourceToken.approve(
-    avalanche.deployment.avalancheWarpSourceContract,
+    sourceAddress,
     expectedTotal
   )).wait();
   const sourceTokenAddress = await sourceToken.getAddress();
   const sourceOwnerBalanceBefore = await sourceToken.balanceOf(sourceOwner);
-  const sourceEscrowBalanceBefore = await sourceToken.balanceOf(avalanche.deployment.avalancheWarpSourceContract);
+  const sourceEscrowBalanceBefore = await sourceToken.balanceOf(sourceAddress);
   const sourceBlock = await provider.getBlock('latest');
   const sourceNow = Math.max(Number(sourceBlock.timestamp), Math.floor(Date.now() / 1000));
   const feedbackTimeout = sourceNow + 600;
   const challengeWindow = 60;
-  const policyHash = await avalanchePolicyHash();
+  const policyHash = PEER_NAME === 'avalanche' ? await avalanchePolicyHash() : null;
   const targetObject = buildFabricTargetObject(fabricProfile.channel, fabricProfile.chaincode);
   const submissions = [];
   for (let index = 0; index < COUNT; index += 1) {
@@ -419,32 +430,48 @@ async function runAvalancheToFabric() {
       batchSize: COUNT,
       batchIndex: index,
     });
-    const transaction = await source.submitTokenEscrowWarpHXMsgRequest(
+    const commonArgs = [
       bytes32FromText(`fabric-${fabricProfile.channel}`),
       bytes32FromText('fabric-local-domain'),
       targetObject,
       FABRIC_INVOKE_SELECTOR,
-      encoded.payloadHex,
-      hashJson(encoded.normalized),
-      targetObject,
-      sourceNow + 3600,
-      policyHash,
-      parts.policy,
-      sourceTokenAddress,
-      encoded.compact.amount
-    );
+    ];
+    const transaction = PEER_NAME === 'avalanche'
+      ? await source.submitTokenEscrowWarpHXMsgRequest(
+        ...commonArgs,
+        encoded.payloadHex,
+        hashJson(encoded.normalized),
+        targetObject,
+        sourceNow + 3600,
+        policyHash,
+        parts.policy,
+        sourceTokenAddress,
+        encoded.compact.amount
+      )
+      : await source.submitTokenEscrowHXMsgRequest(
+        ...commonArgs,
+        encoded.compactCallHash,
+        hashJson(encoded.normalized),
+        targetObject,
+        sourceNow + 3600,
+        parts.policy,
+        sourceTokenAddress,
+        encoded.compact.amount
+      );
     const receipt = await transaction.wait();
     const event = receipt.logs.map((log) => {
       try { return source.interface.parseLog(log); } catch (_error) { return null; }
-    }).find((item) => item?.name === 'AvalancheHXMsgWarpRequested');
-    if (!event) throw new Error('AvalancheHXMsgWarpRequested event missing');
+    }).find((item) => item?.name === (PEER_NAME === 'avalanche'
+      ? 'AvalancheHXMsgWarpRequested'
+      : 'CrossChainCallRequested'));
+    if (!event) throw new Error(`${PEER_NAME} source event missing`);
     submissions.push({ requestID: event.args.requestID, transactionHash: receipt.hash, gasUsed: Number(receipt.gasUsed) });
   }
   const awaiting = await Promise.all(submissions.map((item) => waitForWorkflow(item.requestID, {
     timeoutMs: 10 * 60 * 1000,
   })));
   if (awaiting.some((workflow) => workflow.relayerState !== 'WAITING_RESPONSE')) {
-    throw new Error('Avalanche->Fabric batch did not reach WAITING_RESPONSE');
+    throw new Error(`${PEER_NAME}->Fabric batch did not reach WAITING_RESPONSE`);
   }
   const targetTransactionIDs = [...new Set(awaiting.map((workflow) => workflow.targetResult?.transactionID))];
   if (targetTransactionIDs.length !== 1) throw new Error(`expected one Fabric target transaction, got ${targetTransactionIDs.length}`);
@@ -466,9 +493,9 @@ async function runAvalancheToFabric() {
       });
       responseJobs.push({
         requestID: workflow.requestID,
-        sourceProfile: 'avalanche',
-        sourceContract: avalanche.deployment.avalancheWarpSourceContract,
-        useWarpSource: true,
+        sourceProfile: PEER_NAME,
+        sourceContract: sourceAddress,
+        useWarpSource: PEER_NAME === 'avalanche',
         targetChainType: fabricProfile.chainType,
         response,
         helperData: {
@@ -506,7 +533,7 @@ async function runAvalancheToFabric() {
     });
   }
   const sourceOwnerBalanceAfter = await sourceToken.balanceOf(sourceOwner);
-  const sourceEscrowBalanceAfter = await sourceToken.balanceOf(avalanche.deployment.avalancheWarpSourceContract);
+  const sourceEscrowBalanceAfter = await sourceToken.balanceOf(sourceAddress);
   const transfersValid = balancesAfter.every((balance, index) => (
     balance - balancesBefore[index] === BigInt(index + 1) * 10000n
   ));
@@ -523,7 +550,7 @@ async function runAvalancheToFabric() {
     && transfersValid
     && inboundRecords.every((record) => record.status === 'executed');
   return {
-    direction: 'avalanche-to-fabric',
+    direction: `${PEER_NAME}-to-fabric`,
     count: COUNT,
     responseRequired: true,
     atomicityRequired: true,
@@ -563,25 +590,26 @@ async function runAvalancheToFabric() {
 async function main() {
   const health = await axios.get(`${AUTOMATION_URL}/health`, { headers: authHeaders() });
   if (health.data.roleMode !== 'all') throw new Error(`automation role must be all, got ${health.data.roleMode}`);
-  for (const chain of ['fabric', 'avalanche']) {
+  if (!['ethereum', 'avalanche'].includes(PEER_NAME)) throw new Error(`unsupported Fabric EVM peer: ${PEER_NAME}`);
+  for (const chain of ['fabric', PEER_NAME]) {
     if (!health.data.enabledChains?.includes(chain)) throw new Error(`automation chain is disabled: ${chain}`);
   }
   const experiments = [];
-  console.log(`\n=== Fabric->Avalanche atomic RESPONSE TEE batch size=${COUNT} ===`);
+  console.log(`\n=== Fabric->${PEER_NAME} atomic RESPONSE TEE batch size=${COUNT} ===`);
   experiments.push(await runFabricToAvalanche());
-  console.log(`${experiments[0].pass ? 'PASS' : 'FAIL'} fabric-to-avalanche gas=${experiments[0].gas.protocolTotal} avg=${experiments[0].gas.averagePerMessage} elapsedMs=${experiments[0].elapsedMs}`);
-  console.log(`\n=== Avalanche->Fabric atomic RESPONSE TEE batch size=${COUNT} ===`);
+  console.log(`${experiments[0].pass ? 'PASS' : 'FAIL'} fabric-to-${PEER_NAME} gas=${experiments[0].gas.protocolTotal} avg=${experiments[0].gas.averagePerMessage} elapsedMs=${experiments[0].elapsedMs}`);
+  console.log(`\n=== ${PEER_NAME}->Fabric atomic RESPONSE TEE batch size=${COUNT} ===`);
   experiments.push(await runAvalancheToFabric());
-  console.log(`${experiments[1].pass ? 'PASS' : 'FAIL'} avalanche-to-fabric gas=${experiments[1].gas.protocolTotal} avg=${experiments[1].gas.averagePerMessage} elapsedMs=${experiments[1].elapsedMs}`);
+  console.log(`${experiments[1].pass ? 'PASS' : 'FAIL'} ${PEER_NAME}-to-fabric gas=${experiments[1].gas.protocolTotal} avg=${experiments[1].gas.averagePerMessage} elapsedMs=${experiments[1].elapsedMs}`);
   const result = {
-    testType: 'automation-fabric-avalanche-atomic-response-tee-batch',
+    testType: `automation-fabric-${PEER_NAME}-atomic-response-tee-batch`,
     testedAt: new Date().toISOString(),
     batchSize: COUNT,
     gasAccounting: 'Mercury-style EVM-compatible protocol gas; Fabric source/target/response transactions have no gas; setup excluded',
     experiments,
     pass: experiments.every((experiment) => experiment.pass),
   };
-  const output = path.join(ROOT, 'runtime/automation-fabric-avalanche-atomic-batch-result.json');
+  const output = path.join(ROOT, `runtime/automation-fabric-${PEER_NAME}-atomic-batch-result.json`);
   fs.writeJsonSync(output, result, { spaces: 2 });
   console.log(`Results: ${output}`);
   if (!result.pass) process.exitCode = 1;

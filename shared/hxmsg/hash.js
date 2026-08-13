@@ -194,6 +194,8 @@ function toMinimalHXMsg(hxmsg) {
     hxmsg.header.deliveryExpireAt,
     computeReplayScope(hxmsg),
     hxmsg.header.nonce,
+    hxmsg.source.chainType,
+    hxmsg.source.chainID,
   ];
 }
 
@@ -217,8 +219,8 @@ function computeHXMsgDeliveryDigest(hxmsg) {
   const minimal = Array.isArray(hxmsg) ? hxmsg : toMinimalHXMsg(hxmsg);
   const chainHash = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8'],
-      [minimal[0], minimal[1], minimal[2], minimal[3], minimal[4]]
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8', 'bytes32', 'uint8'],
+      [minimal[0], minimal[1], minimal[17], minimal[18], minimal[2], minimal[3], minimal[4]]
     )
   );
   const actionHash = ethers.keccak256(

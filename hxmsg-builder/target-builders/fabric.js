@@ -6,7 +6,7 @@ const {
   computeTargetExecutionHash,
 } = require('../../shared/hxmsg');
 
-const FABRIC_INVOKE_SELECTOR = ethers.id('ExecuteHXMsg(bytes32,bytes)').slice(0, 10);
+const FABRIC_INVOKE_SELECTOR = ethers.id('ExecuteHXMsgCompact(bytes32,bytes)').slice(0, 10);
 
 function buildFabricTargetObject(channelID, chaincodeName) {
   void channelID;

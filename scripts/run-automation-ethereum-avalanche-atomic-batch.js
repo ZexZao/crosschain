@@ -27,7 +27,7 @@ const COUNT = Number(process.env.AUTOMATION_ATOMIC_BATCH_SIZE || 8);
 const AUTOMATION_URL = String(process.env.AUTOMATION_URL || 'http://127.0.0.1:9200').replace(/\/$/, '');
 const SOURCE_ABI = [
   'function submitTokenEscrowHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64)),address,uint256) external returns (bytes32)',
-  'function requests(bytes32) view returns (bytes32 targetExecutionHash,bytes32 failureActionHash,uint64 feedbackTimeout,uint64 challengeWindow,uint64 challengeDeadline,uint8 commitmentType,uint8 status,bytes32 responseDigest)',
+  'function requests(bytes32) view returns (bytes32 targetChainID,bytes32 targetExecutionHash,bytes32 failureActionHash,uint64 feedbackTimeout,uint64 challengeWindow,uint64 challengeDeadline,uint8 commitmentType,uint8 status,bytes32 responseDigest)',
   'function tokenEscrows(bytes32) view returns (address token,address owner,uint256 amount,bool refunded,bool settled)',
   'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];

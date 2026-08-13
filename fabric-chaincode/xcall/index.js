@@ -4,7 +4,7 @@ const { Contract } = require('fabric-contract-api');
 const { ethers } = require('ethers');
 
 const ABI = ethers.AbiCoder.defaultAbiCoder();
-const TEE_CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes('HXMSG_TEE_CLUSTER_LOCAL_V1'));
+const TEE_CERTIFICATE_DOMAIN = ethers.id('HXMSG_TEE_SUBNET_CERTIFICATE_V1');
 const BATCH_DOMAIN = ethers.id('HXMSG_BATCH_V1');
 const LIFECYCLE_CHECKPOINT_DOMAIN = ethers.id('HXMSG_LIFECYCLE_CHECKPOINT_V1');
 const TERMINAL_STATUS_CODE = Object.freeze({ Completed: 3, Compensated: 4, Failed: 5, Cancelled: 6 });
@@ -33,21 +33,6 @@ function selectedSignerHash(participants) {
       ]
     )
   );
-}
-
-function decodeBusinessPayload(payloadHex) {
-  const [op, recordId, actor, amount, metadata, requireAck] = ABI.decode(
-    ['string', 'string', 'string', 'string', 'string', 'bool'],
-    payloadHex
-  );
-  return {
-    op,
-    recordId,
-    actor,
-    amount,
-    metadata,
-    requireAck
-  };
 }
 
 function stableStringify(value) {
@@ -357,12 +342,6 @@ function getEnvelope(hxmsg) {
   return hxmsg.hxmsgEnvelope || {};
 }
 
-function getExecutionData(hxmsg) {
-  const executionData = getEnvelope(hxmsg).executionData;
-  if (!executionData) throw new Error('hxmsgEnvelope.executionData is required');
-  return executionData;
-}
-
 function getAuditRecord(hxmsg) {
   const auditRecord = getEnvelope(hxmsg).auditRecord;
   if (!auditRecord) throw new Error('hxmsgEnvelope.auditRecord is required');
@@ -538,9 +517,11 @@ function normalizeMinimalDelivery(value) {
     value.callbackRefHash,
     value.expireAt,
     value.replayScope,
-    value.sourceNonce
+    value.sourceNonce,
+    value.sourceChainType,
+    value.sourceChainID
   ];
-  if (!Array.isArray(input) || input.length !== 17) throw new Error('bad compact h-xmsg delivery');
+  if (!Array.isArray(input) || input.length !== 19) throw new Error('bad compact h-xmsg delivery');
   return {
     requestID: input[0],
     hmsgDigest: input[1],
@@ -559,7 +540,8 @@ function normalizeMinimalDelivery(value) {
     expireAt: Number(input[14] || 0),
     replayScope: input[15] || ethers.ZeroHash,
     sourceNonce: Number(input[16] || 0),
-    sourceChainType: Number(value && !Array.isArray(value) && value.sourceChainType !== undefined ? value.sourceChainType : 1)
+    sourceChainType: Number(input[17]),
+    sourceChainID: input[18]
   };
 }
 
@@ -582,8 +564,9 @@ function computeTargetExecutionHashFromMinimal(minimal) {
 function computeHXMsgDeliveryDigestFromMinimal(minimal) {
   const chainHash = ethers.keccak256(
     ABI.encode(
-      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8'],
-      [minimal.requestID, minimal.hmsgDigest, minimal.targetChainType, minimal.targetChainID, minimal.actionType]
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8', 'bytes32', 'uint8'],
+      [minimal.requestID, minimal.hmsgDigest, minimal.sourceChainType, minimal.sourceChainID,
+        minimal.targetChainType, minimal.targetChainID, minimal.actionType]
     )
   );
   const actionHash = ethers.keccak256(
@@ -682,18 +665,15 @@ function toMinimalHXMsg(hxmsg, hmsgDigest) {
     feedback.callbackRefHash,
     hxmsg.header.deliveryExpireAt,
     computeReplayScopeFromHXMsg(hxmsg),
-    hxmsg.header.nonce
+    hxmsg.header.nonce,
+    hxmsg.source.chainType,
+    hxmsg.source.chainID
   ];
 }
 
 function computeBatchLeaf(hxmsg, hmsgDigest) {
-  const minimal = toMinimalHXMsg(hxmsg, hmsgDigest);
-  const deliveryDigest = computeHXMsgDeliveryDigest({ ...hxmsg, hmsgDigest: minimal[1] });
-  return ethers.keccak256(
-    ABI.encode(
-      ['bytes32', 'bytes32', 'bytes32'],
-      [minimal[0], minimal[1], deliveryDigest]
-    )
+  return computeBatchLeafFromMinimal(
+    normalizeMinimalDelivery(toMinimalHXMsg(hxmsg, hmsgDigest))
   );
 }
 
@@ -913,15 +893,15 @@ async function applyBusinessAction(ctx, { requestID, hmsgDigest, callDataHash, p
   return record;
 }
 
-async function getTrustedTEEBySignerIndex(ctx, signerIndex) {
-  const indexData = await ctx.stub.getState(`teeSignerIndex:${Number(signerIndex)}`);
+async function getTrustedTEEBySignerIndex(ctx, clusterID, signerIndex) {
+  const indexData = await ctx.stub.getState(`teeSignerIndex:${clusterID}:${Number(signerIndex)}`);
   if (!indexData || indexData.length === 0) return null;
   const address = ethers.getAddress(indexData.toString());
-  const key = `trustedTEE:${address}`;
+  const key = `trustedTEE:${clusterID}:${address}`;
   const data = await ctx.stub.getState(key);
   if (!data || data.length === 0) return null;
   const identity = JSON.parse(data.toString());
-  const config = await getTEEClusterConfig(ctx);
+  const config = await getTEEClusterConfig(ctx, clusterID);
   const now = getTxTime(ctx);
   const trusted = Boolean(identity.active)
     && Number(identity.epoch || 0) === Number(config.epoch || 1)
@@ -929,13 +909,12 @@ async function getTrustedTEEBySignerIndex(ctx, signerIndex) {
   return trusted ? identity : null;
 }
 
-const TEE_CLUSTER_CONFIG_KEY = 'teeClusterConfig';
 const SIMULATED_ATTESTATION_TYPE = 'SIMULATED_TDX_QUOTE_V1';
 
-async function getTEEClusterConfig(ctx) {
-  const data = await ctx.stub.getState(TEE_CLUSTER_CONFIG_KEY);
+async function getTEEClusterConfig(ctx, clusterID) {
+  const data = await ctx.stub.getState(`teeClusterConfig:${clusterID}`);
   if (!data || data.length === 0) {
-    return { epoch: 1, activeTEECount: 0, members: [], signerIndexes: [] };
+    return { clusterID, epoch: 1, activeTEECount: 0, members: [], signerIndexes: [], exists: false };
   }
   const parsed = JSON.parse(data.toString());
   const members = Array.isArray(parsed.members)
@@ -946,14 +925,18 @@ async function getTEEClusterConfig(ctx) {
     activeTEECount: Number(parsed.activeTEECount || members.length || 0),
     members,
     signerIndexes: Array.isArray(parsed.signerIndexes) ? parsed.signerIndexes.map(Number) : []
+    , subnetIDHash: parsed.subnetIDHash, sourceChainType: Number(parsed.sourceChainType), exists: true
   };
 }
 
-async function putTEEClusterConfig(ctx, config) {
+async function putTEEClusterConfig(ctx, clusterID, config) {
   const members = Array.isArray(config.members)
     ? Array.from(new Set(config.members.map((address) => ethers.getAddress(address))))
     : [];
-  await ctx.stub.putState(TEE_CLUSTER_CONFIG_KEY, Buffer.from(JSON.stringify({
+  await ctx.stub.putState(`teeClusterConfig:${clusterID}`, Buffer.from(JSON.stringify({
+    clusterID,
+    subnetIDHash: config.subnetIDHash,
+    sourceChainType: Number(config.sourceChainType),
     epoch: Number(config.epoch || 1),
     activeTEECount: members.length,
     members,
@@ -966,6 +949,9 @@ function normalizeTEERegistration(input) {
   const identity = typeof input === 'string' ? parseJson(input, 'teeIdentityJson') : input;
   const teeAddress = ethers.getAddress(identity.teeAddress || identity.address);
   return {
+    clusterID: identity.clusterID,
+    subnetIDHash: identity.subnetIDHash || ethers.id(identity.subnetID || ''),
+    sourceChainType: Number(identity.sourceChainType),
     teeAddress,
     signerIndex: Number(identity.signerIndex),
     enclavePubKeyHash: identity.enclavePubKeyHash,
@@ -976,16 +962,21 @@ function normalizeTEERegistration(input) {
     notAfter: Number(identity.notAfter || 0),
     attestationType: identity.attestationType || SIMULATED_ATTESTATION_TYPE,
     attestationSignature: identity.attestationSignature || '0x',
-    nodeID: identity.nodeID || ''
+    nodeID: identity.nodeID || '',
+    subnetID: identity.subnetID || '',
+    subnetProfile: identity.subnetProfile || ''
   };
 }
 
 function simulatedQuoteHash(identity) {
   return ethers.keccak256(
     ABI.encode(
-      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
+      ['string', 'bytes32', 'bytes32', 'uint8', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
       [
         SIMULATED_ATTESTATION_TYPE,
+        identity.clusterID,
+        identity.subnetIDHash,
+        identity.sourceChainType,
         identity.teeAddress,
         identity.signerIndex,
         identity.enclavePubKeyHash,
@@ -1001,9 +992,12 @@ function simulatedQuoteHash(identity) {
 function teeRegistrationDigest(identity) {
   return ethers.keccak256(
     ABI.encode(
-      ['string', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
+      ['string', 'bytes32', 'bytes32', 'uint8', 'address', 'uint16', 'bytes32', 'bytes32', 'bytes32', 'bytes32', 'uint64', 'uint64'],
       [
         identity.attestationType,
+        identity.clusterID,
+        identity.subnetIDHash,
+        identity.sourceChainType,
         identity.teeAddress,
         identity.signerIndex,
         identity.enclavePubKeyHash,
@@ -1022,6 +1016,9 @@ function verifyTEERegistration(identity, expectedEpoch) {
     throw new Error(`unsupported attestation type: ${identity.attestationType}`);
   }
   if (identity.epoch !== expectedEpoch) throw new Error('bad TEE epoch');
+  if (!identity.clusterID || identity.clusterID === ethers.ZeroHash) throw new Error('missing clusterID');
+  if (!identity.subnetIDHash || identity.subnetIDHash === ethers.ZeroHash) throw new Error('missing subnetIDHash');
+  if (!identity.sourceChainType) throw new Error('missing sourceChainType');
   if (!identity.enclavePubKeyHash || identity.enclavePubKeyHash === ethers.ZeroHash) {
     throw new Error('missing enclavePubKeyHash');
   }
@@ -1043,8 +1040,8 @@ function verifyTEERegistration(identity, expectedEpoch) {
   return digest;
 }
 
-async function currentTEEQuorumThreshold(ctx) {
-  const config = await getTEEClusterConfig(ctx);
+async function currentTEEQuorumThreshold(ctx, clusterID) {
+  const config = await getTEEClusterConfig(ctx, clusterID);
   if (config.activeTEECount <= 0) throw new Error('empty TEE cluster');
   return Math.floor(config.activeTEECount / 2) + 1;
 }
@@ -1057,14 +1054,34 @@ function assertTEERegistrar(ctx) {
   }
 }
 
-async function verifyTEEClusterCertificate(ctx, expectedDigest, certEnvelope) {
+function teeSubnetSigningDigest(cert, subjectDigest) {
+  return ethers.keccak256(ABI.encode(
+    ['bytes32', 'bytes32', 'uint64', 'uint8', 'bytes32', 'bytes32'],
+    [TEE_CERTIFICATE_DOMAIN, cert.clusterID, Number(cert.epoch), Number(cert.sourceChainType),
+      cert.sourceChainID, subjectDigest]
+  ));
+}
+
+async function verifyTEEClusterCertificate(ctx, expectedDigest, certEnvelope,
+  expectedSourceChainType = null, expectedSourceChainID = null) {
   const cert = certEnvelope.clusterCertificate || certEnvelope.teeClusterCertification || certEnvelope;
   if (!cert || cert.scheme !== 'ECDSA_QUORUM_V1') throw new Error('bad TEE cluster certificate');
-  if (String(cert.clusterID).toLowerCase() !== TEE_CLUSTER_ID.toLowerCase()) throw new Error('bad TEE clusterID');
-  if (String(cert.signingDigest).toLowerCase() !== String(expectedDigest).toLowerCase()) {
-    throw new Error('TEE certificate digest mismatch');
+  const config = await getTEEClusterConfig(ctx, cert.clusterID);
+  if (!config.exists) throw new Error('unknown TEE subnet cluster');
+  if (Number(cert.sourceChainType) !== Number(config.sourceChainType)) throw new Error('unauthorized source TEE subnet');
+  if (expectedSourceChainType !== null && Number(cert.sourceChainType) !== Number(expectedSourceChainType)) {
+    throw new Error('wrong source TEE subnet');
   }
-  const threshold = await currentTEEQuorumThreshold(ctx);
+  if (expectedSourceChainID && String(cert.sourceChainID).toLowerCase() !== String(expectedSourceChainID).toLowerCase()) {
+    throw new Error('wrong source chain certificate');
+  }
+  if (!cert.sourceChainID || cert.sourceChainID === ethers.ZeroHash) throw new Error('missing certificate sourceChainID');
+  if (String(cert.subjectDigest).toLowerCase() !== String(expectedDigest).toLowerCase()) {
+    throw new Error('TEE certificate subject mismatch');
+  }
+  const scopedDigest = teeSubnetSigningDigest(cert, expectedDigest);
+  if (String(cert.signingDigest).toLowerCase() !== scopedDigest.toLowerCase()) throw new Error('TEE scoped digest mismatch');
+  const threshold = await currentTEEQuorumThreshold(ctx, cert.clusterID);
   if (Number(cert.threshold) !== threshold) throw new Error('bad TEE threshold');
   if (Number(cert.participantCount) < threshold) throw new Error(`TEE quorum not satisfied: ${cert.participantCount}/${threshold}`);
   if (!Array.isArray(cert.participants) || cert.participants.length !== Number(cert.participantCount)) {
@@ -1083,7 +1100,7 @@ async function verifyTEEClusterCertificate(ctx, expectedDigest, certEnvelope) {
     if (seen.has(signerIndex)) throw new Error('duplicate TEE signer');
     seen.add(signerIndex);
     bitmap |= 1n << BigInt(signerIndex);
-    const identity = await getTrustedTEEBySignerIndex(ctx, signerIndex);
+    const identity = await getTrustedTEEBySignerIndex(ctx, cert.clusterID, signerIndex);
     if (!identity) throw new Error(`untrusted TEE signer index: ${signerIndex}`);
     if (ethers.getAddress(participant.teeAddress) !== ethers.getAddress(identity.address)) {
       throw new Error('TEE signer address mismatch');
@@ -1091,7 +1108,7 @@ async function verifyTEEClusterCertificate(ctx, expectedDigest, certEnvelope) {
     if (String(participant.enclavePubKeyHash).toLowerCase() !== String(identity.enclavePubKeyHash).toLowerCase()) {
       throw new Error('TEE enclave key hash mismatch');
     }
-    const recovered = ethers.getAddress(ethers.recoverAddress(expectedDigest, cert.signatures[i]));
+    const recovered = ethers.getAddress(ethers.recoverAddress(scopedDigest, cert.signatures[i]));
     if (recovered !== ethers.getAddress(identity.address)) {
       throw new Error('bad TEE signature');
     }
@@ -1250,10 +1267,6 @@ function terminalStateRoot(records) {
 }
 
 class XCallContract extends Contract {
-  async InitLedger() {
-    return;
-  }
-
   async EmitXCall(ctx, payloadJson) {
     let payload;
     try {
@@ -1279,7 +1292,7 @@ class XCallContract extends Contract {
       payload.targetContract ? addressToBytes32(payload.targetContract) : ethers.ZeroHash
     );
     const receiver = payload.receiver || targetObject;
-    const functionSelector = payload.functionSelector || selectorOf('execute(bytes32,bytes)');
+    const functionSelector = payload.functionSelector || selectorOf('executeCompact(bytes32,bytes)');
     const callDataHash = payload.callDataHash;
     if (!callDataHash) {
       throw new Error('payload.callDataHash is required for h-xmsg binding');
@@ -1348,6 +1361,7 @@ class XCallContract extends Contract {
         owner: ctx.clientIdentity.getID(),
         sourceTxID: txId,
         hmsgDigest: payload.hmsgDigest || ethers.ZeroHash,
+        targetChainID: executionTargetChainID,
         targetExecutionHash,
         commitmentType: atomicity.commitmentType,
         commitmentRefHash: atomicity.commitmentRefHash,
@@ -1420,7 +1434,7 @@ class XCallContract extends Contract {
       payload.targetContract ? addressToBytes32(payload.targetContract) : ethers.ZeroHash
     );
     const receiver = payload.receiver || targetObject;
-    const functionSelector = payload.functionSelector || selectorOf('execute(bytes32,bytes)');
+    const functionSelector = payload.functionSelector || selectorOf('executeCompact(bytes32,bytes)');
     const callDataHash = payload.callDataHash;
     if (!callDataHash) throw new Error('payload.callDataHash is required for h-xmsg binding');
     const expireAt = Number(payload.expireAt || (createdAt + 3600));
@@ -1484,6 +1498,7 @@ class XCallContract extends Contract {
         owner: ctx.clientIdentity.getID(),
         sourceTxID: txId,
         hmsgDigest: payload.hmsgDigest || ethers.ZeroHash,
+        targetChainID: executionTargetChainID,
         targetExecutionHash,
         commitmentType: atomicity.commitmentType,
         commitmentRefHash: atomicity.commitmentRefHash,
@@ -1517,11 +1532,6 @@ class XCallContract extends Contract {
     return JSON.stringify({ ok: true, txId, requestID, nonce, escrow });
   }
 
-  async RefundAssetEscrow(ctx, requestID) {
-    const escrow = await refundAssetEscrowRecord(ctx, requestID);
-    return JSON.stringify({ ok: true, requestID, escrow });
-  }
-
   async QueryCrosschainEvent(ctx, requestID) {
     const data = await ctx.stub.getState(`crosschainEvents:${requestID}`);
     if (!data || data.length === 0) {
@@ -1532,16 +1542,33 @@ class XCallContract extends Contract {
 
   async RegisterTrustedTEE(ctx, teeIdentityJson) {
     assertTEERegistrar(ctx);
-    const config = await getTEEClusterConfig(ctx);
     const identity = normalizeTEERegistration(teeIdentityJson);
+    const config = await getTEEClusterConfig(ctx, identity.clusterID);
+    if (config.exists) {
+      if (String(config.subnetIDHash).toLowerCase() !== String(identity.subnetIDHash).toLowerCase()) {
+        throw new Error('TEE subnetID mismatch');
+      }
+      if (Number(config.sourceChainType) !== Number(identity.sourceChainType)) {
+        throw new Error('TEE sourceChainType mismatch');
+      }
+    } else {
+      config.subnetIDHash = identity.subnetIDHash;
+      config.sourceChainType = identity.sourceChainType;
+      config.exists = true;
+    }
     const now = getTxTime(ctx);
     if (identity.notAfter && identity.notAfter <= now) {
       throw new Error('TEE attestation expired');
     }
     const attestationDigest = verifyTEERegistration(identity, Number(config.epoch || 1));
     const address = identity.teeAddress;
-    const key = `trustedTEE:${address}`;
-    const signerIndexKey = `teeSignerIndex:${identity.signerIndex}`;
+    const assignedData = await ctx.stub.getState(`teeAssignedCluster:${address}`);
+    if (assignedData && assignedData.length > 0
+      && String(assignedData.toString()).toLowerCase() !== String(identity.clusterID).toLowerCase()) {
+      throw new Error('TEE key already assigned to another subnet');
+    }
+    const key = `trustedTEE:${identity.clusterID}:${address}`;
+    const signerIndexKey = `teeSignerIndex:${identity.clusterID}:${identity.signerIndex}`;
     const existingIndex = await ctx.stub.getState(signerIndexKey);
     if (existingIndex && existingIndex.length > 0 && ethers.getAddress(existingIndex.toString()) !== address) {
       throw new Error('TEE signerIndex already registered');
@@ -1550,10 +1577,14 @@ class XCallContract extends Contract {
       config.members.push(address);
     }
     config.signerIndexes = Array.from(new Set([...(config.signerIndexes || []), identity.signerIndex]));
-    await putTEEClusterConfig(ctx, config);
+    await putTEEClusterConfig(ctx, identity.clusterID, config);
+    await ctx.stub.putState(`teeAssignedCluster:${address}`, Buffer.from(identity.clusterID));
     await ctx.stub.putState(signerIndexKey, Buffer.from(address));
     await ctx.stub.putState(key, Buffer.from(JSON.stringify({
       address,
+      clusterID: identity.clusterID,
+      subnetIDHash: identity.subnetIDHash,
+      sourceChainType: identity.sourceChainType,
       signerIndex: identity.signerIndex,
       enclavePubKeyHash: identity.enclavePubKeyHash,
       measurement: identity.measurement,
@@ -1579,116 +1610,19 @@ class XCallContract extends Contract {
     });
   }
 
-  async QueryTrustedTEE(ctx, teeAddress) {
+  async QueryTrustedTEE(ctx, clusterID, teeAddress) {
     const address = ethers.getAddress(teeAddress);
-    const data = await ctx.stub.getState(`trustedTEE:${address}`);
+    const data = await ctx.stub.getState(`trustedTEE:${clusterID}:${address}`);
     return data && data.length > 0 ? data.toString() : '';
   }
 
-  async QueryTEEClusterConfig(ctx) {
-    const config = await getTEEClusterConfig(ctx);
+  async QueryTEEClusterConfig(ctx, clusterID) {
+    const config = await getTEEClusterConfig(ctx, clusterID);
     return JSON.stringify({
       ...config,
       activeTEECount: config.members.length,
       quorumThreshold: config.members.length > 0 ? Math.floor(config.members.length / 2) + 1 : 0
     });
-  }
-
-  async ExecuteHXMsg(ctx, hxmsgJson, callDataHex, certJson) {
-    const hxmsg = parseJson(hxmsgJson, 'hxmsgJson');
-    const certEnvelope = parseJson(certJson, 'certJson');
-    const executionData = getExecutionData(hxmsg);
-    const auditRecord = getAuditRecord(hxmsg);
-    const compactCall = executionData.compactCall;
-    const businessPayload = executionData.businessPayload;
-    const requestID = hxmsg.header.requestID;
-    const replayScope = computeReplayScopeFromHXMsg(hxmsg);
-    const sourceNonce = Number(hxmsg.header.nonce);
-    await assertReplayAvailable(ctx, replayScope, sourceNonce);
-
-    const now = Number(ctx.stub.getTxTimestamp().seconds.low || ctx.stub.getTxTimestamp().seconds || Math.floor(Date.now() / 1000));
-    if (Number(hxmsg.header.deliveryExpireAt) < now) throw new Error('h-xmsg expired');
-    if (Number(hxmsg.target.chainType) !== 2) throw new Error('target is not Fabric');
-    if (Number(hxmsg.targetAction.actionType) !== 5) throw new Error('action is not chaincode invoke');
-
-    const expectedChainID = bytes32FromText(`fabric-${ctx.stub.getChannelID()}`);
-    const expectedDomainID = bytes32FromText('fabric-local-domain');
-    const expectedTargetObject = bytes32FromText('xcall');
-    if (String(hxmsg.target.chainID).toLowerCase() !== expectedChainID.toLowerCase()) {
-      throw new Error('Fabric target chainID mismatch');
-    }
-    if (String(hxmsg.target.domainID).toLowerCase() !== expectedDomainID.toLowerCase()) {
-      throw new Error('Fabric target domainID mismatch');
-    }
-    if (String(hxmsg.targetAction.targetObject).toLowerCase() !== expectedTargetObject.toLowerCase()) {
-      throw new Error('Fabric target object mismatch');
-    }
-    if (compactCall) {
-      if (String(hxmsg.targetAction.callDataHash).toLowerCase() !== hashCompactBusinessCall(compactCall).toLowerCase()) {
-        throw new Error('compact callDataHash mismatch');
-      }
-      if (String(hxmsg.targetAction.callDataHash).toLowerCase() !== ethers.keccak256(callDataHex).toLowerCase()) {
-        throw new Error('compact callData bytes mismatch');
-      }
-    } else if (String(hxmsg.targetAction.callDataHash).toLowerCase() !== ethers.keccak256(callDataHex).toLowerCase()) {
-      throw new Error('callDataHash mismatch');
-    }
-    const targetExecutionHash = computeTargetExecutionHashFromHXMsg(hxmsg);
-    const expectedTargetExecutionHash = hxmsg.deliveryMessage?.targetExecutionHash || targetExecutionHash;
-    if (String(expectedTargetExecutionHash).toLowerCase() !== targetExecutionHash.toLowerCase()) {
-      throw new Error('targetExecutionHash mismatch');
-    }
-
-    const hmsgDigest = computeHXMsgDigest(hxmsg);
-    const certResult = await verifyTEEClusterCertificate(
-      ctx,
-      expectedHXMsgSigningDigest(hxmsg, hmsgDigest, certEnvelope),
-      certEnvelope
-    );
-    const parsedPayload = compactCall ? businessPayload : decodeBusinessPayload(callDataHex);
-    if (!parsedPayload) throw new Error('businessPayload is required for compact h-xmsg');
-    if (hashJson(parsedPayload).toLowerCase() !== String(hxmsg.payloadBinding.businessPayloadHash).toLowerCase()) {
-      throw new Error('businessPayloadHash mismatch');
-    }
-    const businessRecord = await applyBusinessAction(ctx, {
-      requestID,
-      hmsgDigest,
-      callDataHash: hxmsg.targetAction.callDataHash,
-      parsedPayload,
-      sourceChainType: hxmsg.source.chainType
-    });
-    const record = {
-      requestID,
-      txId: ctx.stub.getTxID(),
-      callerMSP: ctx.clientIdentity.getMSPID(),
-      hmsgDigest,
-      validTEECount: certResult.validTEECount,
-      teeThreshold: certResult.threshold,
-      teeSigners: certResult.signerIndexes,
-      sourceChainType: hxmsg.source.chainType,
-      sourceTxID: auditRecord.txId || '',
-      srcHeight: auditRecord.srcHeight || 0,
-      callDataHash: hxmsg.targetAction.callDataHash,
-      businessPayloadHash: hxmsg.payloadBinding.businessPayloadHash,
-      targetExecutionHash,
-      op: parsedPayload.op,
-      recordId: parsedPayload.recordId,
-      actor: parsedPayload.actor,
-      amount: parsedPayload.amount,
-      metadata: parsedPayload.metadata,
-      requireAck: Boolean(parsedPayload.requireAck),
-      businessKey: businessRecord.businessKey,
-      businessStatus: businessRecord.status,
-      status: 'executed',
-      updatedAt: new Date().toISOString()
-    };
-
-    await markReplayConsumed(ctx, replayScope, sourceNonce);
-    await ctx.stub.putState(`crosschainExec:${requestID}`, Buffer.from(JSON.stringify(record)));
-    await ctx.stub.putState(`inbound:${requestID}`, Buffer.from(JSON.stringify(record)));
-    ctx.stub.setEvent('HXMSG_EXECUTED', Buffer.from(JSON.stringify(record)));
-
-    return JSON.stringify({ ok: true, requestID, status: 'executed', validTEECount: certResult.validTEECount });
   }
 
   async ExecuteHXMsgCompact(ctx, deliveryJson, compactCallJson, businessPayloadJson, certJson) {
@@ -1704,6 +1638,9 @@ class XCallContract extends Contract {
     if (Number(minimal.expireAt) < now) throw new Error('h-xmsg expired');
     if (Number(minimal.targetChainType) !== 2) throw new Error('target is not Fabric');
     if (Number(minimal.actionType) !== 5) throw new Error('action is not chaincode invoke');
+    if (String(minimal.functionSelector).toLowerCase() !== selectorOf('ExecuteHXMsgCompact(bytes32,bytes)').toLowerCase()) {
+      throw new Error('Fabric compact function selector mismatch');
+    }
 
     const expectedChainID = bytes32FromText(`fabric-${ctx.stub.getChannelID()}`);
     const expectedTargetObject = bytes32FromText('xcall');
@@ -1726,7 +1663,9 @@ class XCallContract extends Contract {
     const certResult = await verifyTEEClusterCertificate(
       ctx,
       expectedMinimalSigningDigest(minimal, certEnvelope),
-      certEnvelope
+      certEnvelope,
+      minimal.sourceChainType,
+      minimal.sourceChainID
     );
     const businessRecord = await applyBusinessAction(ctx, {
       requestID,
@@ -1795,6 +1734,9 @@ class XCallContract extends Contract {
       if (Number(minimal.expireAt) < now) throw new Error(`h-xmsg expired at batch index ${i}`);
       if (Number(minimal.targetChainType) !== 2) throw new Error(`target is not Fabric at batch index ${i}`);
       if (Number(minimal.actionType) !== 5) throw new Error(`action is not chaincode invoke at batch index ${i}`);
+      if (String(minimal.functionSelector).toLowerCase() !== selectorOf('ExecuteHXMsgCompact(bytes32,bytes)').toLowerCase()) {
+        throw new Error(`Fabric compact function selector mismatch at batch index ${i}`);
+      }
       if (String(minimal.targetChainID).toLowerCase() !== expectedChainID.toLowerCase()) {
         throw new Error(`Fabric target chainID mismatch at batch index ${i}`);
       }
@@ -1819,7 +1761,15 @@ class XCallContract extends Contract {
     }
 
     // 所有消息均已通过各自的 Merkle inclusion proof，因此同一批次的 TEE quorum 签名只验证一次。
-    const certResult = await verifyTEEClusterCertificate(ctx, batchSigningDigest, certEnvelopes[0]);
+    const firstMinimal = prepared[0].minimal;
+    for (const item of prepared) {
+      if (Number(item.minimal.sourceChainType) !== Number(firstMinimal.sourceChainType)
+        || String(item.minimal.sourceChainID).toLowerCase() !== String(firstMinimal.sourceChainID).toLowerCase()) {
+        throw new Error('mixed source subnet batch');
+      }
+    }
+    const certResult = await verifyTEEClusterCertificate(ctx, batchSigningDigest, certEnvelopes[0],
+      firstMinimal.sourceChainType, firstMinimal.sourceChainID);
     const records = [];
     for (const item of prepared) {
       const { minimal, parsedPayload, targetExecutionHash } = item;
@@ -1937,7 +1887,9 @@ class XCallContract extends Contract {
     const certResult = await verifyTEEClusterCertificate(
       ctx,
       expectedHXMsgSigningDigest(hxmsg, hmsgDigest, certEnvelope),
-      certEnvelope
+      certEnvelope,
+      hxmsg.source.chainType,
+      hxmsg.source.chainID
     );
     record.hmsgDigest = hmsgDigest;
     record.validTEECount = certResult.validTEECount;
@@ -2010,7 +1962,8 @@ class XCallContract extends Contract {
     if (consumed && consumed.length > 0) {
       throw new Error('response replay');
     }
-    const certResult = await verifyTEEClusterCertificate(ctx, responseDigest, certEnvelope);
+    const certResult = await verifyTEEClusterCertificate(ctx, responseDigest, certEnvelope,
+      null, record.targetChainID);
     let settlementResult = null;
     if (Number(record.commitmentType) === 3) {
       settlementResult = await settleAssetEscrowRecord(ctx, requestID);
@@ -2110,7 +2063,8 @@ class XCallContract extends Contract {
     if (String(preview.terminalStateRoot).toLowerCase() !== String(terminalRoot).toLowerCase()) {
       throw new Error('bad terminal state root');
     }
-    await verifyTEEClusterCertificate(ctx, preview.signingDigest, parseJson(certJson, 'certJson'));
+    await verifyTEEClusterCertificate(ctx, preview.signingDigest, parseJson(certJson, 'certJson'),
+      2, bytes32FromText(`fabric-${ctx.stub.getChannelID()}`));
     const requestIDs = parseJson(requestIDsJson, 'requestIDsJson');
     for (const requestID of requestIDs) {
       const record = await getResponseLifecycle(ctx, requestID);
@@ -2132,10 +2086,6 @@ class XCallContract extends Contract {
     return JSON.stringify({ ok: true, ...result });
   }
 
-  async GetAckStatus(ctx, originRequestID) {
-    const data = await ctx.stub.getState(`ack:${originRequestID}`);
-    return data && data.length > 0 ? data.toString() : '';
-  }
 }
 
 module.exports.contracts = [XCallContract];

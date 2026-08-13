@@ -149,7 +149,7 @@ Checkpoint 不删除目标业务结果、事件日志、Fabric 区块历史或�
 事件驱动闭环：
 
 ```bash
-npm run automation:test:evm-avalanche
+npm run automation:test:ethereum-avalanche
 npm run automation:test:evm-fabric
 npm run automation:test:fabric-evm
 npm run automation:test:watcher-escrow

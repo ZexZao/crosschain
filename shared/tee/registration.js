@@ -58,6 +58,8 @@ function clusterCertificateTuple(certificate) {
   if (!cert) throw new Error('cluster certificate is required');
   return [
     cert.clusterID,
+    Number(cert.sourceChainType),
+    cert.sourceChainID,
     Number(cert.epoch),
     Number(cert.threshold),
     Number(cert.participantCount),
@@ -65,6 +67,7 @@ function clusterCertificateTuple(certificate) {
     cert.selectedSignerHash,
     cert.signatureBundle,
     cert.signingDigest,
+    cert.subjectDigest,
     Number(cert.committedTerm || 0),
     Number(cert.committedIndex || 0),
   ];
@@ -87,9 +90,12 @@ async function registerEVMTEEs({ registry, certificate, certificates, teeURLs = 
   let nextNonce = await readNonce();
   const writer = registry.connect(signer);
   for (const address of addresses) {
-    if (await registry.isActiveTEE(address)) continue;
     const identity = byAddress.get(address);
     if (!identity) throw new Error(`TEE identity not found for ${address}`);
+    if (String(identity.clusterID).toLowerCase() !== String(certificate?.clusterID || certificates?.[0]?.clusterID).toLowerCase()) {
+      throw new Error(`TEE identity ${address} belongs to a different subnet`);
+    }
+    if (await registry.isActiveTEE(identity.clusterID, address)) continue;
     let completed = false;
     for (let attempt = 1; attempt <= 3 && !completed; attempt += 1) {
       try {
@@ -100,7 +106,7 @@ async function registerEVMTEEs({ registry, certificate, certificates, teeURLs = 
         gasUsed += receipt.gasUsed || 0n;
         completed = true;
       } catch (error) {
-        if (await registry.isActiveTEE(address)) {
+        if (await registry.isActiveTEE(identity.clusterID, address)) {
           completed = true;
           nextNonce = await readNonce();
           break;

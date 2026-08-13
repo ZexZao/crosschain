@@ -33,25 +33,24 @@ requireAck
 
 `contracts/TargetContract.sol` 已从轻量记录合约升级为业务路由器。真实业务动作由 `contracts/BusinessServiceContracts.sol` 中的分类服务合约执行。
 
-执行入口仍然是：
+唯一执行入口是：
 
 ```solidity
-execute(bytes32 requestID, bytes calldata payload)
+executeCompact(bytes32 requestID, CompactCall calldata compact)
 ```
 
 只有 `HXMsgGateway` 可以调用该入口。合约会：
 
-1. ABI 解码业务 payload。
-2. 根据 `op` 分发到对应业务服务合约。
+1. 校验强类型 `CompactCall`。
+2. 根据 `opCode` 分发到对应业务服务合约。
 3. 业务服务执行真实动作，例如 mint token、登记应收账款、更新 oracle feed。
 4. `TargetContract` 记录服务地址、业务状态和索引，作为审计入口。
-5. 发出 `BusinessActionApplied` 事件。
+5. 发出目标执行及领域服务事件。
 
 可查询接口：
 
 ```solidity
-getBusinessRecord(bytes32 requestID)
-getBusinessRecordByKey(string op, string recordId)
+getCompactBusinessRecord(bytes32 requestID)
 ```
 
 同时，`TargetContract` 会在构造时部署实验 ERC20：
@@ -99,7 +98,7 @@ CrossChainToken.balanceOf(account)
 
 ## 4. Fabric 目标链业务执行
 
-`fabric-chaincode/xcall/index.js` 中的 `ExecuteHXMsg` 在验证 h-xmsg、TEE quorum、防重放、目标绑定后，会调用 Fabric 侧业务服务分发逻辑。
+`fabric-chaincode/xcall/index.js` 中的 `ExecuteHXMsgCompact` 在验证 minimal delivery、TEE quorum、防重放、目标绑定后，会调用 Fabric 侧业务服务分发逻辑。完整动态 h-xmsg 执行入口已经删除。
 
 链码会写入：
 
@@ -152,7 +151,6 @@ InitAssetBalance(account, assetType, amount)
 QueryAssetBalance(account, assetType)
 LockAssetXCall(payloadJson)
 QueryAssetEscrow(requestID)
-RefundAssetEscrow(requestID)
 ```
 
 `LockAssetXCall` 会真实执行：
@@ -163,13 +161,7 @@ RefundAssetEscrow(requestID)
 4. 写入 `crosschainEvents:{requestID}`，使该锁定事实进入 h-FSV view。
 5. 后续 TEE 按 h-FSV 验证该跨链请求。
 
-`RefundAssetEscrow` 会真实执行：
-
-1. 检查 escrow 存在且状态为 `Locked`。
-2. 将 escrow 中的 `amountUnits` 加回 owner 余额。
-3. 将 escrow 状态改为 `Refunded`。
-
-当前退款已经接入 challenge timeout 的补偿分发。`CompensateAfterChallenge` 在发现 commitment type 为 `TOKEN_ESCROW` 时，会自动调用内部 escrow refund handler，恢复 owner 余额，并把 commitment 标记为 `Compensated`。
+不存在绕过状态机的公开退款入口。退款只能由已授权 watcher 在 challenge timeout 后调用 `CompensateAfterChallenge`，链码确认 commitment type 为 `TOKEN_ESCROW` 后再调用内部 escrow refund handler，恢复 owner 余额并把 commitment 标记为 `Compensated`。
 
 ## 6. EVM token escrow and refund
 

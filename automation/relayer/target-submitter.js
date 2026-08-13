@@ -7,7 +7,7 @@ const { teeURLs } = require('../config');
 
 const GatewayArtifact = require('../../artifacts/contracts/HXMsgGateway.sol/HXMsgGateway.json');
 const RegistryArtifact = require('../../artifacts/contracts/TEERegistry.sol/TEERegistry.json');
-const CLUSTER_CERT_ABI = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64)';
+const CLUSTER_CERT_ABI = '(bytes32,uint8,bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,bytes32,uint64,uint64)';
 
 function walletFor(profile) {
   const provider = new ethers.JsonRpcProvider(profile.rpc);
@@ -25,13 +25,10 @@ async function submitToEVM(targetProfile, hxmsg, execution, certificate) {
   });
   const gateway = new ethers.Contract(deployment.hxmsgGateway, GatewayArtifact.abi, signer);
   const target = execution.target || deployment.targetContract;
-  const transaction = execution.compactCall
-    ? await gateway.executeHXMsgMinimalCompactCluster(
-      toMinimalHXMsg(hxmsg), target, execution.compactCall, clusterCertificateTuple(certificate)
-    )
-    : await gateway.executeHXMsgMinimalCluster(
-      toMinimalHXMsg(hxmsg), target, execution.callData, clusterCertificateTuple(certificate)
-    );
+  if (!execution.compactCall) throw new Error('compact target execution is required');
+  const transaction = await gateway.executeHXMsgMinimalCompactCluster(
+    toMinimalHXMsg(hxmsg), target, execution.compactCall, clusterCertificateTuple(certificate)
+  );
   const receipt = await transaction.wait();
   return {
     transactionHash: receipt.hash,
@@ -55,7 +52,7 @@ async function submitToFabric(targetProfile, hxmsg, execution, certificate) {
       receiver: minimal[8], targetExecutionHash: minimal[9], feedbackRequired: Boolean(minimal[10]),
       expectedFeedbackMsgType: Number(minimal[11]), feedbackTimeout: Number(minimal[12]), callbackRefHash: minimal[13],
       expireAt: Number(minimal[14]), replayScope: minimal[15], sourceNonce: Number(minimal[16]),
-      sourceChainType: Number(hxmsg.source.chainType),
+      sourceChainType: Number(minimal[17]), sourceChainID: minimal[18],
     };
     const data = execution.compactCall ? execution : getExecutionData(hxmsg);
     const transaction = contract.createTransaction('ExecuteHXMsgCompact');
@@ -80,7 +77,7 @@ async function submitTarget({ targetProfile, hxmsg, execution, certificate }) {
 
 function compactFabricDelivery(hxmsg) {
   const minimal = toMinimalHXMsg(hxmsg);
-  return [minimal[0], minimal[1], minimal[7], minimal[14], minimal[15], minimal[16]];
+  return [minimal[0], minimal[1], minimal[7], minimal[14], minimal[15], minimal[16], minimal[17], minimal[18]];
 }
 
 function fabricDelivery(hxmsg) {
@@ -91,7 +88,7 @@ function fabricDelivery(hxmsg) {
     receiver: minimal[8], targetExecutionHash: minimal[9], feedbackRequired: Boolean(minimal[10]),
     expectedFeedbackMsgType: Number(minimal[11]), feedbackTimeout: Number(minimal[12]), callbackRefHash: minimal[13],
     expireAt: Number(minimal[14]), replayScope: minimal[15], sourceNonce: Number(minimal[16]),
-    sourceChainType: Number(hxmsg.source.chainType),
+    sourceChainType: Number(minimal[17]), sourceChainID: minimal[18],
   };
 }
 
@@ -117,7 +114,7 @@ async function submitBatchToEVM(targetProfile, items, batch) {
   const useFabricFastPath = sourceChainType === ChainType.FABRIC
     && items.every((item) => !item.hxmsg.feedback?.required && !item.hxmsg.atomicity?.required);
   const transaction = useFabricFastPath
-    ? await gateway['executeFabricEVMCompactBatchCluster((bytes32,bytes32,bytes32,uint64,bytes32,uint64)[],address,(uint16,bytes32,bytes32,address,int256,bytes32,bool)[],bytes32,bytes32,(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64))'](
+    ? await gateway[`executeFabricEVMCompactBatchCluster((bytes32,bytes32,bytes32,uint64,bytes32,uint64,uint8,bytes32)[],address,(uint16,bytes32,bytes32,address,int256,bytes32,bool)[],bytes32,bytes32,${CLUSTER_CERT_ABI})`](
       items.map((item) => compactFabricDelivery(item.hxmsg)),
       target,
       calls,
@@ -125,7 +122,7 @@ async function submitBatchToEVM(targetProfile, items, batch) {
       batch.batchRoot,
       clusterCertificateTuple(batch.certificate)
     )
-    : await gateway['executeHXMsgMinimalCompactBatchCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,bytes32,uint64)[],address,(uint16,bytes32,bytes32,address,int256,bytes32,bool)[],bytes32,bytes32,(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64))'](
+    : await gateway[`executeHXMsgMinimalCompactBatchCluster((bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,bytes32,uint64,uint8,bytes32)[],address,(uint16,bytes32,bytes32,address,int256,bytes32,bool)[],bytes32,bytes32,${CLUSTER_CERT_ABI})`](
       items.map((item) => toMinimalHXMsg(item.hxmsg)),
       target,
       calls,
@@ -182,8 +179,4 @@ async function submitTargetBatch({ targetProfile, items, batch }) {
 module.exports = {
   submitTarget,
   submitTargetBatch,
-  submitToEVM,
-  submitToFabric,
-  submitBatchToEVM,
-  submitBatchToFabric,
 };

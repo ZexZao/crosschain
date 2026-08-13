@@ -1,0 +1,78 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { ethers } = require('ethers');
+const {
+  normalizeAnchor,
+  selectPinnedSnapshot,
+  assertProofMatchesTrustedSnapshot,
+} = require('../shared/avalanche/pchain-trust');
+const { validatorSetHash } = require('../shared/avalanche/warp-proof');
+
+function validator(index, weight = '100') {
+  return {
+    nodeID: `NodeID-${index}`,
+    publicKey: ethers.hexlify(Uint8Array.from({ length: 48 }, () => index)),
+    weight,
+  };
+}
+
+function fixture() {
+  const validators = [validator(1), validator(2), validator(3), validator(4), validator(5)];
+  const totalWeight = validators.reduce((sum, item) => sum + BigInt(item.weight), 0n).toString();
+  const anchor = normalizeAnchor({
+    schemaVersion: 1,
+    mode: 'genesis-pinned-local-node',
+    staticValidatorSet: true,
+    networkID: 1337,
+    genesisHash: ethers.keccak256(ethers.toUtf8Bytes('genesis')),
+    sourceChainIDs: [ethers.zeroPadValue('0x01', 32)],
+    quorumNumerator: 67,
+    quorumDenominator: 100,
+    validatorSnapshots: [{
+      pChainHeight: 10,
+      validators,
+      validatorSetHash: validatorSetHash(validators),
+      totalWeight,
+    }],
+  });
+  const snapshot = selectPinnedSnapshot(anchor, 11);
+  const sourceProof = { networkID: 1337, sourceChainID: ethers.zeroPadValue('0x01', 32) };
+  const validatorSetRef = {
+    networkID: 1337,
+    pChainHeight: 11,
+    validatorSetHash: snapshot.validatorSetHash,
+    totalWeight: snapshot.totalWeight,
+    quorumNumerator: 67,
+    quorumDenominator: 100,
+    canonicalOrdering: 'nodeID-ascending',
+  };
+  return { anchor, snapshot, sourceProof, validatorSetRef, validators };
+}
+
+test('accepts a relayer proof that matches the genesis-pinned validator snapshot', () => {
+  assert.doesNotThrow(() => assertProofMatchesTrustedSnapshot({ ...fixture(), suppliedValidatorSet: fixture().validators }));
+});
+
+test('rejects a self-consistent attacker validator set', () => {
+  const input = fixture();
+  const fakeValidators = [validator(11), validator(12), validator(13)];
+  input.validatorSetRef = {
+    ...input.validatorSetRef,
+    validatorSetHash: validatorSetHash(fakeValidators),
+    totalWeight: '300',
+  };
+  assert.throws(
+    () => assertProofMatchesTrustedSnapshot({ ...input, suppliedValidatorSet: fakeValidators }),
+    /does not match trusted P-Chain snapshot/
+  );
+});
+
+test('rejects relayer-controlled quorum and source network', () => {
+  const quorum = fixture();
+  quorum.validatorSetRef.quorumNumerator = 1;
+  assert.throws(() => assertProofMatchesTrustedSnapshot(quorum), /cannot override trusted Avalanche quorum/);
+
+  const network = fixture();
+  network.sourceProof.networkID = 9999;
+  assert.throws(() => assertProofMatchesTrustedSnapshot(network), /not anchored to trusted P-Chain genesis/);
+});

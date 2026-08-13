@@ -20,6 +20,16 @@ function cb58Encode(hexOrBytes) {
   return utils.base58.encode(Buffer.concat([bytes, checksum]));
 }
 
+function cb58Decode(value) {
+  const decoded = Buffer.from(utils.base58.decode(String(value)));
+  if (decoded.length < 5) throw new Error('invalid CB58 value');
+  const payload = decoded.subarray(0, -4);
+  const checksum = decoded.subarray(-4);
+  const expected = Buffer.from(ethers.getBytes(ethers.sha256(payload))).subarray(28);
+  if (!checksum.equals(expected)) throw new Error('invalid CB58 checksum');
+  return `0x${payload.toString('hex')}`;
+}
+
 function bitIsSet(bitmap, index) {
   const byteIndex = Math.floor(index / 8);
   const bitIndex = index % 8;
@@ -190,6 +200,7 @@ function verifyAvalancheWeightedSignatures({ unsignedWarpMessage, validatorSet, 
 
 module.exports = {
   cb58Encode,
+  cb58Decode,
   bitIsSet,
   parseUnsignedWarpMessage,
   decodeHXMsgWarpPayload,

@@ -69,9 +69,10 @@ services:
       TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000001"
       TEE_SUBNET_ID: ethereum-proof-subnet
       TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_ID: HXMSG_ETHEREUM_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_ETHEREUM_RAFT_SHARED_SECRET:-local-ethereum-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9000:9000"
@@ -84,9 +85,10 @@ services:
       TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000002"
       TEE_SUBNET_ID: ethereum-proof-subnet
       TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_ID: HXMSG_ETHEREUM_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-verifier:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_ETHEREUM_RAFT_SHARED_SECRET:-local-ethereum-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9001:9000"
@@ -99,9 +101,10 @@ services:
       TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000003"
       TEE_SUBNET_ID: ethereum-proof-subnet
       TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_ID: HXMSG_ETHEREUM_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-4:9000,http://tee-verifier-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_ETHEREUM_RAFT_SHARED_SECRET:-local-ethereum-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9002:9000"
@@ -114,9 +117,10 @@ services:
       TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000004"
       TEE_SUBNET_ID: ethereum-proof-subnet
       TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_ID: HXMSG_ETHEREUM_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_ETHEREUM_RAFT_SHARED_SECRET:-local-ethereum-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9003:9000"
@@ -129,9 +133,10 @@ services:
       TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000005"
       TEE_SUBNET_ID: ethereum-proof-subnet
       TEE_SUBNET_PROFILE: ethereum
+      TEE_CLUSTER_ID: HXMSG_ETHEREUM_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-verifier:9000,http://tee-verifier-2:9000,http://tee-verifier-3:9000,http://tee-verifier-4:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_ETHEREUM_RAFT_SHARED_SECRET:-local-ethereum-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9004:9000"
@@ -141,12 +146,13 @@ services:
     environment:
       TEE_NODE_ID: tee-fabric-1
       TEE_SIGNER_INDEX: 0
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000001"
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000006"
       TEE_SUBNET_ID: fabric-proof-subnet
       TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_ID: HXMSG_FABRIC_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-fabric-2:9000,http://tee-fabric-3:9000,http://tee-fabric-4:9000,http://tee-fabric-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_FABRIC_RAFT_SHARED_SECRET:-local-fabric-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9100:9000"
@@ -156,12 +162,13 @@ services:
     environment:
       TEE_NODE_ID: tee-fabric-2
       TEE_SIGNER_INDEX: 1
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000002"
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000007"
       TEE_SUBNET_ID: fabric-proof-subnet
       TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_ID: HXMSG_FABRIC_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-fabric-1:9000,http://tee-fabric-3:9000,http://tee-fabric-4:9000,http://tee-fabric-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_FABRIC_RAFT_SHARED_SECRET:-local-fabric-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9101:9000"
@@ -171,12 +178,13 @@ services:
     environment:
       TEE_NODE_ID: tee-fabric-3
       TEE_SIGNER_INDEX: 2
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000003"
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000008"
       TEE_SUBNET_ID: fabric-proof-subnet
       TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_ID: HXMSG_FABRIC_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-fabric-1:9000,http://tee-fabric-2:9000,http://tee-fabric-4:9000,http://tee-fabric-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_FABRIC_RAFT_SHARED_SECRET:-local-fabric-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9102:9000"
@@ -186,12 +194,13 @@ services:
     environment:
       TEE_NODE_ID: tee-fabric-4
       TEE_SIGNER_INDEX: 3
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000004"
+      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000009"
       TEE_SUBNET_ID: fabric-proof-subnet
       TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_ID: HXMSG_FABRIC_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-fabric-1:9000,http://tee-fabric-2:9000,http://tee-fabric-3:9000,http://tee-fabric-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_FABRIC_RAFT_SHARED_SECRET:-local-fabric-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9103:9000"
@@ -201,12 +210,13 @@ services:
     environment:
       TEE_NODE_ID: tee-fabric-5
       TEE_SIGNER_INDEX: 4
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000005"
+      TEE_PRIVATE_KEY: "0x000000000000000000000000000000000000000000000000000000000000000a"
       TEE_SUBNET_ID: fabric-proof-subnet
       TEE_SUBNET_PROFILE: fabric
+      TEE_CLUSTER_ID: HXMSG_FABRIC_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-fabric-1:9000,http://tee-fabric-2:9000,http://tee-fabric-3:9000,http://tee-fabric-4:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_FABRIC_RAFT_SHARED_SECRET:-local-fabric-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
     ports:
       - "9104:9000"
@@ -216,13 +226,17 @@ services:
     environment:
       TEE_NODE_ID: tee-avalanche-1
       TEE_SIGNER_INDEX: 0
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000001"
+      TEE_PRIVATE_KEY: "0x000000000000000000000000000000000000000000000000000000000000000b"
       TEE_SUBNET_ID: avalanche-proof-subnet
       TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_ID: HXMSG_AVALANCHE_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-avalanche-2:9000,http://tee-avalanche-3:9000,http://tee-avalanche-4:9000,http://tee-avalanche-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_AVALANCHE_RAFT_SHARED_SECRET:-local-avalanche-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
+      AVALANCHE_PCHAIN_TRUST_ANCHOR_FILE: /app/runtime/avalanche-pchain-trust-anchor.json
+      AVALANCHE_PCHAIN_RPC_URL: http://avalanche-rpc-proxy:9650/node/9650/ext/P
+      AVALANCHE_PCHAIN_MAX_HEIGHT_LAG: ${AVALANCHE_PCHAIN_MAX_HEIGHT_LAG:-1000}
     ports:
       - "9020:9000"
 
@@ -231,13 +245,17 @@ services:
     environment:
       TEE_NODE_ID: tee-avalanche-2
       TEE_SIGNER_INDEX: 1
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000002"
+      TEE_PRIVATE_KEY: "0x000000000000000000000000000000000000000000000000000000000000000c"
       TEE_SUBNET_ID: avalanche-proof-subnet
       TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_ID: HXMSG_AVALANCHE_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-avalanche-1:9000,http://tee-avalanche-3:9000,http://tee-avalanche-4:9000,http://tee-avalanche-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_AVALANCHE_RAFT_SHARED_SECRET:-local-avalanche-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
+      AVALANCHE_PCHAIN_TRUST_ANCHOR_FILE: /app/runtime/avalanche-pchain-trust-anchor.json
+      AVALANCHE_PCHAIN_RPC_URL: http://avalanche-rpc-proxy:9650/node/9656/ext/P
+      AVALANCHE_PCHAIN_MAX_HEIGHT_LAG: ${AVALANCHE_PCHAIN_MAX_HEIGHT_LAG:-1000}
     ports:
       - "9021:9000"
 
@@ -246,13 +264,17 @@ services:
     environment:
       TEE_NODE_ID: tee-avalanche-3
       TEE_SIGNER_INDEX: 2
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000003"
+      TEE_PRIVATE_KEY: "0x000000000000000000000000000000000000000000000000000000000000000d"
       TEE_SUBNET_ID: avalanche-proof-subnet
       TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_ID: HXMSG_AVALANCHE_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-avalanche-1:9000,http://tee-avalanche-2:9000,http://tee-avalanche-4:9000,http://tee-avalanche-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_AVALANCHE_RAFT_SHARED_SECRET:-local-avalanche-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
+      AVALANCHE_PCHAIN_TRUST_ANCHOR_FILE: /app/runtime/avalanche-pchain-trust-anchor.json
+      AVALANCHE_PCHAIN_RPC_URL: http://avalanche-rpc-proxy:9650/node/9652/ext/P
+      AVALANCHE_PCHAIN_MAX_HEIGHT_LAG: ${AVALANCHE_PCHAIN_MAX_HEIGHT_LAG:-1000}
     ports:
       - "9022:9000"
 
@@ -261,13 +283,17 @@ services:
     environment:
       TEE_NODE_ID: tee-avalanche-4
       TEE_SIGNER_INDEX: 3
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000004"
+      TEE_PRIVATE_KEY: "0x000000000000000000000000000000000000000000000000000000000000000e"
       TEE_SUBNET_ID: avalanche-proof-subnet
       TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_ID: HXMSG_AVALANCHE_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-avalanche-1:9000,http://tee-avalanche-2:9000,http://tee-avalanche-3:9000,http://tee-avalanche-5:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_AVALANCHE_RAFT_SHARED_SECRET:-local-avalanche-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
+      AVALANCHE_PCHAIN_TRUST_ANCHOR_FILE: /app/runtime/avalanche-pchain-trust-anchor.json
+      AVALANCHE_PCHAIN_RPC_URL: http://avalanche-rpc-proxy:9650/node/9654/ext/P
+      AVALANCHE_PCHAIN_MAX_HEIGHT_LAG: ${AVALANCHE_PCHAIN_MAX_HEIGHT_LAG:-1000}
     ports:
       - "9023:9000"
 
@@ -276,13 +302,17 @@ services:
     environment:
       TEE_NODE_ID: tee-avalanche-5
       TEE_SIGNER_INDEX: 4
-      TEE_PRIVATE_KEY: "0x0000000000000000000000000000000000000000000000000000000000000005"
+      TEE_PRIVATE_KEY: "0x000000000000000000000000000000000000000000000000000000000000000f"
       TEE_SUBNET_ID: avalanche-proof-subnet
       TEE_SUBNET_PROFILE: avalanche
+      TEE_CLUSTER_ID: HXMSG_AVALANCHE_PROOF_SUBNET_V1
       TEE_CLUSTER_THRESHOLD: 3
       TEE_CLUSTER_PEERS: http://tee-avalanche-1:9000,http://tee-avalanche-2:9000,http://tee-avalanche-3:9000,http://tee-avalanche-4:9000
-      TEE_RAFT_SHARED_SECRET: ${TEE_RAFT_SHARED_SECRET:-local-raft-dev-secret}
+      TEE_RAFT_SHARED_SECRET: ${TEE_AVALANCHE_RAFT_SHARED_SECRET:-local-avalanche-raft-dev-secret}
       EVM_RPC: http://evm-node:8545
+      AVALANCHE_PCHAIN_TRUST_ANCHOR_FILE: /app/runtime/avalanche-pchain-trust-anchor.json
+      AVALANCHE_PCHAIN_RPC_URL: http://avalanche-rpc-proxy:9650/node/9658/ext/P
+      AVALANCHE_PCHAIN_MAX_HEIGHT_LAG: ${AVALANCHE_PCHAIN_MAX_HEIGHT_LAG:-1000}
     ports:
       - "9024:9000"
 

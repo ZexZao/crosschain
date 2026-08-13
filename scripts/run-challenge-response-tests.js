@@ -5,6 +5,7 @@ const { computeResponseDigest, CommitmentType, AtomicityMode, FeedbackType, Resp
 const { buildSimulatedAttestationIdentity, evmRegistrationTuple } = require('../shared/tee/attestation');
 const { signCommittedDigest, buildQuorumCertificate } = require('../shared/tee/quorum-certificate');
 const { clusterCertificateTuple } = require('../shared/tee/registration');
+const { clusterIDForSubnet, subnetSigningDigest } = require('../shared/tee/domains');
 
 const RUNTIME_DIR = path.join(__dirname, '..', 'runtime');
 
@@ -21,7 +22,8 @@ async function increaseTime(seconds) {
   await network.provider.send('evm_mine');
 }
 
-const CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes('HXMSG_TEE_CLUSTER_LOCAL_V1'));
+const CLUSTER_ID = clusterIDForSubnet('fabric-proof-subnet');
+const CERT_SOURCE_CHAIN_ID = ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel'));
 
 async function submitAtomic(source, params = {}) {
   const latest = await ethers.provider.getBlock('latest');
@@ -29,7 +31,7 @@ async function submitAtomic(source, params = {}) {
   const targetChainID = params.targetChainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel'));
   const targetDomainID = params.targetDomainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-local-domain'));
   const targetObject = params.targetObject || ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall'));
-  const selector = params.selector || ethers.id('ExecuteHXMsg(bytes32,bytes)').slice(0, 10);
+  const selector = params.selector || ethers.id('ExecuteHXMsgCompact(bytes32,bytes)').slice(0, 10);
   const callDataHash = params.callDataHash || ethers.keccak256(ethers.toUtf8Bytes(`call-${Date.now()}-${Math.random()}`));
   const businessPayloadHash = params.businessPayloadHash || ethers.keccak256(ethers.toUtf8Bytes('payload'));
   const receiver = params.receiver || ethers.keccak256(ethers.toUtf8Bytes('receiver'));
@@ -79,7 +81,7 @@ async function submitTokenEscrowAtomic(source, token, owner, params = {}) {
   const targetChainID = params.targetChainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel'));
   const targetDomainID = params.targetDomainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-local-domain'));
   const targetObject = params.targetObject || ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall'));
-  const selector = params.selector || ethers.id('ExecuteHXMsg(bytes32,bytes)').slice(0, 10);
+  const selector = params.selector || ethers.id('ExecuteHXMsgCompact(bytes32,bytes)').slice(0, 10);
   const callDataHash = params.callDataHash || ethers.keccak256(ethers.toUtf8Bytes(`token-call-${Date.now()}-${Math.random()}`));
   const businessPayloadHash = params.businessPayloadHash || ethers.keccak256(ethers.toUtf8Bytes('token-payload'));
   const receiver = params.receiver || ethers.keccak256(ethers.toUtf8Bytes('token-receiver'));
@@ -156,6 +158,8 @@ async function expectRevert(label, fn) {
 }
 
 async function clusterCertFor(teeIdentities, digest, count) {
+  const signingDigest = subnetSigningDigest({ clusterID: CLUSTER_ID, epoch: 1,
+    sourceChainType: 2, sourceChainID: CERT_SOURCE_CHAIN_ID, subjectDigest: digest });
   const selected = teeIdentities.slice(0, count);
   const signatures = [];
   for (const item of selected) {
@@ -166,7 +170,8 @@ async function clusterCertFor(teeIdentities, digest, count) {
       committedEntry: {
         requestID: ethers.ZeroHash,
         hmsgDigest: digest,
-      signingDigest: digest,
+        subjectDigest: digest,
+        signingDigest,
         signatureDigestType: 'responseDigest',
         term: 1,
         index: 1,
@@ -178,7 +183,10 @@ async function clusterCertFor(teeIdentities, digest, count) {
     clusterID: CLUSTER_ID,
     epoch: 1,
     threshold: Math.floor(teeIdentities.length / 2) + 1,
-    signingDigest: digest,
+    subjectDigest: digest,
+    signingDigest,
+    sourceChainType: 2,
+    sourceChainID: CERT_SOURCE_CHAIN_ID,
     signatureDigestType: 'responseDigest',
     term: 1,
     index: 1,
@@ -209,6 +217,9 @@ async function main() {
       privateKey: wallet.privateKey,
       nodeID: `tee-verifier-${i + 1}`,
       signerIndex: i,
+      subnetID: 'fabric-proof-subnet',
+      subnetProfile: 'fabric',
+      clusterID: CLUSTER_ID,
     });
     teeIdentities.push({ wallet, identity });
     await (await registry.registerTEE(evmRegistrationTuple(identity))).wait();
@@ -347,7 +358,7 @@ async function main() {
       ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel')),
       ethers.keccak256(ethers.toUtf8Bytes('fabric-local-domain')),
       ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall')),
-      ethers.id('ExecuteHXMsg(bytes32,bytes)').slice(0, 10),
+      ethers.id('ExecuteHXMsgCompact(bytes32,bytes)').slice(0, 10),
       ethers.keccak256(ethers.toUtf8Bytes('call-token-escrow')),
       ethers.keccak256(ethers.toUtf8Bytes('payload-token-escrow')),
       ethers.keccak256(ethers.toUtf8Bytes('receiver')),

@@ -11,6 +11,7 @@ const {
   decodeHXMsgWarpPayload,
   verifyAvalancheWeightedSignatures,
 } = require('../../shared/avalanche/warp-proof');
+const { resolveTrustedValidatorSet } = require('../../shared/avalanche/pchain-trust');
 
 function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
@@ -31,7 +32,7 @@ function verifyQuorumWeight({ signedWeight, totalWeight, quorumNumerator = 67, q
   }
 }
 
-async function verifySourceFact({ hxmsg, helperData }) {
+async function verifySourceFact({ hxmsg, helperData, chainState, saveChainState }) {
   const proof = helperData.avalancheProof || helperData.sourceProof || {};
   if (!proof || !proof.sourceProof || !proof.validatorSetRef || !proof.signatureProof) {
     throw new Error('Avalanche ICM proof is required');
@@ -63,14 +64,19 @@ async function verifySourceFact({ hxmsg, helperData }) {
     throw new Error('Avalanche payloadBinding sourceMessageID mismatch');
   }
 
+  const trustedSet = await resolveTrustedValidatorSet({
+    sourceProof,
+    validatorSetRef,
+    suppliedValidatorSet: validatorSet,
+  });
   const weightedProof = verifyAvalancheWeightedSignatures({
     unsignedWarpMessage: sourceProof.unsignedWarpMessage,
-    validatorSet,
+    validatorSet: trustedSet.validators,
     signatures: signatureProof.signatures,
-    quorumNumerator: validatorSetRef.quorumNumerator,
-    quorumDenominator: validatorSetRef.quorumDenominator,
+    quorumNumerator: trustedSet.quorumNumerator,
+    quorumDenominator: trustedSet.quorumDenominator,
   });
-  if (!sameHex(weightedProof.validatorSetHash, validatorSetRef.validatorSetHash)) {
+  if (!sameHex(weightedProof.validatorSetHash, trustedSet.validatorSetHash)) {
     throw new Error('Avalanche validatorSetHash mismatch');
   }
   if (Number(weightedProof.networkID) !== Number(validatorSetRef.networkID || sourceProof.networkID)) {
@@ -114,10 +120,13 @@ async function verifySourceFact({ hxmsg, helperData }) {
 
   verifyQuorumWeight({
     signedWeight: weightedProof.signedWeight,
-    totalWeight: validatorSetRef.totalWeight,
-    quorumNumerator: validatorSetRef.quorumNumerator,
-    quorumDenominator: validatorSetRef.quorumDenominator,
+    totalWeight: trustedSet.totalWeight,
+    quorumNumerator: trustedSet.quorumNumerator,
+    quorumDenominator: trustedSet.quorumDenominator,
   });
+  if (String(weightedProof.totalWeight) !== String(trustedSet.totalWeight)) {
+    throw new Error('Avalanche verified totalWeight mismatch');
+  }
 
   const policyHash = hashProofObject({
     validatorSetRef,
@@ -159,12 +168,28 @@ async function verifySourceFact({ hxmsg, helperData }) {
     throw new Error('Avalanche targetExecutionHash mismatch');
   }
 
+  if (chainState) {
+    chainState.avalanche = {
+      trustMode: trustedSet.trustMode,
+      networkID: trustedSet.networkID,
+      genesisHash: trustedSet.genesisHash,
+      acceptedPChainHeight: trustedSet.acceptedHeight,
+      verifiedPChainHeight: trustedSet.pChainHeight,
+      validatorSetHash: trustedSet.validatorSetHash,
+      totalWeight: trustedSet.totalWeight,
+      updatedAt: Math.floor(Date.now() / 1000),
+    };
+    if (typeof saveChainState === 'function') saveChainState();
+  }
+
   return {
     adapter: 'avalanche-icm-bls',
     verified: true,
     warpMessageID: sourceProof.warpMessageID,
     pChainHeight: Number(validatorSetRef.pChainHeight || 0),
-    validatorSetHash: validatorSetRef.validatorSetHash,
+    validatorSetHash: trustedSet.validatorSetHash,
+    pChainGenesisHash: trustedSet.genesisHash,
+    pChainTrustMode: trustedSet.trustMode,
     verifiedSigners: weightedProof.verifiedSigners,
     signedWeight: String(weightedProof.signedWeight || '0'),
     totalWeight: String(weightedProof.totalWeight || '0'),

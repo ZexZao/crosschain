@@ -14,12 +14,12 @@
 4. `fabric-chaincode/xcall/index.js` 已实现 `responseLifecycle:{requestID}`、`BindResponseLifecycleHXMsg / StartChallenge / CompleteWithResponse / CompensateAfterChallenge / QueryResponseLifecycle`。
 5. `tee-verifier/server.js` 已增加 `/attest-response`，对 `ResponseProof` 进行 TEE quorum certification。
 6. `scripts/run-challenge-response-tests.js` 已覆盖 EVM 侧核心状态机路径，结果保存到 `runtime/hxmsg-challenge-response-results.json`。
-7. `scripts/run-fabric-evm-challenge-e2e.js` 已覆盖 Fabric -> EVM response-only 完整闭环：Fabric h-FSV view -> TEE quorum -> EVM target execution -> EVM receipt proof -> TEE RESPONSE quorum -> Fabric response lifecycle Completed，结果保存到 `runtime/hxmsg-fabric-evm-challenge-e2e-results.json`。
-8. `scripts/run-evm-fabric-challenge-e2e.js` 已覆盖 EVM -> Fabric 完整闭环：EVM receipt MPT proof -> TEE quorum -> Fabric ExecuteHXMsg -> Fabric execution record -> TEE RESPONSE quorum -> EVM source Completed，结果保存到 `runtime/hxmsg-evm-fabric-challenge-e2e-results.json`。
+7. RESPONSE 端到端闭环已统一由 `automation/` 负责：scanner 发现目标执行事实，开放 relayer 构造证明，TEE quorum 验证后由 response worker 回源链。
+8. `scripts/run-automation-ethereum-avalanche-atomic-batch.js` 和 `scripts/run-automation-fabric-avalanche-atomic-batch.js` 覆盖需要 RESPONSE 与原子性的批处理闭环；旧的双向直连 challenge E2E 已删除。
 
 Fabric 源端 response lifecycle 会通过 `BindResponseLifecycleHXMsg` 绑定 TEE quorum 证明过的完整 `hmsgDigest`。因此 Fabric -> EVM 的 RESPONSE 完成条件不只检查 `requestID / targetExecutionHash / responseDigest`，还要求 `response.originHmsgDigest` 与源端已绑定的 `hmsgDigest` 一致。response-only 消息也使用同一路径，但不能发起 challenge 或补偿。
 
-当前仍未实现常驻 watcher / responder。状态机由链上合约/链码最终检查 deadline，测试脚本或后续 watcher 负责触发调用。
+常驻 watcher 已实现并负责发现 deadline、发起 challenge 和触发真实补偿。RESPONSE 采用开放中继模型，不设置唯一 responder；任何 relayer 都可提交材料，但必须通过 TEE 的目标链事实验证。
 
 ## 1. 设计原则
 
@@ -428,7 +428,7 @@ EVM 源链创建 Pending commitment
 EVM 触发 CrossChainCallRequested
 TEE quorum 使用 MELV-EF 验证 EVM receipt proof
 TEE quorum 签名 CONTRACT_CALL h-xmsg
-Fabric ExecuteHXMsg 执行目标 chaincode
+Fabric ExecuteHXMsgCompact 执行目标 chaincode
 Fabric 记录 crosschainExec:{requestID}
 TEE quorum 验证 Fabric h-FSV response view
 TEE quorum 生成 RESPONSE h-xmsg

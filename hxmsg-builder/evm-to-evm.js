@@ -1,5 +1,5 @@
 const { ethers } = require('ethers');
-const { encodeBusinessPayload, encodeCompactBusinessCall } = require('../shared/xmsg');
+const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const {
   ChainType,
   MsgType,
@@ -21,8 +21,6 @@ const {
   assertEvmPolicyBinding,
 } = require('./source-builders/evm');
 
-const EVM_EXECUTE_SELECTOR = ethers.id('execute(bytes32,bytes)').slice(0, 10);
-
 function buildHXMsgFromEvmReceiptToEvm({
   sourceDeployment,
   targetDeployment,
@@ -32,7 +30,6 @@ function buildHXMsgFromEvmReceiptToEvm({
   feedbackOverride,
   atomicity,
   targetChainType = ChainType.EVM,
-  compactTarget = false,
 }) {
   if (!sourceDeployment) throw new Error('sourceDeployment is required');
   if (!targetDeployment) throw new Error('targetDeployment is required');
@@ -41,11 +38,9 @@ function buildHXMsgFromEvmReceiptToEvm({
 
   const sourceContract = sourceDeployment.evmSourceContract;
   const { log, parsed } = findCrossChainCallLog({ receipt, sourceContract });
-  const encoded = compactTarget
-    ? encodeCompactBusinessCall(businessPayload)
-    : encodeBusinessPayload(businessPayload);
+  const encoded = encodeCompactBusinessCall(businessPayload);
   const { normalized, payloadHex } = encoded;
-  const callDataHash = compactTarget ? encoded.compactCallHash : ethers.keccak256(payloadHex);
+  const callDataHash = encoded.compactCallHash;
   if (callDataHash.toLowerCase() !== parsed.callDataHash.toLowerCase()) {
     throw new Error(`callDataHash mismatch: event=${parsed.callDataHash}, computed=${callDataHash}`);
   }
@@ -58,7 +53,6 @@ function buildHXMsgFromEvmReceiptToEvm({
     chainId: targetDeployment.chainId,
     requestID: parsed.requestID,
     targetAddress: targetDeployment.targetContract,
-    functionSelector: compactTarget ? undefined : EVM_EXECUTE_SELECTOR,
     callDataHash,
     receiver: ethers.zeroPadValue(targetDeployment.targetContract, 32),
     chainType: targetChainType,
@@ -110,7 +104,7 @@ function buildHXMsgFromEvmReceiptToEvm({
     feedback,
     atomicity,
     callData: payloadHex,
-    compactCall: compactTarget ? encoded.compact : null,
+    compactCall: encoded.compact,
     callDataDecoded: normalized,
     txId: receipt.hash,
     srcHeight: sourcePart.srcHeight,
@@ -120,7 +114,6 @@ function buildHXMsgFromEvmReceiptToEvm({
 }
 
 module.exports = {
-  EVM_EXECUTE_SELECTOR,
   CROSS_CHAIN_CALL_EVENT,
   CROSS_CHAIN_CALL_TOPIC,
   buildEvmEventRef,

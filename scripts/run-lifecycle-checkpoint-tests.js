@@ -5,8 +5,9 @@ const { buildSimulatedAttestationIdentity, evmRegistrationTuple } = require('../
 const { signCommittedDigest, buildQuorumCertificate } = require('../shared/tee/quorum-certificate');
 const { clusterCertificateTuple } = require('../shared/tee/registration');
 const { CommitmentType, AtomicityMode, FeedbackType, computeLifecycleTerminalRoot } = require('../shared/hxmsg');
+const { clusterIDForSubnet, subnetSigningDigest } = require('../shared/tee/domains');
 
-const CLUSTER_ID = ethers.keccak256(ethers.toUtf8Bytes('HXMSG_TEE_CLUSTER_LOCAL_V1'));
+const CLUSTER_ID = clusterIDForSubnet('ethereum-proof-subnet');
 
 async function increaseTime(seconds) {
   await network.provider.send('evm_increaseTime', [seconds]);
@@ -29,6 +30,9 @@ async function main() {
       privateKey: wallet.privateKey,
       nodeID: `checkpoint-tee-${index + 1}`,
       signerIndex: index,
+      subnetID: 'ethereum-proof-subnet',
+      subnetProfile: 'ethereum',
+      clusterID: CLUSTER_ID,
     });
     identities.push({ wallet, identity });
     await (await registry.registerTEE(evmRegistrationTuple(identity))).wait();
@@ -88,6 +92,9 @@ async function main() {
   const preview = await source.previewLifecycleCheckpoint([requestID]);
   if (preview.terminalStateRoot !== expectedRoot) throw new Error('checkpoint root mismatch');
 
+  const sourceChainID = ethers.zeroPadValue(ethers.toBeHex((await ethers.provider.getNetwork()).chainId), 32);
+  const scopedDigest = subnetSigningDigest({ clusterID: CLUSTER_ID, epoch: 1, sourceChainType: 1,
+    sourceChainID, subjectDigest: preview.signingDigest });
   const signatures = identities.slice(0, 3).map(({ wallet, identity }) => signCommittedDigest({
     privateKey: wallet.privateKey,
     nodeID: identity.nodeID,
@@ -95,7 +102,8 @@ async function main() {
     committedEntry: {
       requestID,
       hmsgDigest: preview.signingDigest,
-      signingDigest: preview.signingDigest,
+      subjectDigest: preview.signingDigest,
+      signingDigest: scopedDigest,
       signatureDigestType: 'lifecycleCheckpointDigest',
       term: 1,
       index: 1,
@@ -106,7 +114,10 @@ async function main() {
     clusterID: CLUSTER_ID,
     epoch: 1,
     threshold: 3,
-    signingDigest: preview.signingDigest,
+    subjectDigest: preview.signingDigest,
+    signingDigest: scopedDigest,
+    sourceChainType: 1,
+    sourceChainID,
     signatureDigestType: 'lifecycleCheckpointDigest',
     term: 1,
     index: 1,

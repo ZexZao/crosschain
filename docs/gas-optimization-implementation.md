@@ -141,7 +141,7 @@ computeRoot(hxmsgs) == signed batchRoot
 
 因此可以省去 N 份 `O(log N)` proof 的 calldata 和逐 proof 哈希。目标链仍验证 TEE 签名的 batch root，没有取消 batch 成员绑定。
 
-当前部分旧测试脚本和部分 Sepolia 单条路径仍保留带 `bytes32[][]` 的兼容调用。论文中最低 gas 的本地批量结果来自无逐消息 proof 的优化入口，不应与兼容入口混用统计。
+EVM-compatible 目标链已删除带 `bytes32[][]` 的兼容重载，所有本地与 Sepolia 批处理统一使用链上重算 root 的入口。Fabric 链码仍通过每条消息的 Merkle proof 证明其属于同一 TEE 签名批次；Fabric 不统计 EVM gas，应单独报告证明字节数和执行时延。
 
 ## 7. EVM 源链按策略分层存储
 
@@ -351,7 +351,7 @@ RESPONSE/atomicity 附加成本
 
 1. 低 gas 资产快速路径依赖消息全部属于受支持的资产操作，混合批次会回退到通用路径。
 2. 首个接收账户余额从零变为非零时，ERC20 SSTORE 比稳态非零更新更贵，应分别报告冷启动和稳态结果。
-3. 部分旧脚本和 Sepolia 兼容路径仍携带逐消息 Merkle proof，不能直接与无 proof 的最低 gas 结果比较。
+3. EVM-compatible 目标链不再接收逐消息 Merkle proof；Fabric 目标链仍保留成员证明，两类开销口径必须分开报告。
 4. Batch size 增大虽然降低平均验签成本，但会增加单笔 calldata、执行 gas 和失败回滚范围，需要同时测试 1、8、16、20、32 等规模。
 5. Fabric 不应人为换算 gas，应报告吞吐、确认时延、CPU、网络和 world-state 写入。
 6. reserve transfer 是跨链流动性/金库结算模型，不等同于目标链任意账户 A 到 B 的授权转账。

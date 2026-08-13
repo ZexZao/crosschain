@@ -18,11 +18,11 @@ const DEPLOYMENTS = {
   avalanche: path.join(RUNTIME, 'avalanche-deployment.json'),
 };
 const CONTRACT_FIELDS = ['evmSourceContract', 'targetContract', 'teeRegistry', 'hxmsgGateway', 'settlementToken'];
-const MINIMAL_TUPLE = '(bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,bytes32,uint64)';
+const MINIMAL_TUPLE = '(bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,bytes32,uint64,uint8,bytes32)';
 const COMPACT_TUPLE = '(uint16,bytes32,bytes32,address,int256,bytes32,bool)';
-const CLUSTER_CERT_TUPLE = '(bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,uint64,uint64)';
-const COMPACT_BATCH_WITH_PROOFS_SELECTOR = ethers.id(
-  `executeHXMsgMinimalCompactBatchCluster(${MINIMAL_TUPLE}[],address,${COMPACT_TUPLE}[],bytes32,bytes32,bytes32[][],${CLUSTER_CERT_TUPLE})`
+const CLUSTER_CERT_TUPLE = '(bytes32,uint8,bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,bytes32,uint64,uint64)';
+const COMPACT_BATCH_SELECTOR = ethers.id(
+  `executeHXMsgMinimalCompactBatchCluster(${MINIMAL_TUPLE}[],address,${COMPACT_TUPLE}[],bytes32,bytes32,${CLUSTER_CERT_TUPLE})`
 ).slice(2, 10).toLowerCase();
 
 async function checkSubnet(label, sourceChainType) {
@@ -65,7 +65,7 @@ async function checkDeployment(label, rpcURL, deploymentFile, expectedChainID, {
   let targetReadiness = null;
   if (requireSepoliaTarget) {
     const gatewayCode = (await provider.getCode(deployment.hxmsgGateway)).toLowerCase();
-    if (!gatewayCode.includes(COMPACT_BATCH_WITH_PROOFS_SELECTOR)) {
+    if (!gatewayCode.includes(COMPACT_BATCH_SELECTOR)) {
       throw new Error('Sepolia Gateway is an old deployment; run npm run deploy:sepolia');
     }
     const target = new ethers.Contract(deployment.targetContract, ['function assetService() view returns (address)'], provider);
@@ -77,7 +77,7 @@ async function checkDeployment(label, rpcURL, deploymentFile, expectedChainID, {
       throw new Error(`Sepolia target reserve is insufficient: ${reserve}/${minimumReserve}; run npm run deploy:sepolia`);
     }
     targetReadiness = {
-      compactBatchWithProofsSelector: `0x${COMPACT_BATCH_WITH_PROOFS_SELECTOR}`,
+      compactBatchSelector: `0x${COMPACT_BATCH_SELECTOR}`,
       assetService,
       reserveUnits: reserve.toString(),
       minimumReserveUnits: minimumReserve.toString(),
