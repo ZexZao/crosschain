@@ -18,11 +18,14 @@ const DEPLOYMENTS = {
   avalanche: path.join(RUNTIME, 'avalanche-deployment.json'),
 };
 const CONTRACT_FIELDS = ['evmSourceContract', 'targetContract', 'teeRegistry', 'hxmsgGateway', 'settlementToken'];
-const MINIMAL_TUPLE = '(bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,bytes32,uint64,uint8,bytes32)';
+const MINIMAL_TUPLE = '(bytes32,bytes32,uint8,bytes32,uint8,bytes32,bytes4,bytes32,bytes32,bytes32,bool,uint8,uint64,bytes32,uint64,bytes32,uint64,uint8,bytes32,bytes32)';
 const COMPACT_TUPLE = '(uint16,bytes32,bytes32,address,int256,bytes32,bool)';
 const CLUSTER_CERT_TUPLE = '(bytes32,uint8,bytes32,uint64,uint16,uint16,uint256,bytes32,bytes,bytes32,bytes32,uint64,uint64)';
 const COMPACT_BATCH_SELECTOR = ethers.id(
   `executeHXMsgMinimalCompactBatchCluster(${MINIMAL_TUPLE}[],address,${COMPACT_TUPLE}[],bytes32,bytes32,${CLUSTER_CERT_TUPLE})`
+).slice(2, 10).toLowerCase();
+const SOURCE_V2_SELECTOR = ethers.id(
+  'submitHXMsgRequest(uint8,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64)))'
 ).slice(2, 10).toLowerCase();
 
 async function checkSubnet(label, sourceChainType) {
@@ -65,8 +68,27 @@ async function checkDeployment(label, rpcURL, deploymentFile, expectedChainID, {
   let targetReadiness = null;
   if (requireSepoliaTarget) {
     const gatewayCode = (await provider.getCode(deployment.hxmsgGateway)).toLowerCase();
+    const sourceCode = (await provider.getCode(deployment.evmSourceContract)).toLowerCase();
     if (!gatewayCode.includes(COMPACT_BATCH_SELECTOR)) {
       throw new Error('Sepolia Gateway is an old deployment; run npm run deploy:sepolia');
+    }
+    if (!sourceCode.includes(SOURCE_V2_SELECTOR)) {
+      throw new Error('Sepolia source contract is an old deployment; run npm run deploy:sepolia');
+    }
+    if (deployment.protocolVersion !== 'response-proof-v2' || Number(deployment.targetExecutionHashVersion) !== 2) {
+      throw new Error('Sepolia deployment metadata is not response-proof-v2; run npm run deploy:sepolia');
+    }
+    const gateway = new ethers.Contract(deployment.hxmsgGateway, [
+      'function executionDomainID() view returns (bytes32)',
+      'function localChainType() view returns (uint8)',
+    ], provider);
+    const [executionDomainID, localChainType] = await Promise.all([
+      gateway.executionDomainID(),
+      gateway.localChainType(),
+    ]);
+    if (Number(localChainType) !== ChainType.EVM
+        || executionDomainID.toLowerCase() !== String(deployment.gatewayExecutionDomainID).toLowerCase()) {
+      throw new Error('Sepolia Gateway execution domain metadata mismatch');
     }
     const target = new ethers.Contract(deployment.targetContract, ['function assetService() view returns (address)'], provider);
     const assetService = await target.assetService();
@@ -78,6 +100,8 @@ async function checkDeployment(label, rpcURL, deploymentFile, expectedChainID, {
     }
     targetReadiness = {
       compactBatchSelector: `0x${COMPACT_BATCH_SELECTOR}`,
+      sourceV2Selector: `0x${SOURCE_V2_SELECTOR}`,
+      executionDomainID,
       assetService,
       reserveUnits: reserve.toString(),
       minimumReserveUnits: minimumReserve.toString(),

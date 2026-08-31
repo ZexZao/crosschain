@@ -13,8 +13,12 @@ const {
   hashBytes,
   hashJson,
   bytes32FromText,
-  buildFabricHFsvPolicy,
   buildDefaultFabricHFsvPolicy,
+  buildDefaultFabricResponseHFsvPolicy,
+  computeFabricExecutionDomainID,
+  buildFabricExecutionRecordHash,
+  computeFabricExecutionResultHash,
+  computeFabricExecutionProofRef,
   computeAtomicityHash,
   computeFeedbackHash,
   normalizeAtomicity,
@@ -25,18 +29,6 @@ const {
 } = require('../../shared/hxmsg');
 const { buildFabricSourceRecordHash } = require('../../hxmsg-builder/fabric-to-evm');
 const { verifyFabricBlockContainsTx } = require('./fabric-block');
-
-function buildFabricExecutionRecordHash(record) {
-  return hashJson({
-    requestID: record.requestID,
-    txId: record.txId || '',
-    hmsgDigest: record.hmsgDigest || ethers.ZeroHash,
-    targetExecutionHash: record.targetExecutionHash || ethers.ZeroHash,
-    status: record.status,
-    businessKey: record.businessKey || '',
-    businessStatus: record.businessStatus || '',
-  });
-}
 
 function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
@@ -344,6 +336,9 @@ function validatePayloadBinding({ hxmsg, ref, hfsv, auditRecord = {} }) {
   if (String(record.targetChainID).toLowerCase() !== String(hxmsg.target.chainID).toLowerCase()) {
     throw new Error('Fabric state targetChainID mismatch');
   }
+  if (String(record.targetDomainID).toLowerCase() !== String(hxmsg.target.domainID).toLowerCase()) {
+    throw new Error('Fabric state targetDomainID mismatch');
+  }
   if (record.businessPayload && hxmsg.feedback) {
     const feedback = normalizeFeedback(hxmsg.feedback);
     const recordFeedback = normalizeFeedback(record.feedback);
@@ -452,19 +447,17 @@ function buildDefaultFabricExecutionViewRef({ requestID, channelID, chaincodeNam
 }
 
 function buildFabricExecutionPolicy({ channelID, chaincodeName }) {
-  return buildFabricHFsvPolicy({
-    securityDomain: process.env.HFSV_SECURITY_DOMAIN || 'fabric-local-domain',
+  return buildDefaultFabricResponseHFsvPolicy({
     channelID,
     chaincodeName,
-    requiredOrgs: (process.env.HFSV_REQUIRED_ORGS || 'Org1MSP').split(',').map((item) => item.trim()).filter(Boolean),
-    rule: process.env.HFSV_POLICY_RULE || 'AND',
-    threshold: process.env.HFSV_POLICY_THRESHOLD,
-    allowedQueryFunctions: ['GetInboundStatus'],
   });
 }
 
-async function verifyFabricExecutionView({ response, helperData = {} }) {
+async function verifyFabricExecutionView({ response, helperData = {}, expectedContext }) {
   if (!response) throw new Error('response is required for Fabric execution view');
+  if (!expectedContext || Number(expectedContext.targetChainType) !== ChainType.FABRIC) {
+    throw new Error('Fabric response expected execution context is required');
+  }
   const ref = helperData.fabricExecutionView || buildDefaultFabricExecutionViewRef({
     requestID: response.originRequestID,
     channelID: helperData.fabricChannelID,
@@ -476,6 +469,18 @@ async function verifyFabricExecutionView({ response, helperData = {} }) {
   if (ref.queryArgs?.[0] !== response.originRequestID) {
     throw new Error('Fabric response view requestID mismatch');
   }
+  const expectedChainID = bytes32FromText(`fabric-${ref.channelID}`);
+  const expectedTargetObject = bytes32FromText(ref.chaincodeName);
+  const expectedDomainID = computeFabricExecutionDomainID({
+    chainID: expectedChainID,
+    targetObject: expectedTargetObject,
+  });
+  if (!sameHex(expectedChainID, expectedContext.targetChainID)) throw new Error('Fabric response chainID mismatch');
+  if (!sameHex(expectedTargetObject, expectedContext.targetObject)) throw new Error('Fabric response chaincode target mismatch');
+  if (!sameHex(expectedDomainID, expectedContext.targetDomainID)) throw new Error('Fabric response execution domain mismatch');
+  const canonicalViewAddress = `fabric://${ref.channelID}/${ref.chaincodeName}/GetInboundStatus/${response.originRequestID}`;
+  if (ref.viewAddress !== canonicalViewAddress) throw new Error('Fabric response viewAddress is not canonical');
+  if (ref.expectedStateKey !== `inbound:${response.originRequestID}`) throw new Error('Fabric response state key mismatch');
 
   const policy = buildFabricExecutionPolicy({
     channelID: ref.channelID,
@@ -499,10 +504,28 @@ async function verifyFabricExecutionView({ response, helperData = {} }) {
   if (!sameHex(record.targetExecutionHash, response.targetExecutionHash)) {
     throw new Error('Fabric response targetExecutionHash mismatch');
   }
+  if (Number(record.targetChainType) !== Number(expectedContext.targetChainType)
+      || !sameHex(record.targetChainID, expectedContext.targetChainID)
+      || !sameHex(record.targetDomainID, expectedContext.targetDomainID)
+      || !sameHex(record.targetObject, expectedContext.targetObject)) {
+    throw new Error('Fabric response record execution domain mismatch');
+  }
 
-  const proofRef = buildFabricExecutionRecordHash(record);
+  const policyHash = hashJson(policy);
+  const proofRef = computeFabricExecutionProofRef({
+    record,
+    chainID: expectedContext.targetChainID,
+    domainID: expectedContext.targetDomainID,
+    channelID: ref.channelID,
+    chaincodeName: ref.chaincodeName,
+    policyHash,
+  });
   if (!sameHex(response.targetProofRefHash, proofRef)) {
     throw new Error('Fabric response targetProofRefHash mismatch');
+  }
+  const resultHash = computeFabricExecutionResultHash(record);
+  if (!sameHex(response.responsePayloadHash, resultHash)) {
+    throw new Error('Fabric response payload is not bound to the verified execution result');
   }
 
   const blockBytes = await queryFabricBlockByTxID(record.txId, ref.channelID);
@@ -519,6 +542,12 @@ async function verifyFabricExecutionView({ response, helperData = {} }) {
     requestID: response.originRequestID,
     executionTxID: record.txId,
     targetProofRefHash: proofRef,
+    verifiedChainType: ChainType.FABRIC,
+    verifiedChainID: expectedContext.targetChainID,
+    verifiedDomainID: expectedContext.targetDomainID,
+    verifiedExecutor: `${ref.channelID}/${ref.chaincodeName}`,
+    verifiedTargetExecutionHash: record.targetExecutionHash,
+    verifiedResultHash: resultHash,
     blockNumber: txVerification.blockNumber,
     blockHash: txVerification.blockHash,
     txIndex: txVerification.index,

@@ -19,6 +19,7 @@ abstract contract ResponseLifecycleBase {
     uint8 public constant MSG_TYPE_RESPONSE = 2;
 
     struct RequestRecord {
+        uint8 targetChainType;
         bytes32 targetChainID;
         bytes32 targetExecutionHash;
         bytes32 failureActionHash;
@@ -112,12 +113,14 @@ abstract contract ResponseLifecycleBase {
 
     function _storeResponseLifecycle(
         bytes32 requestID,
+        uint8 targetChainType,
         bytes32 targetChainID,
         bytes32 targetExecutionHash,
         RequestPolicy calldata policy
     ) internal {
         if (!policy.feedbackRequired) return;
         requests[requestID] = RequestRecord({
+            targetChainType: targetChainType,
             targetChainID: targetChainID,
             targetExecutionHash: targetExecutionHash,
             failureActionHash: policy.atomicity.failureActionHash,
@@ -162,6 +165,7 @@ abstract contract ResponseLifecycleBase {
         require(response.responseStatus == RESPONSE_STATUS_EXECUTED, "not executed");
         bytes32 responseDigest = HXMsgLib.hashResponse(response);
         require(!consumedResponses[responseDigest], "response replay");
+        require(cert.sourceChainType == record.targetChainType, "response signed by wrong target-chain subnet");
         require(cert.sourceChainID == record.targetChainID, "response signed by wrong source-chain subnet");
         _verifyTEECluster(responseDigest, cert);
 

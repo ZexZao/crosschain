@@ -4,6 +4,7 @@ const {
   ActionType,
   bytes32FromText,
   computeTargetExecutionHash,
+  computeFabricExecutionDomainID,
 } = require('../../shared/hxmsg');
 
 const FABRIC_INVOKE_SELECTOR = ethers.id('ExecuteHXMsgCompact(bytes32,bytes)').slice(0, 10);
@@ -23,6 +24,7 @@ function buildFabricChaincodeTarget({
 }) {
   const targetChainID = bytes32FromText(`fabric-${channelID}`);
   const targetObject = buildFabricTargetObject(channelID, chaincodeName);
+  const targetDomainID = computeFabricExecutionDomainID({ chainID: targetChainID, targetObject });
   const resolvedReceiver = receiver || targetObject;
   const targetAction = {
     actionType: ActionType.CHAINCODE_INVOKE,
@@ -35,12 +37,14 @@ function buildFabricChaincodeTarget({
     target: {
       chainType: ChainType.FABRIC,
       chainID: targetChainID,
-      domainID: bytes32FromText('fabric-local-domain'),
+      domainID: targetDomainID,
     },
     targetAction,
     targetExecutionHash: computeTargetExecutionHash({
       requestID,
+      targetChainType: ChainType.FABRIC,
       targetChainID,
+      targetDomainID,
       targetObject,
       functionSelector,
       callDataHash,

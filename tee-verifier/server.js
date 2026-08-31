@@ -11,6 +11,10 @@ const {
   computeHXMsgDigest,
   computeHXMsgDeliveryDigest,
   computeResponseDigest,
+  computeTargetExecutionHash,
+  computeEvmExecutionDomainID,
+  findHXMsgAcceptedLog,
+  computeEvmExecutionProofRef,
   assertEnvelopeBindings,
   buildDeliveryMessage,
   verifyLifecycleCheckpoint,
@@ -666,35 +670,77 @@ function sameHex(a, b) {
   return String(a || '').toLowerCase() === String(b || '').toLowerCase();
 }
 
-async function verifyResponseFactLocally({ response, helperData = {} }) {
+async function verifyResponseFactLocally({
+  response,
+  helperData = {},
+  expectedSourceChainType,
+  expectedSourceChainID,
+}) {
   if (!response) throw new Error('response is required');
   const responseDigest = computeResponseDigest(response);
   const originHxmsg = helperData.originHxmsg;
-  if (originHxmsg) {
-    const originDigest = originHxmsg.hmsgDigest || computeHXMsgDigest(originHxmsg);
-    if (!sameHex(originDigest, response.originHmsgDigest)) throw new Error('response originHmsgDigest mismatch');
-    if (!sameHex(originHxmsg.header.requestID, response.originRequestID)) throw new Error('response originRequestID mismatch');
-    const originTargetExecutionHash = (originHxmsg.deliveryMessage || buildDeliveryMessage(originHxmsg)).targetExecutionHash;
-    if (!sameHex(originTargetExecutionHash, response.targetExecutionHash)) {
-      throw new Error('response targetExecutionHash mismatch');
-    }
+  if (!originHxmsg?.header || !originHxmsg?.target || !originHxmsg?.targetAction) {
+    throw new Error('response origin canonical h-xmsg is required');
+  }
+  const originDigest = computeHXMsgDigest(originHxmsg);
+  if (originHxmsg.hmsgDigest && !sameHex(originHxmsg.hmsgDigest, originDigest)) {
+    throw new Error('response origin h-xmsg contains a non-canonical digest');
+  }
+  if (!sameHex(originDigest, response.originHmsgDigest)) throw new Error('response originHmsgDigest mismatch');
+  if (!sameHex(originHxmsg.header.requestID, response.originRequestID)) throw new Error('response originRequestID mismatch');
+  if (Number(originHxmsg.target.chainType) !== Number(expectedSourceChainType)) {
+    throw new Error('response target chain type does not match the certifying TEE subnet');
+  }
+  if (!sameHex(originHxmsg.target.chainID, expectedSourceChainID)) {
+    throw new Error('response target chain ID does not match the certifying TEE subnet');
+  }
+  const originTargetExecutionHash = computeTargetExecutionHash({
+    requestID: originHxmsg.header.requestID,
+    targetChainType: originHxmsg.target.chainType,
+    targetChainID: originHxmsg.target.chainID,
+    targetDomainID: originHxmsg.target.domainID,
+    targetObject: originHxmsg.targetAction.targetObject,
+    functionSelector: originHxmsg.targetAction.functionSelector,
+    callDataHash: originHxmsg.targetAction.callDataHash,
+    receiver: originHxmsg.targetAction.receiver,
+  });
+  const carriedTargetExecutionHash = originHxmsg.deliveryMessage?.targetExecutionHash;
+  if (carriedTargetExecutionHash && !sameHex(carriedTargetExecutionHash, originTargetExecutionHash)) {
+    throw new Error('response origin h-xmsg carries a bad targetExecutionHash');
+  }
+  if (!sameHex(originTargetExecutionHash, response.targetExecutionHash)) {
+    throw new Error('response targetExecutionHash mismatch');
   }
   if (Number(response.responseStatus) !== 1) throw new Error('only EXECUTED responses are currently supported');
 
-  if (helperData.evmExecutionReceipt) {
+  let verifiedExecution;
+  if ([ChainType.EVM, ChainType.AVALANCHE].includes(Number(expectedSourceChainType))) {
     const proofEnvelope = helperData.evmExecutionReceipt;
+    if (!proofEnvelope) throw new Error('EVM-compatible target execution receipt proof is required');
     const receipt = proofEnvelope.receipt || proofEnvelope;
     if (!proofEnvelope.receiptProof || !proofEnvelope.blockHeader) {
       throw new Error('EVM execution receipt proof is required');
     }
+    const gatewayAddress = proofEnvelope.gatewayAddress || helperData.targetGatewayAddress;
+    if (!gatewayAddress) throw new Error('target gateway address is required for response verification');
+    const expectedDomainID = computeEvmExecutionDomainID({
+      chainType: expectedSourceChainType,
+      chainID: expectedSourceChainID,
+      gatewayAddress,
+    });
+    if (!sameHex(expectedDomainID, originHxmsg.target.domainID)) {
+      throw new Error('response gateway is not bound to the origin target domain');
+    }
     const provider = new ethers.JsonRpcProvider(helperData.evmRpc || process.env.EVM_RPC || 'http://evm-node:8545');
+    const expectedEvmChainID = `eip155:${Number(BigInt(expectedSourceChainID))}`;
     const storedHeader = await maintainHeaderWindow({
       provider,
       chainState,
       targetBlockNumber: Number(receipt.blockNumber),
       targetBlockHash: receipt.blockHash,
       committeeHeaderUpdate: helperData.committeeHeaderUpdate || proofEnvelope.committeeHeaderUpdate,
-      expectedChainID: helperData.evmChainID || `eip155:${Number(process.env.EVM_CHAIN_ID || 31337)}`,
+      syncCommitteeUpdate: helperData.syncCommitteeUpdate || proofEnvelope.syncCommitteeUpdate,
+      expectedChainID: expectedEvmChainID,
     });
     await verifyReceiptProof({
       receiptsRoot: storedHeader.receiptsRoot,
@@ -704,23 +750,53 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
     });
     saveChainState();
     if (Number(receipt.status) !== 1) throw new Error('EVM target execution receipt failed');
-    const eventTopic = ethers.id('HXMsgAccepted(bytes32,bytes32,address)');
-    const accepted = (receipt.logs || []).find((log) => {
-      if (!sameHex((log.topics || [])[0], eventTopic)) return false;
-      return sameHex((log.topics || [])[1], response.originRequestID);
+    const { log, accepted } = findHXMsgAcceptedLog({
+      receipt,
+      gatewayAddress,
+      requestID: response.originRequestID,
     });
-    if (!accepted) throw new Error('EVM HXMsgAccepted log for response origin not found');
-    const proofRef = ethers.keccak256(
-      ethers.AbiCoder.defaultAbiCoder().encode(
-        ['bytes32', 'uint64', 'bytes32'],
-        [receipt.transactionHash || receipt.hash, Number(receipt.blockNumber), receipt.blockHash]
-      )
-    );
+    const targetAddress = ethers.getAddress(ethers.dataSlice(originHxmsg.targetAction.targetObject, 12));
+    if (ethers.getAddress(accepted.target) !== targetAddress) throw new Error('response target contract mismatch');
+    if (!sameHex(accepted.hmsgDigest, originDigest)) throw new Error('response accepted event hmsgDigest mismatch');
+    if (!sameHex(accepted.targetExecutionHash, originTargetExecutionHash)) {
+      throw new Error('response accepted event targetExecutionHash mismatch');
+    }
+    if (!sameHex(accepted.resultHash, response.responsePayloadHash)) {
+      throw new Error('response payload is not bound to the verified EVM execution result');
+    }
+    const proofRef = computeEvmExecutionProofRef({
+      receipt,
+      log,
+      accepted,
+      chainType: expectedSourceChainType,
+      chainID: expectedSourceChainID,
+      domainID: originHxmsg.target.domainID,
+      gatewayAddress,
+    });
     if (!sameHex(response.targetProofRefHash, proofRef)) throw new Error('response targetProofRefHash mismatch');
-  } else if (helperData.fabricExecutionView || helperData.fabricChannelID || helperData.fabricChaincodeName) {
-    await verifyFabricExecutionView({ response, helperData });
+    verifiedExecution = {
+      verifiedChainType: Number(expectedSourceChainType),
+      verifiedChainID: expectedSourceChainID,
+      verifiedDomainID: originHxmsg.target.domainID,
+      verifiedExecutor: ethers.getAddress(gatewayAddress),
+      verifiedTargetExecutionHash: originTargetExecutionHash,
+      verifiedResultHash: accepted.resultHash,
+      verifiedProofRefHash: proofRef,
+    };
+  } else if (Number(expectedSourceChainType) === ChainType.FABRIC) {
+    verifiedExecution = await verifyFabricExecutionView({
+      response,
+      helperData,
+      expectedContext: {
+        targetChainType: Number(expectedSourceChainType),
+        targetChainID: expectedSourceChainID,
+        targetDomainID: originHxmsg.target.domainID,
+        targetObject: originHxmsg.targetAction.targetObject,
+        targetExecutionHash: originTargetExecutionHash,
+      },
+    });
   } else {
-    throw new Error('response target execution proof is required');
+    throw new Error(`unsupported response target chain type: ${expectedSourceChainType}`);
   }
 
   return {
@@ -729,12 +805,17 @@ async function verifyResponseFactLocally({ response, helperData = {} }) {
     responseDigest,
     originRequestID: response.originRequestID,
     responseStatus: response.responseStatus,
+    ...verifiedExecution,
   };
 }
 
 async function verifyHXMsgLocally({ hxmsg, helperData, enforceExpiry = true }) {
   assertEnvelopeBindings(hxmsg);
-  hxmsg.hmsgDigest = hxmsg.hmsgDigest || computeHXMsgDigest(hxmsg);
+  const computedHmsgDigest = computeHXMsgDigest(hxmsg);
+  if (hxmsg.hmsgDigest && !sameHex(hxmsg.hmsgDigest, computedHmsgDigest)) {
+    throw new Error('hmsgDigest does not match the canonical h-xmsg');
+  }
+  hxmsg.hmsgDigest = computedHmsgDigest;
   if (hxmsg.header.deliveryExpireAt === undefined) throw new Error('canonical header.deliveryExpireAt is required');
   if (enforceExpiry && Number(hxmsg.header.deliveryExpireAt) < Math.floor(Date.now() / 1000)) {
     throw new Error('h-xmsg expired');
@@ -1598,6 +1679,8 @@ app.post('/internal/raft/append-entries', async (req, res) => {
         localResult = { verificationResult: await verifyResponseFactLocally({
           response: entry.response,
           helperData: entry.helperData || {},
+          expectedSourceChainType: entry.sourceChainType,
+          expectedSourceChainID: entry.sourceChainID,
         }) };
       } else if (entry.checkpoint) {
         const verified = verifyCheckpointLocally(entry.checkpoint);
@@ -1786,6 +1869,8 @@ app.post('/attest-response', async (req, res) => {
     const localVerification = await verifyResponseFactLocally({
       response,
       helperData: req.body.helperData || {},
+      expectedSourceChainType: req.body.sourceChainType,
+      expectedSourceChainID: req.body.sourceChainID,
     });
     const teeClusterCertification = await collectClusterDigestCertifications({
       response,

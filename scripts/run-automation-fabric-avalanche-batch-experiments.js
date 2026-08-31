@@ -15,7 +15,7 @@ const { TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 const { getValidatorSetRef } = require('../automation/shared/adapters/avalanche/proof-builder');
 const { connectFabric } = require('../automation/fabric-client');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, waitForWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -109,8 +109,9 @@ async function runFabricToAvalanche(mode) {
       });
       const sourcePayload = {
         businessPayload: payload,
-        targetChainType: 'AVALANCHE',
+        targetChainType: targetProfile.chainType,
         targetChainID: chainIdToBytes32(targetProfile.deployment.chainId),
+        targetDomainID: executionDomainID(targetProfile),
         targetObject: addressToBytes32(targetProfile.deployment.targetContract),
         functionSelector: TARGET_EXECUTE_SELECTOR,
         callDataHash: encoded.compactCallHash,
@@ -219,8 +220,9 @@ async function runAvalancheToFabric(mode) {
       batchIndex: index,
     });
     const transaction = await source.submitWarpHXMsgRequest(
+      fabricProfile.chainType,
       bytes32FromText(`fabric-${fabricProfile.channel}`),
-      bytes32FromText('fabric-local-domain'),
+      executionDomainID(fabricProfile),
       targetObject,
       FABRIC_INVOKE_SELECTOR,
       encoded.payloadHex,

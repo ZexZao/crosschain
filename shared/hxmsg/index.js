@@ -10,4 +10,6 @@ module.exports = {
   ...require('./invariants'),
   ...require('./fabric-hfsv-policy'),
   ...require('./evm-melv-policy'),
+  ...require('./target-domain'),
+  ...require('./response-proof'),
 };

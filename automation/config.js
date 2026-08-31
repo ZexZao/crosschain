@@ -1,7 +1,13 @@
 const path = require('path');
 const fs = require('fs-extra');
 const { teeURLsFromEnv } = require('../shared/tee/subnet-routing');
-const { ChainType, bytes32FromText, chainIdToBytes32 } = require('../shared/hxmsg');
+const {
+  ChainType,
+  bytes32FromText,
+  chainIdToBytes32,
+  computeEvmExecutionDomainID,
+  computeFabricExecutionDomainID,
+} = require('../shared/hxmsg');
 
 const ROOT = path.join(__dirname, '..');
 const LOCAL_EVM_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -84,8 +90,29 @@ function targetChainID(profile) {
     : chainIdToBytes32(profile.deployment.chainId);
 }
 
+function executionDomainID(profile) {
+  const chainID = targetChainID(profile);
+  if (profile.kind === 'fabric') {
+    return computeFabricExecutionDomainID({
+      chainID,
+      targetObject: bytes32FromText(profile.chaincode),
+    });
+  }
+  return computeEvmExecutionDomainID({
+    chainType: profile.chainType,
+    chainID,
+    gatewayAddress: profile.deployment.hxmsgGateway,
+  });
+}
+
 function resolveTargetProfile(targetID, preferredName) {
-  if (preferredName) return chainProfile(preferredName);
+  if (preferredName) {
+    const preferred = chainProfile(preferredName);
+    if (targetChainID(preferred).toLowerCase() !== String(targetID).toLowerCase()) {
+      throw new Error(`preferred target profile ${preferredName} does not match target chainID ${targetID}`);
+    }
+    return preferred;
+  }
   const candidates = [...new Set([...enabledChainNames(), 'ethereum', 'sepolia', 'avalanche', 'fabric'])];
   for (const name of candidates) {
     try {
@@ -108,6 +135,7 @@ module.exports = {
   sourceProfiles,
   enabledChainNames,
   targetChainID,
+  executionDomainID,
   resolveTargetProfile,
   teeURLs,
 };

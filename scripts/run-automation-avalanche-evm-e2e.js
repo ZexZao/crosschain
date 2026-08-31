@@ -6,7 +6,7 @@ const { loadDotEnv } = require('../shared/env');
 const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const { bytes32FromText, chainIdToBytes32, hashJson, FeedbackType } = require('../shared/hxmsg');
 const { getValidatorSetRef } = require('../automation/shared/adapters/avalanche/proof-builder');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, waitForWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -71,8 +71,9 @@ async function main() {
   const policy = [false, FeedbackType.NONE, 0, ethers.ZeroHash,
     [false, 0, 0, ethers.ZeroHash, ethers.ZeroHash, ethers.ZeroHash, 0]];
   const transaction = await source.submitWarpHXMsgRequest(
+    targetProfile.chainType,
     chainIdToBytes32(targetProfile.deployment.chainId),
-    bytes32FromText(`evm-local-${targetProfile.deployment.chainId}`),
+    executionDomainID(targetProfile),
     targetObject,
     ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10),
     encoded.payloadHex,
@@ -89,7 +90,9 @@ async function main() {
   if (!event) throw new Error('AvalancheHXMsgWarpRequested event missing');
   console.log(`SOURCE requestID=${event.args.requestID} tx=${receipt.hash} gas=${receipt.gasUsed}`);
 
-  const workflow = await waitForWorkflow(event.args.requestID, { timeoutMs: 10 * 60 * 1000 });
+  const workflow = await waitForWorkflow(event.args.requestID, {
+    timeoutMs: Number(process.env.AUTOMATION_WORKFLOW_TIMEOUT_MS || 10 * 60 * 1000),
+  });
   const watcherRegistered = await watcherChecked(event.args.requestID);
   const targetReceipt = await targetProvider.getTransactionReceipt(workflow.targetResult?.transactionHash);
   const balanceAfter = await targetToken.balanceOf(targetProfile.deployment.deployer);

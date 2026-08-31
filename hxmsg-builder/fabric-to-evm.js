@@ -49,9 +49,19 @@ function buildHXMsgFromFabricEvent({
     functionSelector: rawPayload.functionSelector || TARGET_EXECUTE_SELECTOR,
     callDataHash,
     receiver: rawPayload.receiver || rawPayload.targetObject,
-    chainType: targetChainType,
-    domainID: targetDomainID,
+    chainType: Number(rawPayload.targetChainType || targetChainType),
+    domainID: rawPayload.targetDomainID || targetDomainID,
+    gatewayAddress: deployment.hxmsgGateway,
   });
+  if (Number(rawPayload.targetChainType) !== Number(targetPart.target.chainType)) {
+    throw new Error('Fabric event targetChainType mismatch');
+  }
+  if (String(rawPayload.targetChainID).toLowerCase() !== String(targetPart.target.chainID).toLowerCase()) {
+    throw new Error('Fabric event targetChainID mismatch');
+  }
+  if (String(rawPayload.targetDomainID).toLowerCase() !== String(targetPart.target.domainID).toLowerCase()) {
+    throw new Error('Fabric event targetDomainID mismatch');
+  }
   const businessPayloadHash = rawPayload.businessPayloadHash || hashJson(normalized);
   const sourcePart = buildFabricSourceFact({
     channelName,

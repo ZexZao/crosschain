@@ -6,7 +6,7 @@ const { loadDotEnv } = require('../shared/env');
 const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const { bytes32FromText, chainIdToBytes32, hashJson, FeedbackType } = require('../shared/hxmsg');
 const { getValidatorSetRef } = require('../automation/shared/adapters/avalanche/proof-builder');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, waitForWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -15,8 +15,8 @@ const ROOT = path.join(__dirname, '..');
 const COUNT = Number(process.env.AUTOMATION_BATCH_EXPERIMENT_SIZE || 8);
 const AUTOMATION_URL = String(process.env.AUTOMATION_URL || 'http://127.0.0.1:9200').replace(/\/$/, '');
 const SOURCE_ABI = [
-  'function submitHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
+  'function submitHXMsgRequest(uint8,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
+  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,uint8 targetChainType,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];
 const TARGET_ABI = [
   'function executionCount() view returns (uint256)',
@@ -67,8 +67,9 @@ async function avalanchePolicyHash() {
 
 async function submitEthereumSource({ source, encoded, targetProfile, targetObject }) {
   const transaction = await source.submitHXMsgRequest(
+    targetProfile.chainType,
     chainIdToBytes32(targetProfile.deployment.chainId),
-    bytes32FromText(`${targetProfile.name}-local-${targetProfile.deployment.chainId}`),
+    executionDomainID(targetProfile),
     targetObject,
     EXECUTE_COMPACT_SELECTOR,
     encoded.compactCallHash,
@@ -87,8 +88,9 @@ async function submitEthereumSource({ source, encoded, targetProfile, targetObje
 
 async function submitAvalancheSource({ source, encoded, targetProfile, targetObject, validatorPolicyHash }) {
   const transaction = await source.submitWarpHXMsgRequest(
+    targetProfile.chainType,
     chainIdToBytes32(targetProfile.deployment.chainId),
-    bytes32FromText(`evm-local-${targetProfile.deployment.chainId}`),
+    executionDomainID(targetProfile),
     targetObject,
     EXECUTE_COMPACT_SELECTOR,
     encoded.payloadHex,

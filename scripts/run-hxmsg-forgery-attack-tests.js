@@ -11,6 +11,8 @@ const {
   chainIdToBytes32,
   computeHXMsgDigest,
   computeTargetExecutionHash,
+  computeFabricExecutionDomainID,
+  computeEvmExecutionDomainID,
   buildDeliveryMessage,
   hashJson,
   FeedbackType,
@@ -45,8 +47,8 @@ const FABRIC_TEE_URLS = process.env.TEE_URLS || process.env.TEE_URL
 const HARDHAT_DEFAULT_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
 const SOURCE_ABI = [
-  'function submitHXMsgRequest(bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
+  'function submitHXMsgRequest(uint8 targetChainType,bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 expireAt,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
+  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,uint8 targetChainType,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];
 
 function clone(value) {
@@ -84,7 +86,9 @@ function recomputeHXMsgBindings(hxmsg, forgedPayload) {
 
   const targetExecutionHash = computeTargetExecutionHash({
     requestID: hxmsg.header.requestID,
+    targetChainType: hxmsg.target.chainType,
     targetChainID: hxmsg.target.chainID,
+    targetDomainID: hxmsg.target.domainID,
     targetObject: hxmsg.targetAction.targetObject,
     functionSelector: hxmsg.targetAction.functionSelector,
     callDataHash: compactCallHash,
@@ -256,10 +260,13 @@ async function runEvmToFabricForgery({ deployment, teeUrl }) {
   const channelID = process.env.FABRIC_CHANNEL || 'mychannel';
   const chaincodeName = process.env.FABRIC_CHAINCODE || 'xcall';
   const expireAt = Math.floor(Date.now() / 1000) + 3600;
+  const targetChainID = bytes32FromText(`fabric-${channelID}`);
+  const targetObject = buildFabricTargetObject(channelID, chaincodeName);
   const tx = await source.submitHXMsgRequest(
-    bytes32FromText(`fabric-${channelID}`),
-    bytes32FromText('fabric-local-domain'),
-    buildFabricTargetObject(channelID, chaincodeName),
+    ChainType.FABRIC,
+    targetChainID,
+    computeFabricExecutionDomainID({ chainID: targetChainID, targetObject }),
+    targetObject,
     FABRIC_INVOKE_SELECTOR,
     compactCallHash,
     hashJson(normalized),
@@ -324,8 +331,13 @@ async function runFabricToEvmForgery({ deployment, teeUrl }) {
     const { normalized, compactCallHash } = encodeCompactBusinessCall(trueBusinessPayload);
     const payload = {
       businessPayload: trueBusinessPayload,
-      targetChainType: 'EVM',
+      targetChainType: ChainType.EVM,
       targetChainID: chainIdToBytes32(deployment.chainId),
+      targetDomainID: computeEvmExecutionDomainID({
+        chainType: ChainType.EVM,
+        chainID: chainIdToBytes32(deployment.chainId),
+        gatewayAddress: deployment.hxmsgGateway,
+      }),
       targetObject: ethers.zeroPadValue(deployment.targetContract, 32),
       functionSelector: TARGET_EXECUTE_SELECTOR,
       callDataHash: compactCallHash,

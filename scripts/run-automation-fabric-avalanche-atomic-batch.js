@@ -13,6 +13,7 @@ const {
   FeedbackType,
   AtomicityMode,
   CommitmentType,
+  findHXMsgAcceptedLog,
 } = require('../shared/hxmsg');
 const { TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
@@ -21,12 +22,13 @@ const {
   buildFabricExecutionProofRef,
   buildFabricExecutionViewRef,
   buildExecutedResponse,
+  computeFabricExecutionResultHash,
 } = require('../hxmsg-builder/response');
 const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { buildCommitteeHeaderUpdate } = require('../shared/evm/header-committee');
 const { getValidatorSetRef } = require('../automation/shared/adapters/avalanche/proof-builder');
 const { connectFabric } = require('../automation/fabric-client');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, getMaterial, waitForWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -234,8 +236,9 @@ async function runFabricToAvalanche() {
       });
       const sourcePayload = {
         businessPayload,
-        targetChainType: PEER_NAME === 'avalanche' ? 'AVALANCHE' : 'EVM',
+        targetChainType: avalanche.chainType,
         targetChainID: chainIdToBytes32(avalanche.deployment.chainId),
+        targetDomainID: executionDomainID(avalanche),
         targetObject: addressToBytes32(avalanche.deployment.targetContract),
         functionSelector: TARGET_EXECUTE_SELECTOR,
         callDataHash: encoded.compactCallHash,
@@ -275,12 +278,20 @@ async function runFabricToAvalanche() {
     const workflow = awaiting[index];
     const evidence = await getMaterial(workflow.evidenceKey);
     const delivery = evidence.hxmsg.deliveryMessage || buildDeliveryMessage(evidence.hxmsg);
+    const { accepted } = findHXMsgAcceptedLog({
+      receipt: targetReceipt,
+      gatewayAddress: avalanche.deployment.hxmsgGateway,
+      requestID: workflow.requestID,
+    });
     const response = buildExecutedResponse({
       originRequestID: workflow.requestID,
       originHmsgDigest: evidence.hxmsg.hmsgDigest,
       targetExecutionHash: delivery.targetExecutionHash,
-      targetProofRefHash: buildEvmExecutionProofRef(targetReceipt),
-      responsePayload: { targetTransactionHash: targetReceipt.hash, batchIndex: index, status: 'executed' },
+      targetProofRefHash: buildEvmExecutionProofRef(targetReceipt, {
+        originHxmsg: evidence.hxmsg,
+        gatewayAddress: avalanche.deployment.hxmsgGateway,
+      }),
+      responsePayloadHash: accepted.resultHash,
     });
     responseJobs.push({
       requestID: workflow.requestID,
@@ -290,8 +301,8 @@ async function runFabricToAvalanche() {
       helperData: {
         originHxmsg: evidence.hxmsg,
         evmExecutionReceipt: receiptProof,
+        targetGatewayAddress: avalanche.deployment.hxmsgGateway,
         committeeHeaderUpdate,
-        evmChainID: chainID,
         evmRpc: peerTeeRpc(),
       },
     });
@@ -431,8 +442,9 @@ async function runAvalancheToFabric() {
       batchIndex: index,
     });
     const commonArgs = [
+      fabricProfile.chainType,
       bytes32FromText(`fabric-${fabricProfile.channel}`),
-      bytes32FromText('fabric-local-domain'),
+      executionDomainID(fabricProfile),
       targetObject,
       FABRIC_INVOKE_SELECTOR,
     ];
@@ -488,8 +500,12 @@ async function runAvalancheToFabric() {
         originRequestID: workflow.requestID,
         originHmsgDigest: evidence.hxmsg.hmsgDigest,
         targetExecutionHash: delivery.targetExecutionHash,
-        targetProofRefHash: buildFabricExecutionProofRef(inbound),
-        responsePayload: { fabricTransactionID: inbound.txId, status: inbound.status },
+        targetProofRefHash: buildFabricExecutionProofRef(inbound, {
+          originHxmsg: evidence.hxmsg,
+          channelID: fabricProfile.channel,
+          chaincodeName: fabricProfile.chaincode,
+        }),
+        responsePayloadHash: computeFabricExecutionResultHash(inbound),
       });
       responseJobs.push({
         requestID: workflow.requestID,

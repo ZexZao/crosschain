@@ -74,7 +74,7 @@
 | TEE 子网隔离 | 已实现独立 cluster ID、签名键、Raft secret、源链类型/ID 域绑定 |
 | 5 节点 Raft | 已实现选举、heartbeat、AppendEntries、majority commit、日志追赶、current-term barrier 和内部 RPC 认证 |
 | TEE batch signing | 已实现 batch root 一次 Raft/TEE 认证 |
-| compact target delivery | 已实现 19 字段 minimal delivery + 7 字段 CompactCall |
+| compact target delivery | 已实现 20 字段 minimal delivery + 7 字段 CompactCall；新增字段绑定目标执行域 |
 | 真实业务执行 | 已实现 ERC20 reserve transfer/mint 与 Fabric 资产账本，以及多类领域状态 |
 | RESPONSE 与原子性 | 已实现开放 RESPONSE relay、challenge、Watcher 和 token escrow 真实退款/结算 |
 | Lifecycle Checkpoint | 核心链上/链码与 TEE 认证已实现；自动聚合调度未实现 |
@@ -173,7 +173,7 @@ expireAt, replayScope, sourceNonce,
 sourceChainType, sourceChainID
 ```
 
-最后两个源链域字段用于阻止把某个 TEE 子网的 certificate 重用于另一源链。`shared/hxmsg/delivery.js::toMinimalHXMsgV2()` 是 17 字段的较早辅助表示，当前没有被目标提交器调用；新代码不得把它当作 Gateway ABI。`shared/hxmsg/hash.js::toOnChainHXMsg()` 也没有当前调用者，不是主线入口。
+最后三个字段为源链类型、源链 ID 和目标执行域，用于阻止把某个 TEE 子网的 certificate 重用于另一源链，或把消息改投另一目标网关。旧的 `shared/hxmsg/delivery.js::toMinimalHXMsgV2()` 已删除；所有目标提交统一使用 `shared/hxmsg/hash.js::toMinimalHXMsg()` 的 20 字段 Gateway ABI。`shared/hxmsg/hash.js::toOnChainHXMsg()` 没有当前调用者，不是主线入口。
 
 ### 4.3 CompactCall
 
@@ -894,12 +894,12 @@ Automation 的关键边界：scanner 只发现事件；proof-builder 只构造�
 | `shared/hxmsg/constants.js` | ChainType、VerificationMethod、FeedbackType、AtomicityMode、ResponseStatus、CommitmentType 等协议枚举 |
 | `shared/hxmsg/canonical.js` | 输入归一到 canonical 三层 h-xmsg，处理 finality/policyRef 与兼容别名 |
 | `shared/hxmsg/envelope.js` | envelope 构造、sourceEvidence/executionData/auditRecord 提取、binding 校验；`hydrateLegacyHXMsg` 名字旧但仍是活跃兼容函数 |
-| `shared/hxmsg/hash.js` | hmsgDigest、feedback/atomicity、target execution、replay scope、response digest；`toMinimalHXMsg` 是当前 19 字段链上 ABI 转换 |
+| `shared/hxmsg/hash.js` | hmsgDigest、feedback/atomicity、target execution、replay scope、response digest；`toMinimalHXMsg` 是当前 20 字段链上 ABI 转换 |
 | `shared/hxmsg/invariants.js` | 强制 feedback、atomicity 和超时策略之间的逻辑不变量 |
 | `shared/hxmsg/codec.js` | stable JSON、bytes32/address/chain ID 编解码工具 |
 | `shared/hxmsg/batch.js` | batch leaf、Merkle tree、proof 和 batch signing digest；EVM target 目前重算整批 root，Fabric delivery 仍可携逐消息 proof |
 | `shared/hxmsg/checkpoint.js` | lifecycle terminal records 的 Merkle root、checkpoint digest 与离线验证 |
-| `shared/hxmsg/delivery.js` | delivery message 工具；其中 `toMinimalHXMsgV2` 是较旧 17 字段形式，当前 target submitter 不使用它，不得误当最新 ABI |
+| `shared/hxmsg/delivery.js` | 构造链下 delivery message；Gateway 的 20 字段 minimal ABI 由 `shared/hxmsg/hash.js::toMinimalHXMsg()` 唯一负责 |
 | `shared/hxmsg/evm-melv-policy.js` | 构造 EVM MELV-EF proof policy/ref 和默认参数 |
 | `shared/hxmsg/fabric-hfsv-policy.js` | 构造 h-FSV endorsement/MSP policy，读取 root cert hashes |
 | `shared/hxmsg/index.js` | 统一导出上述协议 API，业务脚本应从这里引入稳定接口 |
@@ -1235,7 +1235,7 @@ Warp 的 validator aggregate signature 先证明 Avalanche 源事实；TEE 的 E
 
 ### 21.4 常见误改
 
-1. 把 `shared/hxmsg/delivery.js::toMinimalHXMsgV2` 当成最新 target ABI。
+1. 自行新增另一套 minimal tuple；当前唯一目标 ABI 是 `shared/hxmsg/hash.js::toMinimalHXMsg()` 的 20 字段结构。
 2. 从 `artifacts/EIP2537BLSVerifier` 恢复已经放弃的 TEE BLS。
 3. 为“无需 RESPONSE”另写一条 relay 路径，而不是设置 `feedback.required=false`。
 4. 用脚本直接调 TEE 和 gateway，绕过 scanner/cursor/workflow。

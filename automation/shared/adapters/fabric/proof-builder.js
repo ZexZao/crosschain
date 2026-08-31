@@ -1,4 +1,4 @@
-const { bytes32FromText, getExecutionData } = require('../../../../shared/hxmsg');
+const { getExecutionData } = require('../../../../shared/hxmsg');
 const { buildHXMsgFromFabricEvent } = require('../../../../hxmsg-builder/fabric-to-evm');
 
 async function buildFabricEvidence({ profile, targetProfile, event }) {
@@ -15,7 +15,7 @@ async function buildFabricEvidence({ profile, targetProfile, event }) {
     nonce: event.payload.nonce,
     createdAt: event.payload.createdAt,
     targetChainType: targetProfile.chainType,
-    targetDomainID: bytes32FromText(`${targetProfile.name === 'avalanche' ? 'avalanche' : 'evm'}-local-${targetProfile.deployment.chainId}`),
+    targetDomainID: event.payload.targetDomainID,
   });
   return {
     hxmsg,

@@ -17,7 +17,7 @@ const { TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 const { getValidatorSetRef } = require('../automation/shared/adapters/avalanche/proof-builder');
 const { connectFabric } = require('../automation/fabric-client');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, getWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -159,8 +159,9 @@ async function runFabricToPeer() {
     )).toString()).balanceUnits);
     const sourcePayload = {
       businessPayload,
-      targetChainType: PEER_NAME === 'avalanche' ? 'AVALANCHE' : 'EVM',
+      targetChainType: peer.chainType,
       targetChainID: chainIdToBytes32(peer.deployment.chainId),
+      targetDomainID: executionDomainID(peer),
       targetObject: addressToBytes32(peer.deployment.targetContract),
       functionSelector: TARGET_EXECUTE_SELECTOR,
       callDataHash: encoded.compactCallHash,
@@ -282,8 +283,9 @@ async function runPeerToFabric() {
   });
   const targetObject = buildFabricTargetObject(fabricProfile.channel, fabricProfile.chaincode);
   const commonArgs = [
+    fabricProfile.chainType,
     bytes32FromText(`fabric-${fabricProfile.channel}`),
-    bytes32FromText('fabric-local-domain'),
+    executionDomainID(fabricProfile),
     targetObject,
     FABRIC_INVOKE_SELECTOR,
   ];

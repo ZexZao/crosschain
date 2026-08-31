@@ -7,6 +7,8 @@ const ABI = ethers.AbiCoder.defaultAbiCoder();
 const TEE_CERTIFICATE_DOMAIN = ethers.id('HXMSG_TEE_SUBNET_CERTIFICATE_V1');
 const BATCH_DOMAIN = ethers.id('HXMSG_BATCH_V1');
 const LIFECYCLE_CHECKPOINT_DOMAIN = ethers.id('HXMSG_LIFECYCLE_CHECKPOINT_V1');
+const TARGET_EXECUTION_DOMAIN_V1 = ethers.id('HXMSG_TARGET_EXECUTION_DOMAIN_V1');
+const TARGET_EXECUTION_HASH_V2 = ethers.id('HXMSG_TARGET_EXECUTION_V2');
 const TERMINAL_STATUS_CODE = Object.freeze({ Completed: 3, Compensated: 4, Failed: 5, Cancelled: 6 });
 
 function parseJson(value, fieldName) {
@@ -57,6 +59,22 @@ function selectorOf(signature) {
 
 function bytes32FromText(text) {
   return ethers.keccak256(ethers.toUtf8Bytes(String(text)));
+}
+
+function normalizeChainType(value) {
+  const names = { EVM: 1, FABRIC: 2, AVALANCHE: 3 };
+  const normalized = typeof value === 'string' && names[value.toUpperCase()]
+    ? names[value.toUpperCase()]
+    : Number(value);
+  if (![1, 2, 3].includes(normalized)) throw new Error(`unsupported chain type: ${value}`);
+  return normalized;
+}
+
+function computeFabricExecutionDomainID(chainID, targetObject) {
+  return ethers.keccak256(ABI.encode(
+    ['bytes32', 'uint8', 'bytes32', 'bytes32'],
+    [TARGET_EXECUTION_DOMAIN_V1, 2, chainID, targetObject]
+  ));
 }
 
 function normalizeFeedback(feedback = {}) {
@@ -291,10 +309,13 @@ async function settleAssetEscrowRecord(ctx, requestID) {
 function computeTargetExecutionHashFromHXMsg(hxmsg) {
   return ethers.keccak256(
     ABI.encode(
-      ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
       [
+        TARGET_EXECUTION_HASH_V2,
         hxmsg.header.requestID,
+        Number(hxmsg.target.chainType),
         hxmsg.target.chainID,
+        hxmsg.target.domainID,
         hxmsg.targetAction.targetObject,
         hxmsg.targetAction.functionSelector,
         hxmsg.targetAction.callDataHash,
@@ -469,11 +490,12 @@ function computeHXMsgDeliveryDigest(hxmsg) {
     hxmsg.header.deliveryExpireAt,
     computeReplayScopeFromHXMsg(hxmsg),
     hxmsg.header.nonce
+    , hxmsg.target.domainID
   ];
   const chainHash = ethers.keccak256(
     ABI.encode(
-      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8'],
-      [minimal[0], minimal[1], minimal[2], minimal[3], minimal[4]]
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'uint8'],
+      [minimal[0], minimal[1], minimal[2], minimal[3], minimal[17], minimal[4]]
     )
   );
   const actionHash = ethers.keccak256(
@@ -519,9 +541,10 @@ function normalizeMinimalDelivery(value) {
     value.replayScope,
     value.sourceNonce,
     value.sourceChainType,
-    value.sourceChainID
+    value.sourceChainID,
+    value.targetDomainID
   ];
-  if (!Array.isArray(input) || input.length !== 19) throw new Error('bad compact h-xmsg delivery');
+  if (!Array.isArray(input) || input.length !== 20) throw new Error('bad compact h-xmsg delivery');
   return {
     requestID: input[0],
     hmsgDigest: input[1],
@@ -541,17 +564,21 @@ function normalizeMinimalDelivery(value) {
     replayScope: input[15] || ethers.ZeroHash,
     sourceNonce: Number(input[16] || 0),
     sourceChainType: Number(input[17]),
-    sourceChainID: input[18]
+    sourceChainID: input[18],
+    targetDomainID: input[19]
   };
 }
 
 function computeTargetExecutionHashFromMinimal(minimal) {
   return ethers.keccak256(
     ABI.encode(
-      ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
       [
+        TARGET_EXECUTION_HASH_V2,
         minimal.requestID,
+        minimal.targetChainType,
         minimal.targetChainID,
+        minimal.targetDomainID,
         minimal.targetObject,
         minimal.functionSelector,
         minimal.callDataHash,
@@ -564,9 +591,9 @@ function computeTargetExecutionHashFromMinimal(minimal) {
 function computeHXMsgDeliveryDigestFromMinimal(minimal) {
   const chainHash = ethers.keccak256(
     ABI.encode(
-      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8', 'bytes32', 'uint8'],
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'uint8'],
       [minimal.requestID, minimal.hmsgDigest, minimal.sourceChainType, minimal.sourceChainID,
-        minimal.targetChainType, minimal.targetChainID, minimal.actionType]
+        minimal.targetChainType, minimal.targetChainID, minimal.targetDomainID, minimal.actionType]
     )
   );
   const actionHash = ethers.keccak256(
@@ -668,6 +695,7 @@ function toMinimalHXMsg(hxmsg, hmsgDigest) {
     hxmsg.header.nonce,
     hxmsg.source.chainType,
     hxmsg.source.chainID
+    , hxmsg.target.domainID
   ];
 }
 
@@ -1298,6 +1326,12 @@ class XCallContract extends Contract {
       throw new Error('payload.callDataHash is required for h-xmsg binding');
     }
     const expireAt = Number(payload.expireAt || (createdAt + 3600));
+    const targetChainType = normalizeChainType(payload.targetChainType);
+    const targetChainID = payload.targetChainID || ethers.ZeroHash;
+    const targetDomainID = payload.targetDomainID || ethers.ZeroHash;
+    if (targetChainID === ethers.ZeroHash || targetDomainID === ethers.ZeroHash) {
+      throw new Error('target chain and execution domain are required');
+    }
 
     const feedback = normalizeFeedback(payload.feedback || {
       required: Boolean(businessPayload.requireAck || payload.requireAck),
@@ -1315,8 +1349,9 @@ class XCallContract extends Contract {
       requestID,
       sourceTxID: txId,
       fabricCaller: ctx.clientIdentity.getID(),
-      targetChainType: payload.targetChainType || 'EVM',
-      targetChainID: payload.targetChainID || '',
+      targetChainType,
+      targetChainID,
+      targetDomainID,
       targetObject,
       functionSelector,
       callDataHash,
@@ -1332,11 +1367,12 @@ class XCallContract extends Contract {
       atomicity,
       atomicityHash
     };
-    const executionTargetChainID = payload.targetChainID || ethers.ZeroHash;
+    const executionTargetChainID = targetChainID;
     const targetExecutionHash = ethers.keccak256(
       ABI.encode(
-        ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
-        [requestID, executionTargetChainID, targetObject, functionSelector, callDataHash, receiver]
+        ['bytes32', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+        [TARGET_EXECUTION_HASH_V2, requestID, targetChainType, executionTargetChainID, targetDomainID,
+          targetObject, functionSelector, callDataHash, receiver]
       )
     );
     const eventPayload = {
@@ -1361,6 +1397,7 @@ class XCallContract extends Contract {
         owner: ctx.clientIdentity.getID(),
         sourceTxID: txId,
         hmsgDigest: payload.hmsgDigest || ethers.ZeroHash,
+        targetChainType,
         targetChainID: executionTargetChainID,
         targetExecutionHash,
         commitmentType: atomicity.commitmentType,
@@ -1438,6 +1475,12 @@ class XCallContract extends Contract {
     const callDataHash = payload.callDataHash;
     if (!callDataHash) throw new Error('payload.callDataHash is required for h-xmsg binding');
     const expireAt = Number(payload.expireAt || (createdAt + 3600));
+    const targetChainType = normalizeChainType(payload.targetChainType);
+    const targetChainID = payload.targetChainID || ethers.ZeroHash;
+    const targetDomainID = payload.targetDomainID || ethers.ZeroHash;
+    if (targetChainID === ethers.ZeroHash || targetDomainID === ethers.ZeroHash) {
+      throw new Error('target chain and execution domain are required');
+    }
     const feedback = normalizeFeedback(payload.feedback);
     const atomicity = normalizeAtomicity(payload.atomicity);
     validateResponsePolicy(feedback, atomicity);
@@ -1467,8 +1510,9 @@ class XCallContract extends Contract {
       requestID,
       sourceTxID: txId,
       fabricCaller: ctx.clientIdentity.getID(),
-      targetChainType: payload.targetChainType || 'EVM',
-      targetChainID: payload.targetChainID || '',
+      targetChainType,
+      targetChainID,
+      targetDomainID,
       targetObject,
       functionSelector,
       callDataHash,
@@ -1485,11 +1529,12 @@ class XCallContract extends Contract {
       atomicity,
       atomicityHash
     };
-    const executionTargetChainID = payload.targetChainID || ethers.ZeroHash;
+    const executionTargetChainID = targetChainID;
     const targetExecutionHash = ethers.keccak256(
       ABI.encode(
-        ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
-        [requestID, executionTargetChainID, targetObject, functionSelector, callDataHash, receiver]
+        ['bytes32', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+        [TARGET_EXECUTION_HASH_V2, requestID, targetChainType, executionTargetChainID, targetDomainID,
+          targetObject, functionSelector, callDataHash, receiver]
       )
     );
     if (feedback.required) {
@@ -1498,6 +1543,7 @@ class XCallContract extends Contract {
         owner: ctx.clientIdentity.getID(),
         sourceTxID: txId,
         hmsgDigest: payload.hmsgDigest || ethers.ZeroHash,
+        targetChainType,
         targetChainID: executionTargetChainID,
         targetExecutionHash,
         commitmentType: atomicity.commitmentType,
@@ -1644,11 +1690,15 @@ class XCallContract extends Contract {
 
     const expectedChainID = bytes32FromText(`fabric-${ctx.stub.getChannelID()}`);
     const expectedTargetObject = bytes32FromText('xcall');
+    const expectedDomainID = computeFabricExecutionDomainID(expectedChainID, expectedTargetObject);
     if (String(minimal.targetChainID).toLowerCase() !== expectedChainID.toLowerCase()) {
       throw new Error('Fabric target chainID mismatch');
     }
     if (String(minimal.targetObject).toLowerCase() !== expectedTargetObject.toLowerCase()) {
       throw new Error('Fabric target object mismatch');
+    }
+    if (String(minimal.targetDomainID).toLowerCase() !== expectedDomainID.toLowerCase()) {
+      throw new Error('Fabric target execution domain mismatch');
     }
     const compactCallHash = hashCompactBusinessCall(compactCall);
     if (String(minimal.callDataHash).toLowerCase() !== compactCallHash.toLowerCase()) {
@@ -1683,6 +1733,10 @@ class XCallContract extends Contract {
       teeThreshold: certResult.threshold,
       teeSigners: certResult.signerIndexes,
       sourceChainType: minimal.sourceChainType || 1,
+      targetChainType: minimal.targetChainType,
+      targetChainID: minimal.targetChainID,
+      targetDomainID: minimal.targetDomainID,
+      targetObject: minimal.targetObject,
       sourceTxID: auditRecord.txId || '',
       srcHeight: auditRecord.srcHeight || 0,
       callDataHash: minimal.callDataHash,
@@ -1721,6 +1775,7 @@ class XCallContract extends Contract {
 
     const expectedChainID = bytes32FromText(`fabric-${ctx.stub.getChannelID()}`);
     const expectedTargetObject = bytes32FromText('xcall');
+    const expectedDomainID = computeFabricExecutionDomainID(expectedChainID, expectedTargetObject);
     const now = getTxTime(ctx);
     const prepared = [];
     let batchSigningDigest = null;
@@ -1742,6 +1797,9 @@ class XCallContract extends Contract {
       }
       if (String(minimal.targetObject).toLowerCase() !== expectedTargetObject.toLowerCase()) {
         throw new Error(`Fabric target object mismatch at batch index ${i}`);
+      }
+      if (String(minimal.targetDomainID).toLowerCase() !== expectedDomainID.toLowerCase()) {
+        throw new Error(`Fabric target execution domain mismatch at batch index ${i}`);
       }
       if (String(minimal.callDataHash).toLowerCase() !== hashCompactBusinessCall(compactCall).toLowerCase()) {
         throw new Error(`compact callDataHash mismatch at batch index ${i}`);
@@ -1789,6 +1847,10 @@ class XCallContract extends Contract {
         teeThreshold: certResult.threshold,
         teeSigners: certResult.signerIndexes,
         sourceChainType: minimal.sourceChainType || 1,
+        targetChainType: minimal.targetChainType,
+        targetChainID: minimal.targetChainID,
+        targetDomainID: minimal.targetDomainID,
+        targetObject: minimal.targetObject,
         sourceTxID: '',
         srcHeight: 0,
         callDataHash: minimal.callDataHash,
@@ -1963,7 +2025,7 @@ class XCallContract extends Contract {
       throw new Error('response replay');
     }
     const certResult = await verifyTEEClusterCertificate(ctx, responseDigest, certEnvelope,
-      null, record.targetChainID);
+      record.targetChainType, record.targetChainID);
     let settlementResult = null;
     if (Number(record.commitmentType) === 3) {
       settlementResult = await settleAssetEscrowRecord(ctx, requestID);

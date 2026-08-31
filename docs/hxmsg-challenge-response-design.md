@@ -16,6 +16,7 @@
 6. `scripts/run-challenge-response-tests.js` 已覆盖 EVM 侧核心状态机路径，结果保存到 `runtime/hxmsg-challenge-response-results.json`。
 7. RESPONSE 端到端闭环已统一由 `automation/` 负责：scanner 发现目标执行事实，开放 relayer 构造证明，TEE quorum 验证后由 response worker 回源链。
 8. `scripts/run-automation-ethereum-avalanche-atomic-batch.js` 和 `scripts/run-automation-fabric-avalanche-atomic-batch.js` 覆盖需要 RESPONSE 与原子性的批处理闭环；旧的双向直连 challenge E2E 已删除。
+9. ResponseProof V2 已绑定目标链类型、链 ID、执行域、授权网关或 Fabric chaincode、目标执行事件/记录及业务结果哈希；relayer 不能通过替换同构链、恶意网关或自报链 ID 构造内部自洽的 RESPONSE。
 
 Fabric 源端 response lifecycle 会通过 `BindResponseLifecycleHXMsg` 绑定 TEE quorum 证明过的完整 `hmsgDigest`。因此 Fabric -> EVM 的 RESPONSE 完成条件不只检查 `requestID / targetExecutionHash / responseDigest`，还要求 `response.originHmsgDigest` 与源端已绑定的 `hmsgDigest` 一致。response-only 消息也使用同一路径，但不能发起 challenge 或补偿。
 

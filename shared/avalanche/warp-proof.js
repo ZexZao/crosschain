@@ -104,11 +104,12 @@ function parseAddressedCall(addressedCallBytes) {
 
 function decodeHXMsgWarpPayload(payloadHex) {
   const [decoded] = ethers.AbiCoder.defaultAbiCoder().decode(
-    ['tuple(bytes32 requestID,bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,tuple(bool required,uint8 mode,uint8 commitmentType,bytes32 commitmentRefHash,bytes32 successActionHash,bytes32 failureActionHash,uint64 challengeWindow) atomicity,bytes32 validatorPolicyHash,bytes callData)'],
+    ['tuple(bytes32 requestID,uint8 targetChainType,bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,tuple(bool required,uint8 mode,uint8 commitmentType,bytes32 commitmentRefHash,bytes32 successActionHash,bytes32 failureActionHash,uint64 challengeWindow) atomicity,bytes32 validatorPolicyHash,bytes callData)'],
     payloadHex
   );
   return {
     requestID: decoded.requestID,
+    targetChainType: Number(decoded.targetChainType),
     targetChainID: decoded.targetChainID,
     targetDomainID: decoded.targetDomainID,
     targetObject: decoded.targetObject,

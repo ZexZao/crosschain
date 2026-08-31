@@ -22,6 +22,7 @@ library HXMsgLib {
         uint64 sourceNonce;
         uint8 sourceChainType;
         bytes32 sourceChainID;
+        bytes32 targetDomainID;
     }
 
     struct ClusterCertificate {
@@ -62,7 +63,7 @@ library HXMsgLib {
     function hashDelivery(HXMsgMinimal calldata m) internal pure returns (bytes32) {
         bytes32 chainHash = keccak256(
             abi.encode(m.requestID, m.hmsgDigest, m.sourceChainType, m.sourceChainID,
-                m.targetChainType, m.targetChainID, m.actionType)
+                m.targetChainType, m.targetChainID, m.targetDomainID, m.actionType)
         );
         bytes32 actionHash = keccak256(
             abi.encode(m.targetObject, m.functionSelector, m.callDataHash, m.receiver, m.targetExecutionHash)

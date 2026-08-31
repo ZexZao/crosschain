@@ -6,7 +6,7 @@ const { loadDotEnv } = require('../shared/env');
 const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const { chainIdToBytes32, bytes32FromText, hashJson, FeedbackType } = require('../shared/hxmsg');
 const { publishSourceMaterial, waitForWorkflow } = require('../automation/client');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 
 loadDotEnv();
 
@@ -18,8 +18,8 @@ const RESULT_FILE = process.env.AUTOMATION_EVM_EVM_RESULT_FILE
   || `automation-${SOURCE_PROFILE}-${TARGET_PROFILE}-e2e-result.json`;
 const RESULT_PATH = path.join(ROOT, 'runtime', RESULT_FILE);
 const SOURCE_ABI = [
-  'function submitHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
+  'function submitHXMsgRequest(uint8,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
+  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,uint8 targetChainType,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];
 
 async function watcherChecked(requestID) {
@@ -76,8 +76,9 @@ async function main() {
   const policy = [false, FeedbackType.NONE, 0, ethers.ZeroHash,
     [false, 0, 0, ethers.ZeroHash, ethers.ZeroHash, ethers.ZeroHash, 0]];
   const tx = await source.submitHXMsgRequest(
+    targetProfile.chainType,
     targetChainID,
-    bytes32FromText(`${TARGET_PROFILE === 'avalanche' ? 'avalanche' : 'evm'}-local-${targetDeployment.chainId}`),
+    executionDomainID(targetProfile),
     targetObject,
     ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10),
     encoded.compactCallHash,

@@ -31,6 +31,9 @@ contract HXMsgGateway {
     uint8 public immutable localChainType;
     mapping(bytes32 => mapping(uint256 => uint256)) private replayBitmap;
     bytes32 public constant BATCH_DOMAIN = keccak256("HXMSG_BATCH_V1");
+    bytes32 public constant TARGET_EXECUTION_DOMAIN_V1 = keccak256("HXMSG_TARGET_EXECUTION_DOMAIN_V1");
+    bytes32 public constant TARGET_EXECUTION_HASH_V2 = keccak256("HXMSG_TARGET_EXECUTION_V2");
+    bytes32 public immutable executionDomainID;
 
     struct CompactCall {
         uint16 opCode;
@@ -51,9 +54,17 @@ contract HXMsgGateway {
         uint64 sourceNonce;
         uint8 sourceChainType;
         bytes32 sourceChainID;
+        bytes32 targetDomainID;
     }
 
-    event HXMsgAccepted(bytes32 indexed requestID, bytes32 indexed clusterID, address indexed target);
+    event HXMsgAccepted(
+        bytes32 indexed requestID,
+        bytes32 indexed clusterID,
+        address indexed target,
+        bytes32 hmsgDigest,
+        bytes32 targetExecutionHash,
+        bytes32 resultHash
+    );
     event HXMsgBatchAccepted(bytes32 indexed batchID, bytes32 indexed batchRoot, uint256 size);
     event ReplayMarked(bytes32 indexed replayScope, uint64 indexed sourceNonce, bytes32 indexed requestID);
 
@@ -61,6 +72,9 @@ contract HXMsgGateway {
         require(chainType == 1 || chainType == 3, "unsupported local chain type");
         teeRegistry = TEERegistry(registry);
         localChainType = chainType;
+        executionDomainID = keccak256(abi.encode(
+            TARGET_EXECUTION_DOMAIN_V1, chainType, bytes32(uint256(block.chainid)), address(this)
+        ));
     }
 
     /// @notice 单条紧凑消息入口。使用强类型 CompactCall，避免把静态 tuple 错误封装为 bytes。
@@ -73,8 +87,9 @@ contract HXMsgGateway {
         bytes32 deliveryDigest = hxmsg.hashDelivery();
         _validateMinimalCompact(hxmsg, target, call);
         _verifyClusterCert(deliveryDigest, hxmsg.sourceChainType, hxmsg.sourceChainID, cert);
-        _executeCompactTarget(hxmsg, target, call);
-        emit HXMsgAccepted(hxmsg.requestID, cert.clusterID, target);
+        bytes32 resultHash = _executeCompactTarget(hxmsg, target, call);
+        emit HXMsgAccepted(hxmsg.requestID, cert.clusterID, target, hxmsg.hmsgDigest,
+            hxmsg.targetExecutionHash, resultHash);
     }
 
     /// @notice Executes a compact batch after recomputing its Merkle root on-chain.
@@ -100,14 +115,16 @@ contract HXMsgGateway {
             _validateMinimalCompact(hxmsgs[i], target, calls[i]);
         }
         if (_allAssetCalls(calls)) {
-            _executeCompactAssetBatch(hxmsgs, target, calls);
+            bytes32 resultHash = _executeCompactAssetBatch(hxmsgs, target, calls);
             for (uint256 i = 0; i < hxmsgs.length; i += 1) {
-                emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target);
+                emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target, hxmsgs[i].hmsgDigest,
+                    hxmsgs[i].targetExecutionHash, resultHash);
             }
         } else {
             for (uint256 i = 0; i < hxmsgs.length; i += 1) {
-                _executeCompactTarget(hxmsgs[i], target, calls[i]);
-                emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target);
+                bytes32 resultHash = _executeCompactTarget(hxmsgs[i], target, calls[i]);
+                emit HXMsgAccepted(hxmsgs[i].requestID, batchCert.clusterID, target, hxmsgs[i].hmsgDigest,
+                    hxmsgs[i].targetExecutionHash, resultHash);
             }
         }
         emit HXMsgBatchAccepted(batchID, batchRoot, hxmsgs.length);
@@ -135,14 +152,18 @@ contract HXMsgGateway {
             _validateFabricEVMCompact(deliveries[i], target, calls[i]);
         }
         if (_allAssetCalls(calls)) {
-            _executeCompactDeliveryAssetBatch(deliveries, target, calls);
+            bytes32 resultHash = _executeCompactDeliveryAssetBatch(deliveries, target, calls);
             for (uint256 i = 0; i < deliveries.length; i += 1) {
-                emit HXMsgAccepted(deliveries[i].requestID, batchCert.clusterID, target);
+                bytes32 targetExecutionHash = _targetExecutionHashForFabricDelivery(deliveries[i], target);
+                emit HXMsgAccepted(deliveries[i].requestID, batchCert.clusterID, target, deliveries[i].hmsgDigest,
+                    targetExecutionHash, resultHash);
             }
         } else {
             for (uint256 i = 0; i < deliveries.length; i += 1) {
-                _executeCompactDelivery(deliveries[i], target, calls[i]);
-                emit HXMsgAccepted(deliveries[i].requestID, batchCert.clusterID, target);
+                bytes32 resultHash = _executeCompactDelivery(deliveries[i], target, calls[i]);
+                bytes32 targetExecutionHash = _targetExecutionHashForFabricDelivery(deliveries[i], target);
+                emit HXMsgAccepted(deliveries[i].requestID, batchCert.clusterID, target, deliveries[i].hmsgDigest,
+                    targetExecutionHash, resultHash);
             }
         }
         emit HXMsgBatchAccepted(batchID, batchRoot, deliveries.length);
@@ -174,6 +195,7 @@ contract HXMsgGateway {
         require(hxmsg.expireAt >= block.timestamp, "expired");
         require(hxmsg.targetChainType == localChainType, "wrong target chain type");
         require(hxmsg.targetChainID == bytes32(uint256(block.chainid)), "wrong target chain");
+        require(hxmsg.targetDomainID == executionDomainID, "wrong target execution domain");
         require(hxmsg.actionType == ACTION_CONTRACT_CALL, "bad action");
         require(hxmsg.targetObject == bytes32(uint256(uint160(target))), "target mismatch");
         require(
@@ -195,16 +217,17 @@ contract HXMsgGateway {
             require(hxmsg.callbackRefHash == bytes32(0), "unexpected callback ref");
         }
 
-        bytes32 targetExecutionHash = keccak256(
-            abi.encode(
-                hxmsg.requestID,
-                hxmsg.targetChainID,
-                hxmsg.targetObject,
-                hxmsg.functionSelector,
-                hxmsg.callDataHash,
-                hxmsg.receiver
-            )
-        );
+        bytes32 targetExecutionHash = keccak256(abi.encode(
+            TARGET_EXECUTION_HASH_V2,
+            hxmsg.requestID,
+            hxmsg.targetChainType,
+            hxmsg.targetChainID,
+            hxmsg.targetDomainID,
+            hxmsg.targetObject,
+            hxmsg.functionSelector,
+            hxmsg.callDataHash,
+            hxmsg.receiver
+        ));
         require(targetExecutionHash == hxmsg.targetExecutionHash, "bad target execution hash");
     }
 
@@ -230,6 +253,7 @@ contract HXMsgGateway {
         require(delivery.sourceChainType != 0 && delivery.sourceChainID != bytes32(0), "missing source security domain");
         _requireNotProcessed(delivery.replayScope, delivery.sourceNonce);
         require(delivery.expireAt >= block.timestamp, "expired");
+        require(delivery.targetDomainID == executionDomainID, "wrong target execution domain");
         require(hashCompactCall(call) == delivery.callDataHash, "bad compact call hash");
         require(target != address(0), "bad target");
     }
@@ -241,19 +265,10 @@ contract HXMsgGateway {
     {
         bytes32 targetObject = bytes32(uint256(uint160(target)));
         bytes32 targetChainID = bytes32(uint256(block.chainid));
-        bytes32 targetExecutionHash = keccak256(
-            abi.encode(
-                delivery.requestID,
-                targetChainID,
-                targetObject,
-                TargetContractExecuteCompactSelector.executeCompact.selector,
-                delivery.callDataHash,
-                targetObject
-            )
-        );
+        bytes32 targetExecutionHash = _targetExecutionHashForFabricDelivery(delivery, target);
         bytes32 chainHash = keccak256(
             abi.encode(delivery.requestID, delivery.hmsgDigest, delivery.sourceChainType, delivery.sourceChainID,
-                localChainType, targetChainID, ACTION_CONTRACT_CALL)
+                localChainType, targetChainID, delivery.targetDomainID, ACTION_CONTRACT_CALL)
         );
         bytes32 actionHash = keccak256(
             abi.encode(
@@ -294,8 +309,25 @@ contract HXMsgGateway {
         })), "bad cluster cert");
     }
 
+    function _targetExecutionHashForFabricDelivery(FabricEVMCompactDelivery calldata delivery, address target)
+        internal view returns (bytes32)
+    {
+        bytes32 targetObject = bytes32(uint256(uint160(target)));
+        return keccak256(abi.encode(
+            TARGET_EXECUTION_HASH_V2,
+            delivery.requestID,
+            localChainType,
+            bytes32(uint256(block.chainid)),
+            delivery.targetDomainID,
+            targetObject,
+            TargetContractExecuteCompactSelector.executeCompact.selector,
+            delivery.callDataHash,
+            targetObject
+        ));
+    }
+
     function _executeCompactTarget(HXMsgLib.HXMsgMinimal calldata hxmsg, address target, CompactCall calldata call)
-        internal
+        internal returns (bytes32)
     {
         _markProcessed(hxmsg.replayScope, hxmsg.sourceNonce, hxmsg.requestID);
         (bool ok, bytes memory ret) = target.call(
@@ -309,13 +341,14 @@ contract HXMsgGateway {
             }
             revert("target call failed");
         }
+        return keccak256(ret);
     }
 
     function _executeCompactDelivery(
         FabricEVMCompactDelivery calldata delivery,
         address target,
         CompactCall calldata call
-    ) internal {
+    ) internal returns (bytes32) {
         _markProcessed(delivery.replayScope, delivery.sourceNonce, delivery.requestID);
         (bool ok, bytes memory ret) = target.call(
             abi.encodeWithSelector(TargetContractExecuteCompactSelector.executeCompact.selector, delivery.requestID, call)
@@ -328,6 +361,7 @@ contract HXMsgGateway {
             }
             revert("target call failed");
         }
+        return keccak256(ret);
     }
 
     function _allAssetCalls(CompactCall[] calldata calls) internal pure returns (bool) {
@@ -342,7 +376,7 @@ contract HXMsgGateway {
         HXMsgLib.HXMsgMinimal[] calldata hxmsgs,
         address target,
         CompactCall[] calldata calls
-    ) internal {
+    ) internal returns (bytes32) {
         bytes32[] memory requestIDs = new bytes32[](hxmsgs.length);
         for (uint256 i = 0; i < hxmsgs.length; i += 1) {
             _markProcessed(hxmsgs[i].replayScope, hxmsgs[i].sourceNonce, hxmsgs[i].requestID);
@@ -359,13 +393,14 @@ contract HXMsgGateway {
             }
             revert("asset batch target call failed");
         }
+        return keccak256(ret);
     }
 
     function _executeCompactDeliveryAssetBatch(
         FabricEVMCompactDelivery[] calldata deliveries,
         address target,
         CompactCall[] calldata calls
-    ) internal {
+    ) internal returns (bytes32) {
         bytes32[] memory requestIDs = new bytes32[](deliveries.length);
         for (uint256 i = 0; i < deliveries.length; i += 1) {
             _markProcessed(deliveries[i].replayScope, deliveries[i].sourceNonce, deliveries[i].requestID);
@@ -382,6 +417,7 @@ contract HXMsgGateway {
             }
             revert("asset batch target call failed");
         }
+        return keccak256(ret);
     }
 
     function _computeFabricEVMCompactBatchRoot(

@@ -4,7 +4,11 @@ const { buildSimulatedAttestationIdentity, evmRegistrationTuple } = require('../
 const { signCommittedDigest, buildQuorumCertificate } = require('../shared/tee/quorum-certificate');
 const { clusterIDForSubnet, subnetSigningDigest } = require('../shared/tee/domains');
 const { clusterCertificateTuple } = require('../shared/tee/registration');
-const { computeHXMsgDeliveryDigest } = require('../shared/hxmsg');
+const {
+  computeHXMsgDeliveryDigest,
+  computeTargetExecutionHash,
+  computeEvmExecutionDomainID,
+} = require('../shared/hxmsg');
 
 const EPOCH = 1;
 const EVM_SOURCE = 1;
@@ -127,14 +131,26 @@ describe('TEE subnet cryptographic isolation', function () {
     const functionSelector = ethers.id(
       'executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))'
     ).slice(0, 10);
-    const targetExecutionHash = ethers.keccak256(ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
-      [requestID, EVM_CHAIN_ID, targetObject, functionSelector, callDataHash, targetObject]
-    ));
+    const targetDomainID = computeEvmExecutionDomainID({
+      chainType: EVM_SOURCE,
+      chainID: EVM_CHAIN_ID,
+      gatewayAddress: await gateway.getAddress(),
+    });
+    const targetExecutionHash = computeTargetExecutionHash({
+      requestID,
+      targetChainType: EVM_SOURCE,
+      targetChainID: EVM_CHAIN_ID,
+      targetDomainID,
+      targetObject,
+      functionSelector,
+      callDataHash,
+      receiver: targetObject,
+    });
     const minimal = [
       requestID, ethers.id('canonical-hxmsg'), 1, EVM_CHAIN_ID, 1, targetObject, functionSelector,
       callDataHash, targetObject, targetExecutionHash, false, 0, 0, ethers.ZeroHash,
       Math.floor(Date.now() / 1000) + 3600, ethers.id('replay-scope'), 1, EVM_SOURCE, EVM_CHAIN_ID,
+      targetDomainID,
     ];
     const subjectDigest = computeHXMsgDeliveryDigest(minimal);
     const fabricCertificate = certificate({ identities: fabricMembers, clusterID: FABRIC_CLUSTER,
@@ -153,6 +169,22 @@ describe('TEE subnet cryptographic isolation', function () {
       sourceChainType: EVM_SOURCE, sourceChainID: EVM_CHAIN_ID, subjectDigest });
     await expect(gateway.executeHXMsgMinimalCompactCluster(
       minimal, targetAddress, compactCall, clusterCertificateTuple(evmCertificate)
-    )).to.emit(gateway, 'HXMsgAccepted').withArgs(requestID, EVM_CLUSTER, targetAddress);
+    )).to.emit(gateway, 'HXMsgAccepted').withArgs(
+      requestID,
+      EVM_CLUSTER,
+      targetAddress,
+      minimal[1],
+      targetExecutionHash,
+      ethers.keccak256('0x')
+    );
+
+    const wrongDomain = [...minimal];
+    wrongDomain[0] = ethers.id('wrong-domain-delivery');
+    wrongDomain[15] = ethers.id('wrong-domain-replay-scope');
+    wrongDomain[16] = 2;
+    wrongDomain[19] = ethers.id('attacker-gateway-domain');
+    await expect(gateway.executeHXMsgMinimalCompactCluster(
+      wrongDomain, targetAddress, compactCall, clusterCertificateTuple(evmCertificate)
+    )).to.be.revertedWith('wrong target execution domain');
   });
 });

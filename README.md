@@ -152,7 +152,7 @@ HXMsg {
 |---|---|
 | `header` | 协议版本、`requestID`、消息类型、nonce、创建时间、过期时间 |
 | `source` | 源链类型、源链 ID、安全域 ID |
-| `target` | 目标链类型、目标链 ID、安全域 ID |
+| `target` | 目标链类型、目标链 ID、目标执行域 ID；EVM-compatible 链绑定目标 `HXMsgGateway`，Fabric 绑定目标 chaincode |
 | `sourceRef` | 源链事实定位信息，例如 Fabric view 或 EVM receipt/log |
 | `targetAction` | 目标链执行对象、函数选择器、调用参数哈希、接收方 |
 | `verification` | TEE 应使用的验证方法、最终性模型、策略引用和 adapterID |
@@ -168,6 +168,8 @@ HXMsg {
 | 需要 RESPONSE 的消息 | `required = true, expectedMsgType = RESPONSE` | `required = true` | 目标执行后返回 `ResponseProof`，源链进入 `Completed` |
 
 EVM 源链的 `CrossChainCallRequested` 事件会绑定 feedback 字段和 `atomicityHash`。Fabric 源链的 `QueryCrosschainEvent` view 也会返回 `feedback / feedbackHash / atomicity / atomicityHash`。TEE 会检查 h-xmsg 中的策略字段与源链事实一致，防止 relayer 在链下篡改消息语义。
+
+`targetExecutionHash V2` 覆盖 `requestID / targetChainType / targetChainID / targetDomainID / targetObject / functionSelector / callDataHash / receiver`。其中 EVM/Avalanche 的 `targetDomainID` 由链类型、链 ID 和目标 `HXMsgGateway` 地址计算；Fabric 的 `targetDomainID` 由 Fabric chain ID 和目标 chaincode 计算。这样同一份业务参数不能被替换到另一条链、另一套网关或另一条 chaincode 路径后继续通过验证。
 
 ## 目录结构
 
@@ -438,12 +440,14 @@ atomicity.mode = COMMIT_OR_COMPENSATE
 
 1. 目标链执行完成后产生目标执行事实。
 2. 任意 relayer 可从目标链事实构造 `ResponseProof` 和对应证明材料；系统不依赖固定 responder。
-3. 对 Fabric -> EVM，TEE 用 EVM receipt proof 验证目标 EVM 执行存在。
-4. 对 EVM -> Fabric，TEE 用 Fabric View/执行记录证明目标 Fabric 执行存在。
-5. TEE 检查 `requestID`、原始 `hmsgDigest`、目标执行哈希和 proof reference 绑定后，由 quorum 对 `responseDigest` 签名。
-6. 源链调用 `CompleteWithResponse`。
-7. 源链验证 RESPONSE 与原始请求绑定、目标执行哈希匹配、TEE quorum 有效。
-8. 验证通过后，源链状态进入 `Completed`。
+3. 对 Fabric -> EVM，TEE 用 EVM receipt MPT proof 验证目标执行收据，并只接受原始 h-xmsg 所绑定 `HXMsgGateway` 发出的 `HXMsgAccepted`。
+4. 对 EVM -> Fabric，TEE 用独立的 Fabric h-FSV response policy 验证 `GetInboundStatus` 的背书结果、通道、链码和目标执行记录。
+5. TEE 检查 `requestID`、原始 canonical `hmsgDigest`、目标链类型、链 ID、执行域、目标对象、目标执行哈希和业务结果哈希。
+6. `targetProofRefHash` 对 EVM-compatible 链覆盖网关、交易/区块/日志位置和事件内容；对 Fabric 覆盖 channel、chaincode、背书策略和执行记录。
+7. TEE quorum 对完整 `responseDigest` 签名，证书同时绑定目标链对应的 TEE 子网。
+8. 源链调用 `CompleteWithResponse`。
+9. 源链验证 RESPONSE 与原始请求绑定、目标执行哈希匹配、TEE quorum 来自正确目标链子网。
+10. 验证通过后，源链状态进入 `Completed`。
 
 如果 feedback timeout 后仍没有 RESPONSE：
 

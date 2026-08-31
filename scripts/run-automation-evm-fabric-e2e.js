@@ -6,7 +6,7 @@ const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const { bytes32FromText, hashJson, FeedbackType } = require('../shared/hxmsg');
 const { FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 const { connectFabric } = require('../automation/fabric-client');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, waitForWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -14,8 +14,8 @@ loadDotEnv();
 const ROOT = path.join(__dirname, '..');
 const SOURCE_PROFILE = process.env.AUTOMATION_EVM_SOURCE_PROFILE || 'ethereum';
 const SOURCE_ABI = [
-  'function submitHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
+  'function submitHXMsgRequest(uint8,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
+  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,uint8 targetChainType,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];
 
 async function queryBalance(account, assetType) {
@@ -30,6 +30,7 @@ async function queryBalance(account, assetType) {
 
 async function main() {
   const profile = chainProfile(SOURCE_PROFILE);
+  const targetProfile = chainProfile('fabric');
   const deployment = profile.deployment;
   const provider = new ethers.JsonRpcProvider(profile.rpc);
   const source = new ethers.Contract(deployment.evmSourceContract, SOURCE_ABI, new ethers.Wallet(profile.privateKey, provider));
@@ -54,12 +55,13 @@ async function main() {
   });
 
   const targetChainID = bytes32FromText('fabric-mychannel');
-  const targetDomainID = bytes32FromText('fabric-local-domain');
+  const targetDomainID = executionDomainID(targetProfile);
   const targetObject = buildFabricTargetObject('mychannel', 'xcall');
   const expireAt = Math.floor(Date.now() / 1000) + 3600;
   const policy = [false, FeedbackType.NONE, 0, ethers.ZeroHash,
     [false, 0, 0, ethers.ZeroHash, ethers.ZeroHash, ethers.ZeroHash, 0]];
   const transaction = await source.submitHXMsgRequest(
+    targetProfile.chainType,
     targetChainID,
     targetDomainID,
     targetObject,

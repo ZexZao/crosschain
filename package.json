@@ -7,7 +7,7 @@
     "node": "hardhat node",
     "compile": "hardhat compile",
     "test": "npm run test:node && npm run test:hardhat",
-    "test:node": "node --test test/avalanche-pchain-trust.test.js",
+    "test:node": "node --test test/avalanche-pchain-trust.test.js test/response-proof-binding.test.js",
     "test:hardhat": "hardhat test test/tee-subnet-cryptographic-isolation.test.js",
     "deploy": "hardhat run scripts/deploy.js --network localhost",
     "deploy:sepolia": "DEPLOYMENT_OUTPUT_FILE=deployment.sepolia.json hardhat run scripts/deploy.js --network sepolia",

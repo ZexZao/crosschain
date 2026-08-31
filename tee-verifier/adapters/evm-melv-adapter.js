@@ -410,10 +410,12 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
   if (Number(event.nonce) !== Number(hxmsg.header.nonce)) throw new Error('EVM event nonce mismatch');
   if (Number(event.expireAt) !== Number(hxmsg.header.deliveryExpireAt)) throw new Error('EVM event expireAt mismatch');
   if (!sameHex(event.targetChainID, hxmsg.target.chainID)) throw new Error('EVM event targetChainID mismatch');
+  if (Number(event.targetChainType) !== Number(hxmsg.target.chainType)) throw new Error('EVM event targetChainType mismatch');
   if (!sameHex(event.targetDomainID, hxmsg.target.domainID)) throw new Error('EVM event targetDomainID mismatch');
   if (!sameHex(event.targetObject, hxmsg.targetAction.targetObject)) throw new Error('EVM event targetObject mismatch');
   if (!sameHex(event.functionSelector, hxmsg.targetAction.functionSelector)) throw new Error('EVM event functionSelector mismatch');
   if (!sameHex(event.callDataHash, hxmsg.targetAction.callDataHash)) throw new Error('EVM event callDataHash mismatch');
+  if (!sameHex(event.receiver, hxmsg.targetAction.receiver)) throw new Error('EVM event receiver mismatch');
   if (!sameHex(event.businessPayloadHash, hxmsg.payloadBinding.businessPayloadHash)) {
     throw new Error('EVM event businessPayloadHash mismatch');
   }
@@ -435,10 +437,14 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
     requestID: event.requestID,
     sender: event.sender,
     sourceContract: ref.sourceContract,
+    targetChainType: event.targetChainType,
     targetChainID: event.targetChainID,
+    targetDomainID: event.targetDomainID,
     targetObject: event.targetObject,
     functionSelector: event.functionSelector,
     callDataHash: event.callDataHash,
+    businessPayloadHash: event.businessPayloadHash,
+    receiver: event.receiver,
     nonce: event.nonce,
     expireAt: event.expireAt,
     feedbackHash: event.feedbackHash,
@@ -449,7 +455,9 @@ async function verifyMelvEf({ hxmsg, helperData = {}, chainState, saveChainState
   }
   const targetExecutionHash = computeTargetExecutionHash({
     requestID: hxmsg.header.requestID,
+    targetChainType: hxmsg.target.chainType,
     targetChainID: hxmsg.target.chainID,
+    targetDomainID: hxmsg.target.domainID,
     targetObject: hxmsg.targetAction.targetObject,
     functionSelector: hxmsg.targetAction.functionSelector,
     callDataHash: hxmsg.targetAction.callDataHash,

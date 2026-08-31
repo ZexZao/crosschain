@@ -1,7 +1,14 @@
 const fs = require('fs-extra');
 const path = require('path');
 const { ethers, network } = require('hardhat');
-const { computeResponseDigest, CommitmentType, AtomicityMode, FeedbackType, ResponseStatus } = require('../shared/hxmsg');
+const {
+  computeResponseDigest,
+  computeFabricExecutionDomainID,
+  CommitmentType,
+  AtomicityMode,
+  FeedbackType,
+  ResponseStatus,
+} = require('../shared/hxmsg');
 const { buildSimulatedAttestationIdentity, evmRegistrationTuple } = require('../shared/tee/attestation');
 const { signCommittedDigest, buildQuorumCertificate } = require('../shared/tee/quorum-certificate');
 const { clusterCertificateTuple } = require('../shared/tee/registration');
@@ -29,8 +36,8 @@ async function submitAtomic(source, params = {}) {
   const latest = await ethers.provider.getBlock('latest');
   const now = Number(latest.timestamp);
   const targetChainID = params.targetChainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel'));
-  const targetDomainID = params.targetDomainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-local-domain'));
   const targetObject = params.targetObject || ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall'));
+  const targetDomainID = params.targetDomainID || computeFabricExecutionDomainID({ chainID: targetChainID, targetObject });
   const selector = params.selector || ethers.id('ExecuteHXMsgCompact(bytes32,bytes)').slice(0, 10);
   const callDataHash = params.callDataHash || ethers.keccak256(ethers.toUtf8Bytes(`call-${Date.now()}-${Math.random()}`));
   const businessPayloadHash = params.businessPayloadHash || ethers.keccak256(ethers.toUtf8Bytes('payload'));
@@ -47,6 +54,7 @@ async function submitAtomic(source, params = {}) {
     params.challengeWindow || 5,
   ];
   const tx = await source.submitHXMsgRequest(
+    params.targetChainType || 2,
     targetChainID,
     targetDomainID,
     targetObject,
@@ -79,8 +87,8 @@ async function submitTokenEscrowAtomic(source, token, owner, params = {}) {
   const latest = await ethers.provider.getBlock('latest');
   const now = Number(latest.timestamp);
   const targetChainID = params.targetChainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel'));
-  const targetDomainID = params.targetDomainID || ethers.keccak256(ethers.toUtf8Bytes('fabric-local-domain'));
   const targetObject = params.targetObject || ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall'));
+  const targetDomainID = params.targetDomainID || computeFabricExecutionDomainID({ chainID: targetChainID, targetObject });
   const selector = params.selector || ethers.id('ExecuteHXMsgCompact(bytes32,bytes)').slice(0, 10);
   const callDataHash = params.callDataHash || ethers.keccak256(ethers.toUtf8Bytes(`token-call-${Date.now()}-${Math.random()}`));
   const businessPayloadHash = params.businessPayloadHash || ethers.keccak256(ethers.toUtf8Bytes('token-payload'));
@@ -97,6 +105,7 @@ async function submitTokenEscrowAtomic(source, token, owner, params = {}) {
     params.challengeWindow || 5,
   ];
   const tx = await source.connect(owner).submitTokenEscrowHXMsgRequest(
+    params.targetChainType || 2,
     targetChainID,
     targetDomainID,
     targetObject,
@@ -355,8 +364,12 @@ async function main() {
     const beforeOwner = await token.balanceOf(deployer.address);
     const beforeSource = await token.balanceOf(await source.getAddress());
     const tx = await source.submitTokenEscrowHXMsgRequest(
+      2,
       ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel')),
-      ethers.keccak256(ethers.toUtf8Bytes('fabric-local-domain')),
+      computeFabricExecutionDomainID({
+        chainID: ethers.keccak256(ethers.toUtf8Bytes('fabric-mychannel')),
+        targetObject: ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall')),
+      }),
       ethers.keccak256(ethers.toUtf8Bytes('fabric:mychannel:xcall')),
       ethers.id('ExecuteHXMsgCompact(bytes32,bytes)').slice(0, 10),
       ethers.keccak256(ethers.toUtf8Bytes('call-token-escrow')),

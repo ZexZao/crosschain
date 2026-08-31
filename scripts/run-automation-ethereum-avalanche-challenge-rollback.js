@@ -13,7 +13,7 @@ const {
   CommitmentType,
 } = require('../shared/hxmsg');
 const { getValidatorSetRef } = require('../automation/shared/adapters/avalanche/proof-builder');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, getWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -187,8 +187,9 @@ async function runDirection(sourceName, targetName) {
   let transaction;
   if (sourceName === 'avalanche') {
     transaction = await source.submitTokenEscrowWarpHXMsgRequest(
+      targetProfile.chainType,
       chainIdToBytes32(targetProfile.deployment.chainId),
-      bytes32FromText(`evm-local-${targetProfile.deployment.chainId}`),
+      executionDomainID(targetProfile),
       targetObject,
       EXECUTE_COMPACT_SELECTOR,
       encoded.payloadHex,
@@ -202,8 +203,9 @@ async function runDirection(sourceName, targetName) {
     );
   } else {
     transaction = await source.submitTokenEscrowHXMsgRequest(
+      targetProfile.chainType,
       chainIdToBytes32(targetProfile.deployment.chainId),
-      bytes32FromText(`${targetName}-local-${targetProfile.deployment.chainId}`),
+      executionDomainID(targetProfile),
       targetObject,
       EXECUTE_COMPACT_SELECTOR,
       encoded.compactCallHash,

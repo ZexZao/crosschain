@@ -59,7 +59,7 @@ async function main() {
   await (await token.mint(deployer.address, amount)).wait();
   await (await token.approve(await source.getAddress(), amount)).wait();
   const tx = await source.submitTokenEscrowHXMsgRequest(
-    ethers.id('fabric-mychannel'), ethers.id('fabric-domain'), ethers.id('xcall'),
+    2, ethers.id('fabric-mychannel'), ethers.id('fabric-domain'), ethers.id('xcall'),
     '0x12345678', ethers.id('call'), ethers.id('business'), ethers.id('receiver'),
     Number(latest.timestamp) + 3600, policy, await token.getAddress(), amount
   );

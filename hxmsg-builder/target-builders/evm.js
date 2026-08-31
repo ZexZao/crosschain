@@ -6,6 +6,7 @@ const {
   chainIdToBytes32,
   addressToBytes32,
   computeTargetExecutionHash,
+  computeEvmExecutionDomainID,
 } = require('../../shared/hxmsg');
 
 const TARGET_EXECUTE_SELECTOR = ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10);
@@ -20,10 +21,20 @@ function buildEvmContractCallTarget({
   receiver,
   chainType = ChainType.EVM,
   domainID,
+  gatewayAddress,
 }) {
   const resolvedTargetObject = targetObject || addressToBytes32(targetAddress);
   const resolvedReceiver = receiver || resolvedTargetObject;
   const targetChainID = chainIdToBytes32(chainId);
+  const computedDomainID = computeEvmExecutionDomainID({
+    chainType,
+    chainID: targetChainID,
+    gatewayAddress,
+  });
+  if (domainID && String(domainID).toLowerCase() !== computedDomainID.toLowerCase()) {
+    throw new Error('target domainID does not bind the configured EVM gateway');
+  }
+  const resolvedDomainID = computedDomainID;
   const targetAction = {
     actionType: ActionType.CONTRACT_CALL,
     targetObject: resolvedTargetObject,
@@ -35,12 +46,14 @@ function buildEvmContractCallTarget({
     target: {
       chainType,
       chainID: targetChainID,
-      domainID: domainID || bytes32FromText(`${chainType === ChainType.AVALANCHE ? 'avalanche' : 'evm'}-local-${chainId}`),
+      domainID: resolvedDomainID,
     },
     targetAction,
     targetExecutionHash: computeTargetExecutionHash({
       requestID,
+      targetChainType: chainType,
       targetChainID,
+      targetDomainID: resolvedDomainID,
       targetObject: resolvedTargetObject,
       functionSelector,
       callDataHash,

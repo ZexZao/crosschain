@@ -13,11 +13,13 @@ interface IWarpMessenger {
 /// @notice Avalanche 源链请求入口。
 /// @dev Warp 权重签名证明源链事实；共享基类处理 RESPONSE、挑战和真实资产补偿。
 contract AvalancheWarpSourceContract is ResponseLifecycleBase {
+    bytes32 private constant TARGET_EXECUTION_HASH_V2 = keccak256("HXMSG_TARGET_EXECUTION_V2");
     IWarpMessenger public constant WARP_MESSENGER =
         IWarpMessenger(0x0200000000000000000000000000000000000005);
 
     struct WarpHXMsgRequest {
         bytes32 requestID;
+        uint8 targetChainType;
         bytes32 targetChainID;
         bytes32 targetDomainID;
         bytes32 targetObject;
@@ -43,6 +45,7 @@ contract AvalancheWarpSourceContract is ResponseLifecycleBase {
         bytes32 indexed requestID,
         bytes32 indexed warpMessageID,
         address indexed sender,
+        uint8 targetChainType,
         bytes32 targetChainID,
         bytes32 targetDomainID,
         bytes32 targetObject,
@@ -60,6 +63,7 @@ contract AvalancheWarpSourceContract is ResponseLifecycleBase {
     constructor(address registry) ResponseLifecycleBase(registry) {}
 
     function submitWarpHXMsgRequest(
+        uint8 targetChainType,
         bytes32 targetChainID,
         bytes32 targetDomainID,
         bytes32 targetObject,
@@ -72,11 +76,12 @@ contract AvalancheWarpSourceContract is ResponseLifecycleBase {
         RequestPolicy calldata policy
     ) external returns (bytes32 requestID, bytes32 warpMessageID) {
         _validatePolicy(policy);
-        return _createWarpRequest(targetChainID, targetDomainID, targetObject, functionSelector, callData,
+        return _createWarpRequest(targetChainType, targetChainID, targetDomainID, targetObject, functionSelector, callData,
             businessPayloadHash, receiver, expireAt, validatorPolicyHash, policy);
     }
 
     function submitTokenEscrowWarpHXMsgRequest(
+        uint8 targetChainType,
         bytes32 targetChainID,
         bytes32 targetDomainID,
         bytes32 targetObject,
@@ -93,12 +98,13 @@ contract AvalancheWarpSourceContract is ResponseLifecycleBase {
         require(policy.atomicity.required, "atomicity required");
         require(policy.atomicity.commitmentType == uint8(CommitmentType.TOKEN_ESCROW), "token escrow required");
         _validatePolicy(policy);
-        (requestID, warpMessageID) = _createWarpRequest(targetChainID, targetDomainID, targetObject,
+        (requestID, warpMessageID) = _createWarpRequest(targetChainType, targetChainID, targetDomainID, targetObject,
             functionSelector, callData, businessPayloadHash, receiver, expireAt, validatorPolicyHash, policy);
         _lockTokenEscrow(requestID, token, msg.sender, amount);
     }
 
     function _createWarpRequest(
+        uint8 targetChainType,
         bytes32 targetChainID,
         bytes32 targetDomainID,
         bytes32 targetObject,
@@ -111,6 +117,8 @@ contract AvalancheWarpSourceContract is ResponseLifecycleBase {
         RequestPolicy calldata policy
     ) internal returns (bytes32 requestID, bytes32 warpMessageID) {
         require(expireAt > block.timestamp, "expired request");
+        require(targetChainType >= 1 && targetChainType <= 3, "bad target chain type");
+        require(targetDomainID != bytes32(0), "bad target domain");
         require(validatorPolicyHash != bytes32(0), "bad validator policy");
         uint64 currentNonce = ++nonce;
         bytes32 callDataHash = keccak256(callData);
@@ -119,20 +127,20 @@ contract AvalancheWarpSourceContract is ResponseLifecycleBase {
         bytes32 atomicityHash = HXMsgLib.hashAtomicity(policy.atomicity);
 
         requestID = keccak256(abi.encode(block.chainid, address(this), msg.sender, currentNonce,
-            targetChainID, targetDomainID, targetObject, functionSelector, callDataHash,
+            targetChainType, targetChainID, targetDomainID, targetObject, functionSelector, callDataHash,
             businessPayloadHash, receiver, expireAt, validatorPolicyHash, feedbackHash, atomicityHash));
-        bytes32 targetExecutionHash = keccak256(abi.encode(requestID, targetChainID, targetObject,
-            functionSelector, callDataHash, receiver));
-        _storeResponseLifecycle(requestID, targetChainID, targetExecutionHash, policy);
+        bytes32 targetExecutionHash = keccak256(abi.encode(TARGET_EXECUTION_HASH_V2, requestID,
+            targetChainType, targetChainID, targetDomainID, targetObject, functionSelector, callDataHash, receiver));
+        _storeResponseLifecycle(requestID, targetChainType, targetChainID, targetExecutionHash, policy);
 
-        bytes memory payload = abi.encode(WarpHXMsgRequest(requestID, targetChainID, targetDomainID, targetObject,
+        bytes memory payload = abi.encode(WarpHXMsgRequest(requestID, targetChainType, targetChainID, targetDomainID, targetObject,
             functionSelector, callDataHash, businessPayloadHash, receiver, currentNonce, expireAt,
             policy.feedbackRequired, policy.expectedFeedbackMsgType, policy.feedbackTimeout,
             policy.callbackRefHash, policy.atomicity, validatorPolicyHash, callData));
         warpMessageID = WARP_MESSENGER.sendWarpMessage(payload);
         requestToWarpMessage[requestID] = warpMessageID;
 
-        emit AvalancheHXMsgWarpRequested(requestID, warpMessageID, msg.sender, targetChainID,
+        emit AvalancheHXMsgWarpRequested(requestID, warpMessageID, msg.sender, targetChainType, targetChainID,
             targetDomainID, targetObject, functionSelector, callDataHash, businessPayloadHash,
             receiver, currentNonce, expireAt, validatorPolicyHash, feedbackHash, atomicityHash);
     }

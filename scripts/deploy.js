@@ -5,10 +5,13 @@ const { writeJSON, ensureRuntime } = require('../shared/utils');
 
 async function main() {
   ensureRuntime();
+  const network = await ethers.provider.getNetwork();
   const [defaultDeployer] = await ethers.getSigners();
-  const deployer = process.env.LOCAL_EVM_PRIVATE_KEY
+  const isLocalNetwork = network.chainId === 31337n || network.chainId === 1337n;
+  const deployer = isLocalNetwork && process.env.LOCAL_EVM_PRIVATE_KEY
     ? new ethers.Wallet(process.env.LOCAL_EVM_PRIVATE_KEY, ethers.provider)
     : defaultDeployer;
+  if (!deployer) throw new Error(`no deployer configured for chain ${network.chainId}`);
 
   const TEERegistry = await ethers.getContractFactory('TEERegistry', deployer);
   const teeRegistry = await TEERegistry.deploy();
@@ -28,6 +31,8 @@ async function main() {
   await target.waitForDeployment();
 
   const deployment = {
+    protocolVersion: 'response-proof-v2',
+    targetExecutionHashVersion: 2,
     deployer: deployer.address,
     evmSourceContract: await source.getAddress(),
     targetContract: await target.getAddress(),
@@ -35,7 +40,8 @@ async function main() {
     initialAssetReserveUnits: initialAssetReserveUnits.toString(),
     teeRegistry: await teeRegistry.getAddress(),
     hxmsgGateway: await hxmsgGateway.getAddress(),
-    chainId: Number((await ethers.provider.getNetwork()).chainId),
+    gatewayExecutionDomainID: await hxmsgGateway.executionDomainID(),
+    chainId: Number(network.chainId),
   };
 
   writeJSON(process.env.DEPLOYMENT_OUTPUT_FILE || 'deployment.json', deployment);

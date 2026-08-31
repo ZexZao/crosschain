@@ -99,6 +99,7 @@ async function verifySourceFact({ hxmsg, helperData, chainState, saveChainState 
   if (Number(warpPayload.nonce) !== Number(hxmsg.header.nonce)) throw new Error('Avalanche nonce mismatch');
   if (Number(warpPayload.expireAt) !== Number(hxmsg.header.expireAt)) throw new Error('Avalanche expireAt mismatch');
   if (!sameHex(warpPayload.targetChainID, hxmsg.target.chainID)) throw new Error('Avalanche targetChainID mismatch');
+  if (Number(warpPayload.targetChainType) !== Number(hxmsg.target.chainType)) throw new Error('Avalanche targetChainType mismatch');
   if (!sameHex(warpPayload.targetDomainID, hxmsg.target.domainID)) throw new Error('Avalanche targetDomainID mismatch');
   if (!sameHex(warpPayload.targetObject, hxmsg.targetAction.targetObject)) throw new Error('Avalanche targetObject mismatch');
   if (!sameHex(warpPayload.functionSelector, hxmsg.targetAction.functionSelector)) throw new Error('Avalanche targetAction mismatch');
@@ -158,7 +159,9 @@ async function verifySourceFact({ hxmsg, helperData, chainState, saveChainState 
 
   const targetExecutionHash = computeTargetExecutionHash({
     requestID: hxmsg.header.requestID,
+    targetChainType: hxmsg.target.chainType,
     targetChainID: hxmsg.target.chainID,
+    targetDomainID: hxmsg.target.domainID,
     targetObject: hxmsg.targetAction.targetObject,
     functionSelector: hxmsg.targetAction.functionSelector,
     callDataHash: hxmsg.targetAction.callDataHash,

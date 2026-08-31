@@ -99,7 +99,15 @@ async function buildAvalancheEvidence({ profile, targetProfile, event, material 
       callDataHash: warpPayload.callDataHash,
       receiver: warpPayload.receiver,
       chainType: targetProfile.chainType,
+      gatewayAddress: targetProfile.deployment.hxmsgGateway,
     });
+  if (Number(warpPayload.targetChainType) !== Number(targetPart.target.chainType)) {
+    throw new Error('Avalanche Warp targetChainType does not match resolved target');
+  }
+  if (String(warpPayload.targetChainID).toLowerCase() !== String(targetPart.target.chainID).toLowerCase()
+      || String(warpPayload.targetDomainID).toLowerCase() !== String(targetPart.target.domainID).toLowerCase()) {
+    throw new Error('Avalanche Warp target execution domain does not match resolved target');
+  }
   const sourceProof = {
     proofType: 'AvalancheWarpMessage',
     warpMessageID: event.payload.warpMessageID,

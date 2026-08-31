@@ -1,7 +1,7 @@
 const { ethers } = require('ethers');
 const { EvmLogScanner } = require('../evm/scanner-base');
 
-const EVENT = 'event AvalancheHXMsgWarpRequested(bytes32 indexed requestID,bytes32 indexed warpMessageID,address indexed sender,bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bytes32 validatorPolicyHash,bytes32 feedbackHash,bytes32 atomicityHash)';
+const EVENT = 'event AvalancheHXMsgWarpRequested(bytes32 indexed requestID,bytes32 indexed warpMessageID,address indexed sender,uint8 targetChainType,bytes32 targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bytes32 validatorPolicyHash,bytes32 feedbackHash,bytes32 atomicityHash)';
 const iface = new ethers.Interface([EVENT]);
 const topic = iface.getEvent('AvalancheHXMsgWarpRequested').topicHash;
 
@@ -11,6 +11,7 @@ function parseAvalancheLog(log) {
     requestID: args.requestID,
     warpMessageID: args.warpMessageID,
     sender: args.sender,
+    targetChainType: Number(args.targetChainType),
     targetChainID: args.targetChainID,
     targetDomainID: args.targetDomainID,
     targetObject: args.targetObject,

@@ -14,7 +14,7 @@ const {
 const { TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { FABRIC_INVOKE_SELECTOR, buildFabricTargetObject } = require('../hxmsg-builder/evm-to-fabric');
 const { connectFabric } = require('../automation/fabric-client');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, waitForWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -24,8 +24,8 @@ const COUNT = Number(process.env.AUTOMATION_BATCH_EXPERIMENT_SIZE || 8);
 const AUTOMATION_URL = String(process.env.AUTOMATION_URL || 'http://127.0.0.1:9200').replace(/\/$/, '');
 const LOCAL_KEY = process.env.LOCAL_EVM_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const SOURCE_ABI = [
-  'function submitHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
+  'function submitHXMsgRequest(uint8,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
+  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,uint8 targetChainType,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];
 
 function authHeaders() {
@@ -76,11 +76,13 @@ async function fabricBalance(contract, account) {
 async function runFabricToEthereum({ mode, payloadFactory }) {
   const runID = `${mode}-${Date.now()}`;
   const groupID = `fabric-ethereum-${runID}`;
+  const ethereumProfile = chainProfile('ethereum');
   const deployment = fs.readJsonSync(path.join(ROOT, 'runtime', 'deployment.json'));
   const provider = new ethers.JsonRpcProvider(process.env.EVM_RPC || 'http://127.0.0.1:8545');
   const token = new ethers.Contract(deployment.settlementToken, ['function balanceOf(address) view returns (uint256)'], provider);
   const balanceBefore = await token.balanceOf(deployment.deployer);
-  const fabric = await connectFabric(chainProfile('fabric'));
+  const fabricProfile = chainProfile('fabric');
+  const fabric = await connectFabric(fabricProfile);
   const sources = [];
   try {
     for (let index = 0; index < COUNT; index += 1) {
@@ -97,8 +99,9 @@ async function runFabricToEthereum({ mode, payloadFactory }) {
       });
       const sourcePayload = {
         businessPayload: payload,
-        targetChainType: 'EVM',
+        targetChainType: ethereumProfile.chainType,
         targetChainID: chainIdToBytes32(deployment.chainId),
+        targetDomainID: executionDomainID(ethereumProfile),
         targetObject: addressToBytes32(deployment.targetContract),
         functionSelector: TARGET_EXECUTE_SELECTOR,
         callDataHash: encoded.compactCallHash,
@@ -186,8 +189,9 @@ async function runEthereumToFabric({ mode, payloadFactory }) {
       ...batchMetadata(groupID, index),
     });
     const transaction = await source.submitHXMsgRequest(
+      fabricProfile.chainType,
       targetChainID,
-      bytes32FromText('fabric-local-domain'),
+      executionDomainID(fabricProfile),
       targetObject,
       FABRIC_INVOKE_SELECTOR,
       encoded.compactCallHash,

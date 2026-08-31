@@ -56,8 +56,10 @@ function buildHXMsgFromEvmReceiptToEvm({
     callDataHash,
     receiver: ethers.zeroPadValue(targetDeployment.targetContract, 32),
     chainType: targetChainType,
+    gatewayAddress: targetDeployment.hxmsgGateway,
   });
   if (parsed.targetChainID !== targetPart.target.chainID) throw new Error('event targetChainID mismatch');
+  if (parsed.targetChainType !== targetPart.target.chainType) throw new Error('event targetChainType mismatch');
   if (parsed.targetDomainID !== targetPart.target.domainID) throw new Error('event targetDomainID mismatch');
   if (parsed.targetObject !== targetPart.targetAction.targetObject) throw new Error('event targetObject mismatch');
   if (parsed.functionSelector !== targetPart.targetAction.functionSelector) throw new Error('event functionSelector mismatch');

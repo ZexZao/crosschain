@@ -20,9 +20,12 @@ function sourceContractAddress(profile, payload = {}) {
 
 async function handleResponse(payload) {
   const originHxmsg = payload.helperData?.originHxmsg;
-  const sourceChainType = Number(payload.targetChainType ?? originHxmsg?.target?.chainType);
+  const sourceChainType = Number(originHxmsg?.target?.chainType);
   const sourceChainID = originHxmsg?.target?.chainID;
   if (!sourceChainType || !sourceChainID) throw new Error('response source-chain security domain is required');
+  if (payload.targetChainType !== undefined && Number(payload.targetChainType) !== sourceChainType) {
+    throw new Error('response targetChainType override does not match origin h-xmsg');
+  }
   const urls = teeURLs(sourceChainType);
   const attested = await postToTEELeader(urls, '/attest-response', {
     response: payload.response,

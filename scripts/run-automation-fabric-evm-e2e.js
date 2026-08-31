@@ -6,7 +6,7 @@ const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const { addressToBytes32, chainIdToBytes32, hashJson } = require('../shared/hxmsg');
 const { TARGET_EXECUTE_SELECTOR } = require('../hxmsg-builder/fabric-to-evm');
 const { connectFabric } = require('../automation/fabric-client');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, waitForWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -43,8 +43,9 @@ async function main() {
   try {
     const sourcePayload = {
       businessPayload: payload,
-      targetChainType: 'EVM',
+      targetChainType: targetProfile.chainType,
       targetChainID: chainIdToBytes32(targetDeployment.chainId),
+      targetDomainID: executionDomainID(targetProfile),
       targetObject: addressToBytes32(targetDeployment.targetContract),
       functionSelector: TARGET_EXECUTE_SELECTOR,
       callDataHash: encoded.compactCallHash,

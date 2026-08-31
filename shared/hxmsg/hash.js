@@ -1,6 +1,7 @@
 const { ethers } = require('ethers');
 const { stableStringify } = require('./codec');
 const { toCanonicalHXMsg } = require('./canonical');
+const { TARGET_EXECUTION_HASH_V2 } = require('./target-domain');
 
 function normalizeFeedback(feedback = {}) {
   feedback = feedback || {};
@@ -66,11 +67,21 @@ function hashBytes(bytesLike) {
   return ethers.keccak256(bytesLike);
 }
 
-function computeTargetExecutionHash({ requestID, targetChainID, targetObject, functionSelector, callDataHash, receiver }) {
+function computeTargetExecutionHash({
+  requestID,
+  targetChainType,
+  targetChainID,
+  targetDomainID,
+  targetObject,
+  functionSelector,
+  callDataHash,
+  receiver,
+}) {
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
-      [requestID, targetChainID, targetObject, functionSelector, callDataHash, receiver]
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32'],
+      [TARGET_EXECUTION_HASH_V2, requestID, Number(targetChainType), targetChainID, targetDomainID,
+        targetObject, functionSelector, callDataHash, receiver]
     )
   );
 }
@@ -169,7 +180,9 @@ function toMinimalHXMsg(hxmsg) {
   const feedback = normalizeFeedback(hxmsg.feedback);
   const targetExecutionHash = computeTargetExecutionHash({
     requestID: hxmsg.header.requestID,
+    targetChainType: hxmsg.target.chainType,
     targetChainID: hxmsg.target.chainID,
+    targetDomainID: hxmsg.target.domainID,
     targetObject: hxmsg.targetAction.targetObject,
     functionSelector: hxmsg.targetAction.functionSelector,
     callDataHash: hxmsg.targetAction.callDataHash,
@@ -196,6 +209,7 @@ function toMinimalHXMsg(hxmsg) {
     hxmsg.header.nonce,
     hxmsg.source.chainType,
     hxmsg.source.chainID,
+    hxmsg.target.domainID,
   ];
 }
 
@@ -219,8 +233,8 @@ function computeHXMsgDeliveryDigest(hxmsg) {
   const minimal = Array.isArray(hxmsg) ? hxmsg : toMinimalHXMsg(hxmsg);
   const chainHash = ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8', 'bytes32', 'uint8'],
-      [minimal[0], minimal[1], minimal[17], minimal[18], minimal[2], minimal[3], minimal[4]]
+      ['bytes32', 'bytes32', 'uint8', 'bytes32', 'uint8', 'bytes32', 'bytes32', 'uint8'],
+      [minimal[0], minimal[1], minimal[17], minimal[18], minimal[2], minimal[3], minimal[19], minimal[4]]
     )
   );
   const actionHash = ethers.keccak256(
@@ -254,7 +268,9 @@ function toOnChainHXMsg(hxmsg) {
   const feedback = normalizeFeedback(hxmsg.feedback);
   const targetExecutionHash = computeTargetExecutionHash({
     requestID: hxmsg.header.requestID,
+    targetChainType: hxmsg.target.chainType,
     targetChainID: hxmsg.target.chainID,
+    targetDomainID: hxmsg.target.domainID,
     targetObject: hxmsg.targetAction.targetObject,
     functionSelector: hxmsg.targetAction.functionSelector,
     callDataHash: hxmsg.targetAction.callDataHash,

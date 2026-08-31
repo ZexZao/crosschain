@@ -12,12 +12,13 @@ const {
   FeedbackType,
   AtomicityMode,
   CommitmentType,
+  findHXMsgAcceptedLog,
 } = require('../shared/hxmsg');
 const { buildReceiptProof } = require('../shared/evm/receipt-proof');
 const { buildCommitteeHeaderUpdate } = require('../shared/evm/header-committee');
 const { buildEvmExecutionProofRef, buildExecutedResponse } = require('../hxmsg-builder/response');
 const { getValidatorSetRef } = require('../automation/shared/adapters/avalanche/proof-builder');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 const { publishSourceMaterial, getMaterial, waitForWorkflow } = require('../automation/client');
 
 loadDotEnv();
@@ -26,10 +27,10 @@ const ROOT = path.join(__dirname, '..');
 const COUNT = Number(process.env.AUTOMATION_ATOMIC_BATCH_SIZE || 8);
 const AUTOMATION_URL = String(process.env.AUTOMATION_URL || 'http://127.0.0.1:9200').replace(/\/$/, '');
 const SOURCE_ABI = [
-  'function submitTokenEscrowHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64)),address,uint256) external returns (bytes32)',
-  'function requests(bytes32) view returns (bytes32 targetChainID,bytes32 targetExecutionHash,bytes32 failureActionHash,uint64 feedbackTimeout,uint64 challengeWindow,uint64 challengeDeadline,uint8 commitmentType,uint8 status,bytes32 responseDigest)',
+  'function submitTokenEscrowHXMsgRequest(uint8,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64)),address,uint256) external returns (bytes32)',
+  'function requests(bytes32) view returns (uint8 targetChainType,bytes32 targetChainID,bytes32 targetExecutionHash,bytes32 failureActionHash,uint64 feedbackTimeout,uint64 challengeWindow,uint64 challengeDeadline,uint8 commitmentType,uint8 status,bytes32 responseDigest)',
   'function tokenEscrows(bytes32) view returns (address token,address owner,uint256 amount,bool refunded,bool settled)',
-  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
+  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,uint8 targetChainType,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];
 const TOKEN_ABI = [
   'function approve(address,uint256) returns (bool)',
@@ -215,8 +216,9 @@ async function runDirection(sourceName, targetName) {
     let transaction;
     if (sourceName === 'avalanche') {
       transaction = await source.submitTokenEscrowWarpHXMsgRequest(
+        targetProfile.chainType,
         chainIdToBytes32(targetProfile.deployment.chainId),
-        bytes32FromText(`evm-local-${targetProfile.deployment.chainId}`),
+        executionDomainID(targetProfile),
         targetObject,
         EXECUTE_COMPACT_SELECTOR,
         entry.encoded.payloadHex,
@@ -230,8 +232,9 @@ async function runDirection(sourceName, targetName) {
       );
     } else {
       transaction = await source.submitTokenEscrowHXMsgRequest(
+        targetProfile.chainType,
         chainIdToBytes32(targetProfile.deployment.chainId),
-        bytes32FromText(`${targetName}-local-${targetProfile.deployment.chainId}`),
+        executionDomainID(targetProfile),
         targetObject,
         EXECUTE_COMPACT_SELECTOR,
         entry.encoded.compactCallHash,
@@ -284,16 +287,20 @@ async function runDirection(sourceName, targetName) {
     const evidence = await getMaterial(workflow.evidenceKey);
     if (!evidence?.hxmsg) throw new Error(`missing verified h-xmsg evidence: ${workflow.requestID}`);
     const delivery = evidence.hxmsg.deliveryMessage || buildDeliveryMessage(evidence.hxmsg);
+    const { accepted } = findHXMsgAcceptedLog({
+      receipt: targetReceipt,
+      gatewayAddress: targetProfile.deployment.hxmsgGateway,
+      requestID: workflow.requestID,
+    });
     const response = buildExecutedResponse({
       originRequestID: workflow.requestID,
       originHmsgDigest: evidence.hxmsg.hmsgDigest,
       targetExecutionHash: delivery.targetExecutionHash,
-      targetProofRefHash: buildEvmExecutionProofRef(targetReceipt),
-      responsePayload: {
-        targetTransactionHash: targetReceipt.hash,
-        batchIndex: index,
-        status: 'executed',
-      },
+      targetProofRefHash: buildEvmExecutionProofRef(targetReceipt, {
+        originHxmsg: evidence.hxmsg,
+        gatewayAddress: targetProfile.deployment.hxmsgGateway,
+      }),
+      responsePayloadHash: accepted.resultHash,
     });
     const { data: task } = await axios.post(`${AUTOMATION_URL}/v1/jobs/response`, {
       requestID: workflow.requestID,
@@ -305,8 +312,8 @@ async function runDirection(sourceName, targetName) {
       helperData: {
         originHxmsg: evidence.hxmsg,
         evmExecutionReceipt: targetProof,
+        targetGatewayAddress: targetProfile.deployment.hxmsgGateway,
         committeeHeaderUpdate,
-        evmChainID: targetChainID,
         evmRpc: targetTeeRpc(targetName),
       },
     }, {

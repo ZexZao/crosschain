@@ -92,6 +92,21 @@ function buildDefaultFabricHFsvPolicy({ channelID, chaincodeName, projectRoot })
   });
 }
 
+function buildDefaultFabricResponseHFsvPolicy({ channelID, chaincodeName, projectRoot }) {
+  const requiredOrgs = parseCsvEnv('HFSV_REQUIRED_ORGS', ['Org1MSP']);
+  const rule = process.env.HFSV_POLICY_RULE || 'AND';
+  return buildFabricHFsvPolicy({
+    securityDomain: process.env.HFSV_SECURITY_DOMAIN || 'fabric-local-domain',
+    channelID,
+    chaincodeName,
+    requiredOrgs,
+    rule,
+    threshold: process.env.HFSV_POLICY_THRESHOLD,
+    allowedQueryFunctions: ['GetInboundStatus'],
+    projectRoot,
+  });
+}
+
 function buildFabricHFsvPolicyHash(policyArgs) {
   return hashJson(buildFabricHFsvPolicy(policyArgs));
 }
@@ -99,6 +114,7 @@ function buildFabricHFsvPolicyHash(policyArgs) {
 module.exports = {
   buildFabricHFsvPolicy,
   buildDefaultFabricHFsvPolicy,
+  buildDefaultFabricResponseHFsvPolicy,
   buildFabricHFsvPolicyHash,
   normalizePem,
   sha256Text,

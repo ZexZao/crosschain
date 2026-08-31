@@ -16,8 +16,8 @@ const {
   normalizeFeedback,
 } = require('../../shared/hxmsg');
 
-const CROSS_CHAIN_CALL_EVENT = 'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)';
-const CROSS_CHAIN_CALL_TOPIC = ethers.id('CrossChainCallRequested(bytes32,address,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,uint64,bool,uint8,uint64,bytes32,bytes32)');
+const CROSS_CHAIN_CALL_EVENT = 'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,uint8 targetChainType,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)';
+const CROSS_CHAIN_CALL_TOPIC = ethers.id('CrossChainCallRequested(bytes32,address,bytes32,uint8,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,uint64,bool,uint8,uint64,bytes32,bytes32)');
 
 function buildEvmEventRef({
   txHash,
@@ -50,15 +50,20 @@ function buildEvmEventRefHash(ref) {
 function buildEvmSourcePayloadHash(record) {
   return ethers.keccak256(
     ethers.AbiCoder.defaultAbiCoder().encode(
-      ['bytes32', 'address', 'address', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'uint64', 'uint64', 'bytes32', 'bytes32'],
+      ['bytes32', 'address', 'address', 'uint8', 'bytes32', 'bytes32', 'bytes32', 'bytes4', 'bytes32', 'bytes32',
+        'bytes32', 'uint64', 'uint64', 'bytes32', 'bytes32'],
       [
         record.requestID,
         record.sender,
         record.sourceContract,
+        Number(record.targetChainType),
         record.targetChainID,
+        record.targetDomainID,
         record.targetObject,
         record.functionSelector,
         record.callDataHash,
+        record.businessPayloadHash,
+        record.receiver,
         record.nonce,
         record.expireAt,
         record.feedbackHash,
@@ -74,6 +79,7 @@ function parseCrossChainCallLog(log) {
   return {
     requestID: parsed.args.requestID,
     sender: ethers.getAddress(parsed.args.sender),
+    targetChainType: Number(parsed.args.targetChainType),
     targetChainID: parsed.args.targetChainID,
     targetDomainID: parsed.args.targetDomainID,
     targetObject: parsed.args.targetObject,
@@ -133,10 +139,14 @@ function buildEvmSourceFact({
     requestID: parsed.requestID,
     sender: parsed.sender,
     sourceContract: ethers.getAddress(sourceContract),
+    targetChainType: target.chainType,
     targetChainID: target.chainID,
+    targetDomainID: target.domainID,
     targetObject: targetAction.targetObject,
     functionSelector: targetAction.functionSelector,
     callDataHash: targetAction.callDataHash,
+    businessPayloadHash: parsed.businessPayloadHash,
+    receiver: targetAction.receiver,
     nonce: parsed.nonce,
     expireAt: parsed.expireAt,
     feedbackHash: parsed.feedbackHash,

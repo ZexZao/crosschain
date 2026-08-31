@@ -6,15 +6,15 @@ const { loadDotEnv } = require('../shared/env');
 const { encodeCompactBusinessCall } = require('../shared/xmsg');
 const { chainIdToBytes32, bytes32FromText, hashJson, FeedbackType } = require('../shared/hxmsg');
 const { publishSourceMaterial, waitForWorkflow } = require('../automation/client');
-const { chainProfile } = require('../automation/config');
+const { chainProfile, executionDomainID } = require('../automation/config');
 
 loadDotEnv();
 
 const ROOT = path.join(__dirname, '..');
 const AUTOMATION_URL = String(process.env.AUTOMATION_URL || 'http://127.0.0.1:9200').replace(/\/$/, '');
 const SOURCE_ABI = [
-  'function submitHXMsgRequest(bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
-  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
+  'function submitHXMsgRequest(uint8,bytes32,bytes32,bytes32,bytes4,bytes32,bytes32,bytes32,uint64,(bool,uint8,uint64,bytes32,(bool,uint8,uint8,bytes32,bytes32,bytes32,uint64))) external returns (bytes32)',
+  'event CrossChainCallRequested(bytes32 indexed requestID,address indexed sender,bytes32 indexed targetChainID,uint8 targetChainType,bytes32 targetDomainID,bytes32 targetObject,bytes4 functionSelector,bytes32 callDataHash,bytes32 businessPayloadHash,bytes32 receiver,uint64 nonce,uint64 expireAt,bool feedbackRequired,uint8 expectedFeedbackMsgType,uint64 feedbackTimeout,bytes32 callbackRefHash,bytes32 atomicityHash)',
 ];
 const TARGET_ABI = [
   'function oracleService() view returns (address)',
@@ -73,8 +73,9 @@ async function main() {
   const policy = [false, FeedbackType.NONE, 0, ethers.ZeroHash,
     [false, 0, 0, ethers.ZeroHash, ethers.ZeroHash, ethers.ZeroHash, 0]];
   const transaction = await source.submitHXMsgRequest(
+    targetProfile.chainType,
     chainIdToBytes32(targetProfile.deployment.chainId),
-    bytes32FromText(`avalanche-local-${targetProfile.deployment.chainId}`),
+    executionDomainID(targetProfile),
     targetObject,
     ethers.id('executeCompact(bytes32,(uint16,bytes32,bytes32,address,int256,bytes32,bool))').slice(0, 10),
     encoded.compactCallHash,
